@@ -4,12 +4,14 @@ import { matrix }  from './tabs/matrix.js';
 import { perfile } from './tabs/perfile.js';
 import { details } from './tabs/details.js';
 import { issues }  from './tabs/issues.js';
+import { accepted } from './tabs/accepted.js';
 import { snippet } from './tabs/snippet.js';
 import { session } from './tabs/session.js';
 import { status }  from './tabs/status.js';
 import { openOllamaSettingsModal } from './ollama.js';
 
-const TABS = [summary, matrix, perfile, details, issues, snippet, session, status];
+// ВОТ ЗДЕСЬ БЫЛ ПРОПУЩЕН accepted — теперь он добавлен
+const TABS = [summary, matrix, perfile, details, issues, accepted, snippet, session, status];
 const TAB_BY_ID = Object.fromEntries(TABS.map(t => [t.id, t]));
 
 const state = {

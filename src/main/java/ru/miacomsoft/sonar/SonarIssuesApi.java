@@ -34,7 +34,15 @@ public class SonarIssuesApi {
         return URLEncoder.encode(s, StandardCharsets.UTF_8);
     }
 
+    // ==================== buildQuery ====================
+
+    /** Базовый buildQuery — сохраняет прежнее поведение (OPEN+CONFIRMED). */
     private String buildQuery(String impactSeverity, String quality) {
+        return buildQueryWithStatuses("CONFIRMED,OPEN", impactSeverity, quality);
+    }
+
+    /** Универсальный построитель запроса с произвольным issueStatuses. */
+    private String buildQueryWithStatuses(String statuses, String impactSeverity, String quality) {
         StringBuilder q = new StringBuilder();
         q.append("components=").append(enc(projectKey));
         q.append("&s=").append(enc("FILE_LINE"));
@@ -44,24 +52,46 @@ public class SonarIssuesApi {
         if (quality != null && !"ALL".equals(quality)) {
             q.append("&impactSoftwareQualities=").append(enc(quality));
         }
-        q.append("&issueStatuses=").append(enc("CONFIRMED,OPEN"));
+        String st = (statuses == null || statuses.isEmpty()) ? "CONFIRMED,OPEN" : statuses;
+        q.append("&issueStatuses=").append(enc(st));
         q.append("&additionalFields=").append(enc("_all"));
         q.append("&timeZone=").append(enc("Asia/Novosibirsk"));
         return q.toString();
     }
 
+    // ==================== count ====================
+
     public int count(String impactSeverity, String quality) throws Exception {
-        String url = "/api/issues/search?" + buildQuery(impactSeverity, quality) + "&ps=1";
+        return countWithStatuses("CONFIRMED,OPEN", impactSeverity, quality);
+    }
+
+    public int countWithStatuses(String statuses, String impactSeverity, String quality)
+            throws Exception {
+        String url = "/api/issues/search?"
+                + buildQueryWithStatuses(statuses, impactSeverity, quality) + "&ps=1";
         JSONObject root = new JSONObject(client.get(url));
         return root.getInt("total");
     }
 
+    // ==================== fetchAll ====================
+
     public List<Issue> fetchAll(String impactSeverity, String quality) throws Exception {
+        return fetchAllByStatuses("CONFIRMED,OPEN", impactSeverity, quality);
+    }
+
+    /** Обработанные (accepted) issues. */
+    public List<Issue> fetchAccepted(String impactSeverity, String quality) throws Exception {
+        return fetchAllByStatuses("ACCEPTED", impactSeverity, quality);
+    }
+
+    public List<Issue> fetchAllByStatuses(String statuses, String impactSeverity, String quality)
+            throws Exception {
         List<Issue> out = new ArrayList<>();
         int page = 1, pageSize = 500, total = -1;
 
         while (total < 0 || out.size() < total) {
-            String url = "/api/issues/search?" + buildQuery(impactSeverity, quality)
+            String url = "/api/issues/search?"
+                    + buildQueryWithStatuses(statuses, impactSeverity, quality)
                     + "&ps=" + pageSize + "&p=" + page;
             JSONObject root = new JSONObject(client.get(url));
             total = root.getInt("total");
@@ -76,9 +106,18 @@ public class SonarIssuesApi {
         return out;
     }
 
+    // ==================== facet ====================
+
     public Map<String, Integer> facet(String impactSeverity, String quality, String facetName)
             throws Exception {
-        String url = "/api/issues/search?" + buildQuery(impactSeverity, quality)
+        return facetWithStatuses("CONFIRMED,OPEN", impactSeverity, quality, facetName);
+    }
+
+    public Map<String, Integer> facetWithStatuses(String statuses, String impactSeverity,
+                                                  String quality, String facetName)
+            throws Exception {
+        String url = "/api/issues/search?"
+                + buildQueryWithStatuses(statuses, impactSeverity, quality)
                 + "&ps=1&facets=" + enc(facetName);
         JSONObject root = new JSONObject(client.get(url));
         JSONArray facets = root.getJSONArray("facets");
@@ -97,9 +136,52 @@ public class SonarIssuesApi {
         return result;
     }
 
+    /** Несколько фасетов за один HTTP-запрос: property -> (val -> count). */
+    public Map<String, Map<String, Integer>> facetsWithStatuses(String statuses,
+                                                                String impactSeverity,
+                                                                String quality,
+                                                                String[] facetNames)
+            throws Exception {
+        if (facetNames == null || facetNames.length == 0) return Map.of();
+        StringBuilder fs = new StringBuilder();
+        for (String f : facetNames) {
+            if (fs.length() > 0) fs.append(",");
+            fs.append(f);
+        }
+        String url = "/api/issues/search?"
+                + buildQueryWithStatuses(statuses, impactSeverity, quality)
+                + "&ps=1&facets=" + enc(fs.toString());
+        JSONObject root = new JSONObject(client.get(url));
+        JSONArray facets = root.getJSONArray("facets");
+
+        Map<String, Map<String, Integer>> result = new LinkedHashMap<>();
+        for (int i = 0; i < facets.length(); i++) {
+            JSONObject f = facets.getJSONObject(i);
+            String property = f.optString("property", "");
+            if (property.isEmpty()) continue;
+            Map<String, Integer> values = new LinkedHashMap<>();
+            JSONArray vals = f.getJSONArray("values");
+            for (int j = 0; j < vals.length(); j++) {
+                JSONObject v = vals.getJSONObject(j);
+                int c = v.getInt("count");
+                if (c > 0) values.put(v.getString("val"), c);
+            }
+            result.put(property, values);
+        }
+        return result;
+    }
+
+    // ==================== issuesByFile ====================
+
     public Map<String, List<Issue>> issuesByFile(String impactSeverity, String quality)
             throws Exception {
-        List<Issue> all = fetchAll(impactSeverity, quality);
+        return issuesByFileByStatuses("CONFIRMED,OPEN", impactSeverity, quality);
+    }
+
+    public Map<String, List<Issue>> issuesByFileByStatuses(String statuses,
+                                                           String impactSeverity,
+                                                           String quality) throws Exception {
+        List<Issue> all = fetchAllByStatuses(statuses, impactSeverity, quality);
         Map<String, List<Issue>> byFile = new TreeMap<>();
         for (Issue it : all) {
             byFile.computeIfAbsent(it.component, k -> new ArrayList<>()).add(it);
@@ -109,6 +191,8 @@ public class SonarIssuesApi {
         }
         return byFile;
     }
+
+    // ==================== existing ====================
 
     public Issue fetchIssue(String issueKey) throws Exception {
         String url = "/api/issues/search?issues=" + enc(issueKey)
@@ -136,14 +220,12 @@ public class SonarIssuesApi {
             return snippetCache.get(issueKey);
         }
 
-        // 1. Получаем Issue, чтобы узнать точные координаты ошибки (textRange)
         Issue issue = fetchIssue(issueKey);
         if (issue == null) {
             snippetCache.put(issueKey, Collections.emptyList());
             return Collections.emptyList();
         }
 
-        // 2. Получаем исходный код
         String url = "/api/sources/issue_snippets?issueKey=" + enc(issueKey);
         String json = client.get(url);
         JSONObject root = new JSONObject(json);
@@ -162,12 +244,10 @@ public class SonarIssuesApi {
             int lineNum = src.getInt("line");
             String code = src.optString("code");
 
-            // 3. Внедряем теги <mark> в сырой HTML на основе координат
             if (issue.textRange != null) {
                 code = applyHighlight(code, lineNum, issue.textRange);
             }
 
-            // 4. Очищаем от HTML и меняем <mark> на маркеры §HL_START§
             code = cleanHtml(code);
             lines.add(String.format("%4d | %s", lineNum, code));
         }
@@ -175,10 +255,12 @@ public class SonarIssuesApi {
         return lines;
     }
 
-    /**
-     * Вставляет теги <mark class="sonar-issue-mark"> в HTML-код на основе textRange.
-     * Учитывает HTML-теги и сущности (например, &gt;), чтобы правильно считать видимые символы.
-     */
+    public void invalidateIssue(String issueKey) {
+        snippetCache.remove(issueKey);
+    }
+
+    // ==================== highlight / clean ====================
+
     private String applyHighlight(String html, int lineNum, Issue.TextRange range) {
         if (range == null) return html;
         if (lineNum < range.startLine || lineNum > range.endLine) return html;
@@ -196,21 +278,19 @@ public class SonarIssuesApi {
         for (int i = 0; i < html.length(); i++) {
             char c = html.charAt(i);
 
-            // Пропускаем HTML-теги
             if (c == '<') {
                 int endTag = html.indexOf('>', i);
                 if (endTag != -1) {
-                    sb.append(html.substring(i, endTag + 1));
+                    sb.append(html, i, endTag + 1);
                     i = endTag;
                     continue;
                 }
             }
 
-            // Пропускаем HTML-сущности (но считаем их за 1 видимый символ)
             if (c == '&') {
                 int endEntity = html.indexOf(';', i);
                 if (endEntity != -1 && endEntity - i < 10) {
-                    sb.append(html.substring(i, endEntity + 1));
+                    sb.append(html, i, endEntity + 1);
                     i = endEntity;
                     visibleCount++;
                     if (lineNum == range.endLine && visibleCount == range.endOffset && !endInserted) {
@@ -221,7 +301,6 @@ public class SonarIssuesApi {
                 }
             }
 
-            // Вставляем начало выделения
             if (lineNum == range.startLine && visibleCount == range.startOffset && !startInserted) {
                 sb.append("<mark class=\"sonar-issue-mark\">");
                 startInserted = true;
@@ -230,14 +309,12 @@ public class SonarIssuesApi {
             sb.append(c);
             visibleCount++;
 
-            // Вставляем конец выделения
             if (lineNum == range.endLine && visibleCount == range.endOffset && !endInserted) {
                 sb.append("</mark>");
                 endInserted = true;
             }
         }
 
-        // Обработка краевых случаев (например, если ошибка до конца строки)
         if (lineNum == range.startLine && !startInserted) {
             sb.insert(0, "<mark class=\"sonar-issue-mark\">");
         }
@@ -250,17 +327,9 @@ public class SonarIssuesApi {
         return sb.toString();
     }
 
-    public void invalidateIssue(String issueKey) {
-        snippetCache.remove(issueKey);
-    }
-
-    /**
-     * Извлекает <mark> в наши спец-маркеры и удаляет остальной HTML.
-     */
     private String cleanHtml(String html) {
         if (html == null) return "";
 
-        // Ищем наши теги <mark> (сгенерированные методом applyHighlight)
         Pattern pattern = Pattern.compile(
                 "<mark class=\"sonar-issue-mark\">(.*?)</mark>",
                 Pattern.DOTALL
@@ -270,16 +339,13 @@ public class SonarIssuesApi {
 
         while (matcher.find()) {
             String content = matcher.group(1);
-            // QuoteReplacement экранирует символы $, чтобы не ломать регулярку
-            matcher.appendReplacement(sb, "§HL_START§" + Matcher.quoteReplacement(content) + "§HL_END§");
+            matcher.appendReplacement(sb,
+                    "§HL_START§" + Matcher.quoteReplacement(content) + "§HL_END§");
         }
         matcher.appendTail(sb);
         String res = sb.toString();
 
-        // Удаляем оставшиеся HTML-теги (подсветка синтаксиса)
         res = res.replaceAll("<[^>]+>", "");
-
-        // Декодируем HTML-сущности
         return res.replace("&gt;", ">")
                 .replace("&lt;", "<")
                 .replace("&amp;", "&")

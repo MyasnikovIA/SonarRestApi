@@ -437,3 +437,19 @@ mark.sonar-issue-mark {
     color: var(--text-dim);
     text-align: right;
 }
+
+/* ========= facet chips (вкладка Accepted) ========= */
+.facet-chip {
+    transition: background .15s, border-color .15s, color .15s;
+}
+.facet-chip:hover {
+    background: var(--border) !important;
+}
+.facet-chip.active {
+    background: var(--accent2) !important;
+    border-color: var(--accent2) !important;
+    color: #fff !important;
+}
+.facet-chip.active b {
+    color: #fff !important;
+}

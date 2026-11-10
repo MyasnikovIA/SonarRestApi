@@ -8,7 +8,6 @@ import java.util.List;
 
 public class Issue {
 
-    /** Один «impact» — пара (softwareQuality, severity) из SonarQube 10.x. */
     public static class Impact {
         public String softwareQuality;
         public String severity;
@@ -20,7 +19,6 @@ public class Issue {
         }
     }
 
-    /** Координаты ошибки в файле для подсветки */
     public static class TextRange {
         public int startLine;
         public int endLine;
@@ -31,14 +29,16 @@ public class Issue {
     public String key;
     public String rule;
     public String ruleName;
-    public String severity;         // MAJOR/MINOR/CRITICAL (легаси)
-    public String impactSeverity;   // первый/худший impact (для обратной совместимости)
-    public String component;        // путь без префикса проекта
+    public String severity;
+    public String impactSeverity;
+    public String component;
     public int line;
     public String message;
-    public String status;
+    public String status;           // OPEN / RESOLVED / CLOSED / REOPENED / CONFIRMED
+    public String resolution;       // FIXED / FALSE_POSITIVE / WONTFIX / ...
+    public String issueStatus;      // ACCEPTED / CONFIRMED / OPEN / ...
     public String effort;
-    public String type;             // CODE_SMELL / BUG / VULNERABILITY
+    public String type;
     public String author;
     public String creationDate;
     public String updateDate;
@@ -46,7 +46,7 @@ public class Issue {
     public List<String> tags = new ArrayList<>();
     public List<String> transitions = new ArrayList<>();
     public List<Impact> impacts = new ArrayList<>();
-    public TextRange textRange;     // <--- Добавлено поле
+    public TextRange textRange;
 
     public static Issue from(JSONObject o, String projectKey) {
         Issue i = new Issue();
@@ -60,13 +60,14 @@ public class Issue {
         i.line = o.optInt("line", -1);
         i.message = o.optString("message");
         i.status = o.optString("status");
+        i.resolution = o.optString("resolution");
+        i.issueStatus = o.optString("issueStatus");
         i.effort = o.optString("effort");
         i.type = o.optString("type");
         i.author = o.optString("author");
         i.creationDate = o.optString("creationDate");
         i.updateDate = o.optString("updateDate");
 
-        // Парсим textRange для точной подсветки
         JSONObject tr = o.optJSONObject("textRange");
         if (tr != null) {
             i.textRange = new TextRange();
@@ -135,6 +136,8 @@ public class Issue {
         o.put("line", line);
         o.put("message", message);
         o.put("status", status != null ? status : "");
+        o.put("resolution", resolution != null ? resolution : "");
+        o.put("issueStatus", issueStatus != null ? issueStatus : "");
         o.put("effort", effort != null ? effort : "");
         o.put("type", type != null ? type : "");
         o.put("author", author != null ? author : "");
@@ -143,18 +146,6 @@ public class Issue {
         o.put("flowsCount", flowsCount);
         o.put("tags", new JSONArray(tags));
         o.put("transitions", new JSONArray(transitions));
-
-        // Если нужно передавать на фронт, раскомментируйте:
-        /*
-        if (textRange != null) {
-            JSONObject tr = new JSONObject();
-            tr.put("startLine", textRange.startLine);
-            tr.put("endLine", textRange.endLine);
-            tr.put("startOffset", textRange.startOffset);
-            tr.put("endOffset", textRange.endOffset);
-            o.put("textRange", tr);
-        }
-        */
 
         JSONArray impactsArr = new JSONArray();
         for (Impact im : impacts) {

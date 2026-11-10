@@ -30,6 +30,8 @@ public final class ApiServer {
         // Данные
         server.createContext("/api/health",    new HealthHandler(state));
         server.createContext("/api/measures",  new MeasuresHandler(state));
+        server.createContext("/api/metadata",  new MetadataHandler(state));
+        server.createContext("/api/accepted",  new AcceptedHandler(state));
         server.createContext("/api/summary",   new SummaryHandler(state));
         server.createContext("/api/matrix",    new MatrixHandler(state));
         server.createContext("/api/perfile",   new PerFileHandler(state));
@@ -42,14 +44,12 @@ public final class ApiServer {
         server.createContext("/api/mark",      new MarkHandler(state));
         server.createContext("/api/cancel",    new CancelHandler(state));
 
-        // ==== Статика (WWW) ====
+        // Статика (WWW)
         Path www = resolveWwwDir();
         if (www != null) {
             server.createContext("/", new StaticHandler(www));
         }
 
-        // ВАЖНО: регистрируем ВСЕ контексты до server.start() — иначе
-        // первые запросы могут получить 404, пока контексты ещё не видны.
         ExecutorService pool = Executors.newFixedThreadPool(Math.max(1, threads));
         server.setExecutor(pool);
         server.start();
@@ -67,11 +67,13 @@ public final class ApiServer {
         System.out.println("   GET  /api/health");
         System.out.println("   GET  /api/status");
         System.out.println("   GET  /api/session");
-        System.out.println("   PUT  /api/session                    (body = raw session text)");
+        System.out.println("   PUT  /api/session");
         System.out.println("   POST /api/session/reload");
         System.out.println("   POST /api/refresh?project=&wait=true|false");
         System.out.println("   POST /api/refresh/issue?project=&key=");
         System.out.println("   GET  /api/measures?project=");
+        System.out.println("   GET  /api/metadata?project=");
+        System.out.println("   GET  /api/accepted?project=&sev=&qual=&facets=");
         System.out.println("   GET  /api/summary?project=&sev=&qual=");
         System.out.println("   GET  /api/matrix?project=&sev=&qual=");
         System.out.println("   GET  /api/perfile?project=&sev=&qual=");
@@ -80,9 +82,7 @@ public final class ApiServer {
         System.out.println("   GET  /api/keys?project=&sev=&qual=");
         System.out.println("   GET  /api/snippet?project=&issueKey=");
         System.out.println("   POST /api/mark?project=&key=&transition=&comment=&dryRun=");
-        System.out.println("   POST /api/mark?project=&sev=&qual=&transition=&comment=&dryRun=");
         System.out.println("   POST /api/cancel?project=&key=&dryRun=");
-        System.out.println("   POST /api/cancel?project=&sev=&qual=&dryRun=");
         System.out.println("   GET  /                              (WWW UI)");
         if (www == null) {
             System.out.println("   ⚠  WWW каталог не найден — UI недоступен");
@@ -90,7 +90,6 @@ public final class ApiServer {
         System.out.println("===================================================");
     }
 
-    /** Ищем каталог WWW: -Dsonar.www → рядом с JAR → target/../WWW → ./WWW. */
     private static Path resolveWwwDir() {
         String sys = System.getProperty("sonar.www");
         if (sys != null && !sys.isBlank()) {

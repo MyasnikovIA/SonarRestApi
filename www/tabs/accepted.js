@@ -19,6 +19,117 @@ function acceptedBadge(it) {
     return statusBadge(it.issueStatus || it.status);
 }
 
+// ==================== PROGRESS HELPER ====================
+
+/**
+ * Показывает прогресс-модалку и последовательно вызывает perItemAction для каждой issue.
+ * Возвращает { success, failed, cancelled }.
+ *
+ * perItemAction(it, index, signal) — должен бросать Error при ошибке.
+ * При нажатии «Остановить» вызывается abortController.abort(); при AbortError цикл прерывается.
+ */
+async function runBulkWithProgress({ title, issues, perItemAction }) {
+    const total = issues.length;
+    if (total === 0) return { success: 0, failed: [], cancelled: false };
+
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.innerHTML = `
+        <div class="modal-content" style="max-width: 520px;">
+            <div class="modal-header">
+                <h3 style="margin:0;">${esc(title)}</h3>
+            </div>
+            <div class="modal-body">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; font-size:12px;">
+                    <span>Прогресс: <b id="bulk-prog-counter">0 / ${total}</b></span>
+                    <span id="bulk-prog-status" style="color:var(--text-dim);">выполняется…</span>
+                </div>
+                <div style="height:8px; background:var(--bg3); border-radius:4px; overflow:hidden; border:1px solid var(--border);">
+                    <div id="bulk-prog-fill" style="height:100%; width:0%; background:var(--accent); transition: width 0.15s;"></div>
+                </div>
+                <div id="bulk-prog-current"
+                     style="margin-top:10px; font-size:12px; color:var(--text-dim);
+                            white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">—</div>
+                <div id="bulk-prog-errors"
+                     style="margin-top:8px; font-size:12px; color:var(--sev-HIGH);
+                            max-height:120px; overflow-y:auto;"></div>
+                <div style="margin-top:16px; display:flex; justify-content:flex-end; gap:8px;">
+                    <button id="bulk-prog-cancel" class="btn btn-danger">Остановить</button>
+                </div>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(overlay);
+
+    const fill      = overlay.querySelector('#bulk-prog-fill');
+    const counter   = overlay.querySelector('#bulk-prog-counter');
+    const statusEl  = overlay.querySelector('#bulk-prog-status');
+    const currentEl = overlay.querySelector('#bulk-prog-current');
+    const errorsEl  = overlay.querySelector('#bulk-prog-errors');
+    const cancelBtn = overlay.querySelector('#bulk-prog-cancel');
+
+    let cancelled = false;
+    let success   = 0;
+    let lastDone  = 0;
+    const failed  = [];
+    const abortController = new AbortController();
+
+    const updateProgress = (done) => {
+        const pct = total ? Math.round((done / total) * 100) : 0;
+        fill.style.width = pct + '%';
+        counter.textContent = `${done} / ${total}`;
+    };
+
+    const onCancel = () => {
+        cancelled = true;
+        statusEl.textContent = 'Остановка…';
+        cancelBtn.disabled = true;
+        abortController.abort();
+    };
+    cancelBtn.addEventListener('click', onCancel);
+
+    for (let i = 0; i < total; i++) {
+        if (cancelled) break;
+        const it = issues[i];
+        currentEl.textContent = it.key + (it.component ? ' — ' + it.component : '');
+
+        try {
+            await perItemAction(it, i, abortController.signal);
+            success++;
+        } catch (e) {
+            if (e && e.name === 'AbortError') {
+                cancelled = true;
+                break;
+            }
+            failed.push({ key: it.key, message: e.message });
+            const div = document.createElement('div');
+            div.textContent = `✗ ${it.key}: ${e.message}`;
+            errorsEl.appendChild(div);
+        }
+
+        lastDone = i + 1;
+        updateProgress(lastDone);
+    }
+
+    const finalDone = cancelled ? lastDone : total;
+    updateProgress(finalDone);
+    statusEl.textContent = cancelled
+        ? `Остановлено: ${success} / ${total}`
+        : `Готово: ${success} / ${total}`;
+    currentEl.textContent = '—';
+
+    cancelBtn.disabled = false;
+    cancelBtn.classList.remove('btn-danger');
+    cancelBtn.classList.add('btn-accent');
+    cancelBtn.textContent = 'Закрыть';
+    cancelBtn.removeEventListener('click', onCancel);
+    cancelBtn.addEventListener('click', () => overlay.remove(), { once: true });
+
+    return { success, failed, cancelled };
+}
+
+// ==================== TAB ====================
+
 export const accepted = {
     id: 'accepted',
     title: 'Обработанные (Accepted)',
@@ -69,7 +180,6 @@ export const accepted = {
             const listEl      = el.querySelector('#acc-list');
             const filterInput = el.querySelector('#acc-filter');
             const bulkBtn     = el.querySelector('#acc-bulk-reopen');
-            const masterCb    = el.querySelector('#acc-master-checkbox');
 
             const applyFilters = () => {
                 const q = filterText.toLowerCase();
@@ -222,26 +332,27 @@ export const accepted = {
                 renderList();
             });
 
+            // Кнопка массового Reopen — теперь с прогресс-модалкой
             bulkBtn.addEventListener('click', async () => {
                 const keys = [...selectedKeys];
                 if (!keys.length) return;
                 if (!confirm(`Снять пометку (reopen) у ${keys.length} issues?`)) return;
 
-                let success = 0;
-                for (const key of keys) {
-                    try {
+                const targetIssues = issues.filter(it => selectedKeys.has(it.key));
+
+                await runBulkWithProgress({
+                    title: 'Снятие пометок (Reopen)',
+                    issues: targetIssues,
+                    perItemAction: async (it, _i, signal) => {
                         const pp = new URLSearchParams(ctx.qs());
-                        pp.set('key', key);
+                        pp.set('key', it.key);
                         pp.set('transition', 'reopen');
                         pp.set('dryRun', 'false');
-                        const res = await ctx.api('/api/mark?' + pp, { method: 'POST' });
+                        const res = await ctx.api('/api/mark?' + pp, { method: 'POST', signal });
                         if (res.success === false) throw new Error(res.error || 'Ошибка');
-                        success++;
-                    } catch (e) {
-                        console.error('Reopen failed for ' + key, e);
                     }
-                }
-                ctx.toast(`Снято с ${success} из ${keys.length}`);
+                });
+
                 selectedKeys.clear();
                 ctx.refreshStatus?.();
                 accepted.mount(el, ctx);
@@ -307,46 +418,44 @@ function showContextMenu(x, y, clickedIssue, targetIssues, ctx, reloadCb) {
         showChangelogModal(targetIssues, ctx);
     });
 
+    // 🔓 Снять пометку (Reopen) — с прогресс-модалкой
     menu.querySelector('#ctx-reopen').addEventListener('click', async () => {
         if (!confirm(`Снять пометку (reopen) у ${targetIssues.length} issues?`)) return;
-        let success = 0;
-        for (const it of targetIssues) {
-            try {
+
+        await runBulkWithProgress({
+            title: 'Снятие пометок (Reopen)',
+            issues: targetIssues,
+            perItemAction: async (it, _i, signal) => {
                 const p = new URLSearchParams(ctx.qs());
                 p.set('key', it.key);
                 p.set('transition', getReopenTransition(it.status));
                 p.set('dryRun', 'false');
-                const res = await ctx.api('/api/mark?' + p, { method: 'POST' });
+                const res = await ctx.api('/api/mark?' + p, { method: 'POST', signal });
                 if (res.success === false) throw new Error(res.error || 'Не удалось сбросить');
-                success++;
-            } catch (e) {
-                console.error(e);
-                toast('Ошибка для ' + it.key + ': ' + e.message, true);
             }
-        }
-        toast(`Отменено ${success} из ${targetIssues.length}`);
+        });
+
         ctx.refreshStatus?.();
         reloadCb();
     });
 
+    // ❌ Переоткрытое замечание — с прогресс-модалкой
     menu.querySelector('#ctx-reopened').addEventListener('click', async () => {
         if (!confirm(`Установить статус "Переоткрытое замечание" у ${targetIssues.length} issues?`)) return;
-        let success = 0;
-        for (const it of targetIssues) {
-            try {
+
+        await runBulkWithProgress({
+            title: 'Переоткрытие замечаний',
+            issues: targetIssues,
+            perItemAction: async (it, _i, signal) => {
                 const p = new URLSearchParams(ctx.qs());
                 p.set('key', it.key);
                 p.set('transition', 'reopen');
                 p.set('dryRun', 'false');
-                const res = await ctx.api('/api/mark?' + p, { method: 'POST' });
+                const res = await ctx.api('/api/mark?' + p, { method: 'POST', signal });
                 if (res.success === false) throw new Error(res.error || 'Не удалось открыть');
-                success++;
-            } catch (e) {
-                console.error(e);
-                toast('Ошибка для ' + it.key + ': ' + e.message, true);
             }
-        }
-        toast(`Открыто ${success} из ${targetIssues.length}`);
+        });
+
         ctx.refreshStatus?.();
         reloadCb();
     });
@@ -550,7 +659,7 @@ function showChangelogModal(issues, ctx) {
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
     overlay.innerHTML = `
-        <div class="modal-content" style="max-width: 700px;">
+        <div class="modal-content" style="max-width: 600px;">
             <div class="modal-header">
                 <h3 style="margin:0;">История изменений</h3>
                 <button class="modal-close">&times;</button>
@@ -566,110 +675,40 @@ function showChangelogModal(issues, ctx) {
     overlay.querySelector('.modal-close').addEventListener('click', close);
     overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
 
-    // FIX: /api/changelog возвращает только diffs (status/resolution/...),
-    // а комментарии лежат в issue.comments. Загружаем и snippet (для comments),
-    // и changelog параллельно, затем склеиваем в единый timeline по дате.
-    Promise.all(issues.map(async it => {
-        const params = new URLSearchParams();
-        if (ctx.state.project) params.set('project', ctx.state.project);
-        params.set('issueKey', it.key);
-
-        const [snippetRes, changelogRes] = await Promise.all([
-            ctx.api('/api/snippet?' + params).catch(() => ({})),
-            ctx.api('/api/changelog?' + params).catch(() => ({ changelog: [] }))
-        ]);
-
-        return {
-            issueKey: it.key,
-            issue: snippetRes.issue || it,
-            changelog: changelogRes.changelog || []
-        };
-    })).then(results => {
-        const timeline = [];
-
-        results.forEach(({ issueKey, issue, changelog }) => {
-            // 1) Комментарии
-            const comments = issue.comments || [];
-            comments.forEach(c => {
-                timeline.push({
-                    kind: 'comment',
-                    date: new Date(c.createdAt),
-                    user: c.login || 'Пользователь',
-                    text: c.markdown || c.htmlText || '',
-                    issueKey
-                });
+    Promise.all(issues.map(it =>
+        ctx.api('/api/changelog?issueKey=' + encodeURIComponent(it.key))
+           .catch(() => ({ changelog: [] }))
+    )).then(results => {
+        let allLogs = [];
+        results.forEach((r, idx) => {
+            const it = issues[idx];
+            const logs = r.changelog || [];
+            logs.forEach(c => {
+                allLogs.push({ ...c, issueKey: it.key });
             });
-
-            // 2) Изменения (status/resolution/assignee/...)
-            changelog.forEach(c => {
-                timeline.push({
-                    kind: 'changelog',
-                    date: new Date(c.creationDate),
-                    user: c.userName || c.user || 'Пользователь',
-                    diffs: c.diffs || [],
-                    issueKey
-                });
-            });
-
-            // 3) Создание замечания (синтетическое, т.к. /api/changelog его не возвращает)
-            if (issue.creationDate) {
-                timeline.push({
-                    kind: 'created',
-                    date: new Date(issue.creationDate),
-                    user: issue.author || 'Пользователь',
-                    issueKey
-                });
-            }
         });
 
-        // Сортировка: сначала самые свежие
-        timeline.sort((a, b) => b.date - a.date);
+        allLogs.sort((a, b) => new Date(b.creationDate) - new Date(a.creationDate));
 
         const body = overlay.querySelector('#changelog-body');
-        if (!timeline.length) {
+        if (!allLogs.length) {
             body.innerHTML = '<div class="empty">Нет истории изменений</div>';
             return;
         }
 
         body.innerHTML = `
             <div style="background:var(--bg3); border:1px solid var(--border); border-radius:6px; padding:12px; max-height:500px; overflow-y:auto; font-size:12px;">
-                ${timeline.map(item => {
-                    const dateStr = item.date.toLocaleString('ru-RU');
-                    const header = `
+                ${allLogs.map(c => `
+                    <div style="margin-bottom:12px; padding-bottom:12px; border-bottom:1px solid var(--border);">
                         <div style="color:var(--accent); font-weight:bold; margin-bottom:4px;">
-                            ${esc(item.user)}
-                            <span style="color:var(--text-dim); font-weight:normal;">(${esc(dateStr)})</span>
-                            <span style="color:var(--text-dim); font-weight:normal; margin-left:8px;">[${esc(item.issueKey)}]</span>
+                            ${esc(c.userName || c.user)} <span style="color:var(--text-dim); font-weight:normal;">(${new Date(c.creationDate).toLocaleString()})</span>
+                            <span style="color:var(--text-dim); font-weight:normal; margin-left:8px;">[${esc(c.issueKey)}]</span>
                         </div>
-                    `;
-
-                    if (item.kind === 'comment') {
-                        return `
-                            <div style="margin-bottom:12px; padding-bottom:12px; border-bottom:1px solid var(--border);">
-                                ${header}
-                                <div style="white-space:pre-wrap; background:var(--bg); padding:8px; border-radius:4px;">
-                                    ${esc(item.text)}
-                                </div>
-                            </div>
-                        `;
-                    }
-                    if (item.kind === 'created') {
-                        return `
-                            <div style="margin-bottom:12px; padding-bottom:12px; border-bottom:1px solid var(--border);">
-                                ${header}
-                                <div style="color:var(--text-dim);">Созданное замечание</div>
-                            </div>
-                        `;
-                    }
-                    return `
-                        <div style="margin-bottom:12px; padding-bottom:12px; border-bottom:1px solid var(--border);">
-                            ${header}
-                            <div>
-                                ${item.diffs.map(diff => `<div><span style="color:var(--text-dim)">${esc(diff.key)}:</span> ${esc(diff.oldValue || '—')} &rarr; <b>${esc(diff.newValue)}</b></div>`).join('')}
-                            </div>
+                        <div>
+                            ${c.diffs.map(diff => `<div><span style="color:var(--text-dim)">${esc(diff.key)}:</span> ${esc(diff.oldValue || '—')} &rarr; <b>${esc(diff.newValue)}</b></div>`).join('')}
                         </div>
-                    `;
-                }).join('')}
+                    </div>
+                `).join('')}
             </div>
         `;
     }).catch(e => {
@@ -682,7 +721,6 @@ function showChangelogModal(issues, ctx) {
 async function openBulkModal(issues, ctx, reloadCb) {
     if (!issues.length) { toast('Нет доступных issues для изменения', true); return; }
 
-    // Загружаем доступные теги для чекбоксов
     let availableTags = [];
     try {
         const d = await ctx.api('/api/tags');
@@ -692,16 +730,9 @@ async function openBulkModal(issues, ctx, reloadCb) {
     }
 
     const currentTags = issues[0].tags || [];
-    const initialTags = [...currentTags];
     currentTags.forEach(t => {
         if (!availableTags.includes(t)) availableTags.push(t);
     });
-
-    // Приоритетные теги + состояние выбора
-    const PRIORITY_TAGS = ['CWE', 'not-require-fix', 'require-fix'];
-    const initialSet = new Set(initialTags);
-    const selectedTags = new Set(initialTags);
-    let tagsQuery = '';
 
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
@@ -729,14 +760,14 @@ async function openBulkModal(issues, ctx, reloadCb) {
                 </div>
                 <div style="margin-bottom:16px;">
                     <label style="display:block; font-size:12px; margin-bottom:4px;">Теги</label>
-                    <input type="text" id="bulk-tags-filter" placeholder="Фильтр по тегам..."
-                           style="width:100%; box-sizing:border-box; padding:6px 10px; margin-bottom:8px;
-                                  border-radius:6px; border:1px solid var(--border);
-                                  background:var(--bg); color:var(--text);">
-                    <div id="bulk-tags-list"
-                         style="max-height: 150px; overflow-y: auto; display: flex; flex-wrap: wrap;
-                                gap: 8px; padding: 8px; background: var(--bg3);
-                                border: 1px solid var(--border); border-radius: 6px;"></div>
+                    <div style="max-height: 150px; overflow-y: auto; display: flex; flex-wrap: wrap; gap: 8px; padding: 8px; background: var(--bg3); border: 1px solid var(--border); border-radius: 6px;">
+                        ${availableTags.map(t => `
+                            <label style="display: flex; align-items: center; gap: 4px; font-size: 12px; cursor: pointer;">
+                                <input type="checkbox" class="bulk-tag-cb" value="${esc(t)}" ${currentTags.includes(t) ? 'checked' : ''}>
+                                ${esc(t)}
+                            </label>
+                        `).join('')}
+                    </div>
                 </div>
                 <div style="margin-top:16px; display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;">
                     <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
@@ -757,64 +788,11 @@ async function openBulkModal(issues, ctx, reloadCb) {
     overlay.querySelector('#bulk-cancel').addEventListener('click', close);
     overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
 
-    // ---------- Теги: рендер и обработчики ----------
-
-    function getOrderedTags(query) {
-        const q = String(query || '').trim().toLowerCase();
-        const matches = (t) => !q || t.toLowerCase().includes(q);
-
-        const already = initialTags.filter(matches);
-
-        const priority = PRIORITY_TAGS.filter(
-            t => availableTags.includes(t) && !initialSet.has(t) && matches(t)
-        );
-
-        const rest = availableTags
-            .filter(t => !initialSet.has(t) && !PRIORITY_TAGS.includes(t) && matches(t))
-            .sort((a, b) => a.localeCompare(b));
-
-        return [...already, ...priority, ...rest];
-    }
-
-    function renderBulkTagList() {
-        const container = overlay.querySelector('#bulk-tags-list');
-        if (!container) return;
-        const ordered = getOrderedTags(tagsQuery);
-        if (ordered.length === 0) {
-            container.innerHTML = `<div style="color:var(--text-dim); font-size:12px;">${
-                tagsQuery.trim() ? 'Нет тегов по фильтру' : 'Нет доступных тегов'
-            }</div>`;
-            return;
-        }
-        container.innerHTML = ordered.map(t => `
-            <label style="display: flex; align-items: center; gap: 4px; font-size: 12px; cursor: pointer;">
-                <input type="checkbox" class="bulk-tag-cb" value="${esc(t)}" ${selectedTags.has(t) ? 'checked' : ''}>
-                ${esc(t)}
-            </label>
-        `).join('');
-    }
-
-    renderBulkTagList();
-
-    overlay.querySelector('#bulk-tags-filter').addEventListener('input', (e) => {
-        tagsQuery = e.target.value;
-        renderBulkTagList();
-    });
-
-    overlay.querySelector('#bulk-tags-list').addEventListener('change', (e) => {
-        if (e.target.classList.contains('bulk-tag-cb')) {
-            if (e.target.checked) selectedTags.add(e.target.value);
-            else                  selectedTags.delete(e.target.value);
-        }
-    });
-
-    // ---------- Применение ----------
-
     overlay.querySelector('#bulk-apply').addEventListener('click', async () => {
         const status = overlay.querySelector('#bulk-status').value;
         const comment = overlay.querySelector('#bulk-comment').value;
 
-        const checkedTags = [...selectedTags];
+        const checkedTags = Array.from(overlay.querySelectorAll('.bulk-tag-cb:checked')).map(cb => cb.value);
         const tagsStr = checkedTags.join(',');
         const tagsChanged = tagsStr !== (issues[0].tags || []).join(',');
 
@@ -824,7 +802,6 @@ async function openBulkModal(issues, ctx, reloadCb) {
 
         let success = 0;
 
-        // 1. Меняем статус и добавляем комментарий
         for (const it of issues) {
             try {
                 const p = new URLSearchParams(ctx.qs());
@@ -841,7 +818,6 @@ async function openBulkModal(issues, ctx, reloadCb) {
             btn.textContent = `Применение ${success}/${issues.length}...`;
         }
 
-        // 2. Если теги изменились — обновляем их
         if (tagsChanged) {
             try {
                 const keysStr = issues.map(it => it.key).join(',');

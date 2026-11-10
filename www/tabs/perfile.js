@@ -29,12 +29,8 @@ function getReopenTransition(status) {
 }
 
 /**
- * Парсер ответа Ollama. Теперь возвращает { status, comment, tags }.
- * Формат ответа:
- *   Статус: <accept|falsepositive|confirm|resolve|wontfix>
- *   Критичность: <вердикт> — <обоснование>
- *   Теги: tag1, tag2, tag3
- *   <1-3 предложения с объяснением>
+ * Парсер ответа Ollama: { status, comment, tags, fixDecision }.
+ * Гарантирует наличие ровно одного фикс-тега: require-fix | not-require-fix.
  */
 function parseOllamaResponse(raw) {
     const text = String(raw || '');
@@ -53,26 +49,19 @@ function parseOllamaResponse(raw) {
             .filter(t => t.length > 0);
     }
 
-    // NEW: гарантируем наличие одного из фикс-тегов.
-    // Если модель вернула оба или ни одного — берём require-fix (безопаснее).
     const hasRequire    = tags.includes('require-fix');
     const hasNotRequire = tags.includes('not-require-fix');
 
-    // убираем оба из массива, чтобы нормализовать
     tags = tags.filter(t => t !== 'require-fix' && t !== 'not-require-fix');
 
     let fixDecision;
     if (hasRequire && !hasNotRequire)      fixDecision = 'require-fix';
     else if (hasNotRequire && !hasRequire) fixDecision = 'not-require-fix';
-    else                                    fixDecision = 'require-fix'; // fallback
+    else                                    fixDecision = 'require-fix';
 
-    // ставим фикс-тег первым
     tags.unshift(fixDecision);
-
-    // Ограничиваем общее число тегов до 3
     tags = tags.slice(0, 3);
 
-    // comment = всё, что после "Критичность:" (включая её)
     const lines = text.split(/\r?\n/);
     const commentLines = [];
     let inComment = false;
@@ -88,7 +77,6 @@ function parseOllamaResponse(raw) {
         if (inComment) commentLines.push(line);
     }
     comment = commentLines.join('\n').trim();
-
     if (!comment) {
         comment = lines
             .filter(l => !/^Статус:/i.test(l.trim()) && !/^Теги:/i.test(l.trim()))
@@ -99,7 +87,19 @@ function parseOllamaResponse(raw) {
     return { status, comment, tags, fixDecision };
 }
 
-// ==================== PROMPT BUILDERS (с поддержкой тегов) ====================
+/**
+ * FIX: /api/set_tags требует ?project=KEY.
+ * Все три вызова (issue / bulk / auto) идут через этот helper.
+ */
+async function setIssueTags(ctx, keysOrKey, tagsArray) {
+    const p = new URLSearchParams();
+    if (ctx.state.project) p.set('project', ctx.state.project);
+    p.set('keys', Array.isArray(keysOrKey) ? keysOrKey.join(',') : String(keysOrKey));
+    p.set('tags', Array.isArray(tagsArray) ? tagsArray.join(',') : String(tagsArray));
+    return ctx.api('/api/set_tags?' + p.toString(), { method: 'POST' });
+}
+
+// ==================== PROMPT BUILDERS ====================
 
 function buildStatusCommentPrompt(issue, ruleName, snippet, status, statusLabel, availableTags) {
     const code = highlightForPrompt(snippet, issue.line).trim();
@@ -108,6 +108,7 @@ function buildStatusCommentPrompt(issue, ruleName, snippet, status, statusLabel,
     const tagsList = (availableTags && availableTags.length)
         ? availableTags.join(', ')
         : 'любые релевантные';
+    const filePath = issue.component || '';
 
     return [
         'Ты — опытный разработчик и эксперт по статическому анализу кода (SonarQube).',
@@ -125,32 +126,51 @@ function buildStatusCommentPrompt(issue, ruleName, snippet, status, statusLabel,
         '- accept: реальная проблема, исправим позже (техдолг).',
         '- confirm: реальная и срочная проблема (security, потеря данных).',
         '- resolve: уже исправлено в коде.',
-        '- wontfix: реальная проблема, но не будем исправлять (генерированный код).',
+        '- wontfix: реальная проблема, но не будем исправлять.',
         '',
-        'РЕШЕНИЕ О НЕОБХОДИМОСТИ ИСПРАВЛЕНИЯ (обязательно!):',
+        '=== КРИТИЧЕСКИ ВАЖНО: СГЕНЕРИРОВАННЫЙ КОД ===',
+        'Файл считается СГЕНЕРИРОВАННЫМ, если ЛЮБОЙ из признаков верен:',
+        '- путь содержит "/Api/" и имя файла заканчивается на "Api.php" (OpenAPI/Swagger client),',
+        '- путь содержит "/Model/" (сгенерированные модели),',
+        '- в коде есть маркеры: "ObjectSerializer", "handleResponseWithDataType", "ApiException",',
+        '  "$this->config", "$this->headerSelector", "buildQuery", "ObjectSerializer::deserialize",',
+        '- расширения: .pb.go, .pb.php, .pb.cc, .g.cs, *_generated.*, *_pb2.py, *-openapi.*, *.g.dart.',
+        '',
+        'Для СГЕНЕРИРОВАННОГО кода:',
+        '- статус = accept ИЛИ wontfix (никогда confirm/resolve/falsepositive),',
+        '- фикс-тег = ВСЕГДА "not-require-fix",',
+        '- НЕ предлагай рефакторинг, объединение веток, добавление default в switch,',
+        '  удаление дублирования — это нормальная особенность генератора,',
+        '  правки затрутся при следующей регенерации,',
+        '- ПРИМЕР: дублирование case 401 и case 422 в *Api.php — типичный сгенерированный',
+        '  switch, править НЕ нужно, ставить not-require-fix.',
+        '',
+        '=== КРИТИЧЕСКИ ВАЖНО: ЯЗЫКОВЫЕ СИГНАЛЫ ===',
+        'Если ты пишешь "функционально работает корректно", "не влияет на работу",',
+        '"нарушает читаемость но не ломает", "косметическая проблема" — это ЯВНЫЙ СИГНАЛ',
+        'поставить фикс-тег "not-require-fix", а не "require-fix".',
+        '',
+        '=== РЕШЕНИЕ О НЕОБХОДИМОСТИ ИСПРАВЛЕНИЯ ===',
         'Верни РОВНО ОДИН из двух тегов в поле "Теги:"',
-        '- "require-fix"     — баг РЕАЛЬНЫЙ и его НУЖНО исправить (в т.ч. если status=confirm или resolve, но в коде ещё есть проблема).',
-        '- "not-require-fix" — баг НЕ требует исправления:',
-        '   * SonarQube ошибся (false positive),',
-        '   * код сгенерирован (OpenAPI, ORM, protobuf) и не должен правиться вручную,',
-        '   * стилистическая мелочь без функциональных последствий,',
-        '   * решено не исправлять (wontfix) по архитектурным причинам.',
+        '- "require-fix"     — баг РЕАЛЬНЫЙ, в РУЧНОМ коде, его НУЖНО исправить.',
+        '- "not-require-fix" — баг НЕ требует исправления: сгенерированный код,',
+        '  false positive, стилистика без последствий, wontfix.',
         '',
-        'СВЯЗЬ СТАТУСА И ФИКС-ТЕГА (подсказка):',
-        '- status=confirm  → обычно require-fix',
-        '- status=resolve  → обычно not-require-fix (уже исправлено)',
-        '- status=wontfix  → usually not-require-fix',
-        '- status=accept   → require-fix, если реальная проблема; not-require-fix, если сгенерировано/техдолг',
+        'СВЯЗЬ СТАТУСА И ФИКС-ТЕГА:',
+        '- status=confirm       → require-fix',
+        '- status=resolve       → not-require-fix (уже исправлено)',
+        '- status=wontfix       → not-require-fix',
         '- status=falsepositive → not-require-fix',
+        '- status=accept        → require-fix (ручной код) или not-require-fix (сгенерированный)',
         '',
-        'ДОСТУПНЫЕ ТЕГИ: ' + tagsList,
+        'ДОСТУПНЫЕ ТЕГИ (используй ТОЛЬКО из этого списка): ' + tagsList,
         'В поле "Теги:" верни СНАЧАЛА require-fix или not-require-fix,',
-        'затем 1–2 любых подходящих тега из списка выше.',
+        'затем 1–2 тега СТРОГО из списка выше.',
         '',
         'Контекст:',
         '- Правило: ' + (ruleName || issue.rule || ''),
         '- Сообщение: ' + (issue.message || ''),
-        '- Файл: ' + (issue.component || '') + (issue.line ? ':' + issue.line : ''),
+        '- Файл: ' + filePath + (issue.line ? ':' + issue.line : ''),
         '- Severity: ' + severity,
         '- Язык: ' + lang.name,
         '',
@@ -163,13 +183,9 @@ function buildStatusCommentPrompt(issue, ruleName, snippet, status, statusLabel,
         '1. Строка 1: "Статус: <accept|falsepositive|confirm|resolve|wontfix>"',
         '2. Строка 2: "Критичность: <подтверждаю|завышена|занижена> — <обоснование>"',
         '3. Строка 3: "Теги: <require-fix|not-require-fix>, <tag2>, <tag3>"',
-        '   - Первый тег ОБЯЗАТЕЛЬНО "require-fix" ИЛИ "not-require-fix"',
-        '   - Затем 1–2 тега из списка доступных',
-        '   - Итого 2–3 тега',
-        '4. Строки 4+: 1–3 предложения, объясняющие решение (в т.ч. почему фиксить или нет).',
+        '4. Строки 4+: 1–3 предложения.',
         '',
-        'Пиши по-русски, без markdown (никаких **, __, #, списков).',
-        'Верни ТОЛЬКО этот текст.'
+        'Пиши по-русски, без markdown. Верни ТОЛЬКО этот текст.'
     ].join('\n');
 }
 
@@ -200,19 +216,22 @@ async function buildBulkStatusCommentPrompt(issues, status, statusLabel, ctx, av
         '- resolve: уже исправлено.',
         '- wontfix: не будем исправлять.',
         '',
-        'РЕШЕНИЕ О НЕОБХОДИМОСТИ ИСПРАВЛЕНИЯ (обязательно!):',
+        '=== КРИТИЧЕСКИ ВАЖНО: СГЕНЕРИРОВАННЫЙ КОД ===',
+        'Группа считается СГЕНЕРИРОВАННОЙ, если у БОЛЬШИНСТВА issues:',
+        '- путь содержит "/Api/" и имя *Api.php (OpenAPI client), или "/Model/",',
+        '- в коде маркеры ObjectSerializer, handleResponseWithDataType, ApiException,',
+        '- расширения .pb.go, *.g.cs, *_generated.*, *-openapi.*.',
+        'Для такой группы: статус = accept/wontfix, фикс-тег = "not-require-fix".',
+        '',
+        'СИГНАЛЫ not-require-fix в тексте: "функционально работает корректно",',
+        '"не влияет на работу", "нарушает читаемость но не ломает" — сразу not-require-fix.',
+        '',
+        '=== РЕШЕНИЕ О НЕОБХОДИМОСТИ ИСПРАВЛЕНИЯ ===',
         'Верни РОВНО ОДИН из двух тегов в поле "Теги:"',
-        '- "require-fix"     — группа содержит РЕАЛЬНЫЕ баги, которые нужно исправить.',
-        '- "not-require-fix" — баги не требуют исправления (false positive, сгенерированный код, стилистика, wontfix).',
+        '- "require-fix"     — группа содержит РЕАЛЬНЫЕ баги в РУЧНОМ коде.',
+        '- "not-require-fix" — не требует исправления (FP, сгенерированный код, стилистика).',
         '',
-        'СВЯЗЬ СТАТУСА И ФИКС-ТЕГА (подсказка):',
-        '- status=confirm  → require-fix',
-        '- status=resolve  → not-require-fix',
-        '- status=wontfix  → not-require-fix',
-        '- status=falsepositive → not-require-fix',
-        '- status=accept   → require-fix или not-require-fix (по сути)',
-        '',
-        'ДОСТУПНЫЕ ТЕГИ: ' + tagsList,
+        'ДОСТУПНЫЕ ТЕГИ (только из списка): ' + tagsList,
         '',
         'Замечания (' + issues.length + '):',
         issuesList,
@@ -221,8 +240,6 @@ async function buildBulkStatusCommentPrompt(issues, status, statusLabel, ctx, av
         '1. Строка 1: "Статус: <accept|falsepositive|confirm|resolve|wontfix>"',
         '2. Строка 2: "Критичность: <подтверждаю|завышена|занижена> — <обоснование>"',
         '3. Строка 3: "Теги: <require-fix|not-require-fix>, <tag2>, <tag3>"',
-        '   - Первый тег ОБЯЗАТЕЛЬНО "require-fix" ИЛИ "not-require-fix"',
-        '   - Затем 1–2 тега из списка',
         '4. Строки 4+: 1–3 предложения.',
         '',
         'Пиши по-русски, без markdown. Верни ТОЛЬКО этот текст.'
@@ -237,6 +254,7 @@ function buildAutoResolvePromptAsync(issue, ctx, availableTags) {
     const tagsList = (availableTags && availableTags.length)
         ? availableTags.join(', ')
         : 'любые релевантные';
+    const filePath = issue.component || '';
 
     return [
         'Ты — опытный разработчик и эксперт по SonarQube.',
@@ -244,36 +262,36 @@ function buildAutoResolvePromptAsync(issue, ctx, availableTags) {
         'ЗАДАЧА: определить статус, критичность, решение о фиксе, теги и обоснование.',
         '',
         'ОПРЕДЕЛЕНИЯ СТАТУСОВ:',
-        '- falsepositive: SonarQube ошибся (проблемы нет).',
-        '- accept: реальная проблема, откладываем (техдолг).',
-        '- confirm: реальная и срочная (security/потеря данных/падение).',
+        '- falsepositive: SonarQube ошибся.',
+        '- accept: реальная проблема, откладываем.',
+        '- confirm: реальная и срочная.',
         '- resolve: уже исправлено.',
-        '- wontfix: реальная проблема, но не будем исправлять.',
+        '- wontfix: не будем исправлять.',
         '',
-        'РЕШЕНИЕ О НЕОБХОДИМОСТИ ИСПРАВЛЕНИЯ (обязательно!):',
+        '=== КРИТИЧЕСКИ ВАЖНО: СГЕНЕРИРОВАННЫЙ КОД ===',
+        'Файл СГЕНЕРИРОВАН, если:',
+        '- путь содержит "/Api/" + *Api.php (OpenAPI), или "/Model/",',
+        '- маркеры в коде: ObjectSerializer, handleResponseWithDataType, ApiException,',
+        '- расширения: .pb.go, *.g.cs, *_generated.*, *_pb2.py, *-openapi.*.',
+        'Для сгенерированного: статус accept/wontfix, тег "not-require-fix",',
+        'НЕ предлагай рефакторинг — правки затрутся при регенерации.',
+        '',
+        'Если пишешь "функционально работает корректно", "не влияет на работу" —',
+        'это ЯВНЫЙ СИГНАЛ not-require-fix.',
+        '',
+        '=== РЕШЕНИЕ О НЕОБХОДИМОСТИ ИСПРАВЛЕНИЯ ===',
         'Верни РОВНО ОДИН из двух тегов в поле "Теги:"',
-        '- "require-fix"     — баг РЕАЛЬНЫЙ и его НУЖНО исправить.',
-        '- "not-require-fix" — баг НЕ требует исправления:',
-        '   * false positive,',
-        '   * сгенерированный код (OpenAPI/ORM/protobuf),',
-        '   * стилистическая мелочь без последствий,',
-        '   * решено не исправлять (wontfix).',
+        '- "require-fix"     — баг РЕАЛЬНЫЙ и НУЖНО исправить.',
+        '- "not-require-fix" — не требует исправления (FP, сгенерированный, wontfix).',
         '',
-        'СВЯЗЬ СТАТУСА И ФИКС-ТЕГА (подсказка):',
-        '- confirm  → require-fix',
-        '- resolve  → not-require-fix',
-        '- wontfix  → not-require-fix',
-        '- falsepositive → not-require-fix',
-        '- accept   → require-fix или not-require-fix (по сути)',
-        '',
-        'ДОСТУПНЫЕ ТЕГИ: ' + tagsList,
+        'ДОСТУПНЫЕ ТЕГИ (только из списка): ' + tagsList,
         'В поле "Теги:" верни СНАЧАЛА require-fix или not-require-fix,',
-        'затем 1–2 подходящих тега из списка.',
+        'затем 1–2 тега СТРОГО из списка.',
         '',
         'Контекст:',
         '- Правило: ' + (issue.ruleName || issue.rule || ''),
         '- Сообщение: ' + (issue.message || ''),
-        '- Файл: ' + (issue.component || '') + (issue.line ? ':' + issue.line : ''),
+        '- Файл: ' + filePath + (issue.line ? ':' + issue.line : ''),
         '- Severity: ' + severity,
         '- Язык: ' + lang.name,
         '',
@@ -286,9 +304,7 @@ function buildAutoResolvePromptAsync(issue, ctx, availableTags) {
         '1. Строка 1: "Статус: <accept|falsepositive|confirm|resolve|wontfix>"',
         '2. Строка 2: "Критичность: <подтверждаю|завышена|занижена> — <обоснование>"',
         '3. Строка 3: "Теги: <require-fix|not-require-fix>, <tag2>, <tag3>"',
-        '   - Первый тег ОБЯЗАТЕЛЬНО "require-fix" ИЛИ "not-require-fix"',
-        '   - Затем 1–2 из списка',
-        '4. Строки 4+: 1–3 предложения (в т.ч. почему фиксить или нет).',
+        '4. Строки 4+: 1–3 предложения.',
         '',
         'Пиши по-русски, без markdown. Верни ТОЛЬКО этот текст.'
     ].join('\n');
@@ -306,7 +322,39 @@ async function fetchAvailableTags(ctx) {
     }
 }
 
-// ==================== EXPORTED TAB ====================
+function buildOrderedTags(availableTags, initialTags, priorityTags, query) {
+    const q = String(query || '').trim().toLowerCase();
+    const matches = (t) => !q || t.toLowerCase().includes(q);
+    const initialSet = new Set(initialTags);
+
+    const already = initialTags.filter(matches);
+    const priority = priorityTags.filter(
+        t => availableTags.includes(t) && !initialSet.has(t) && matches(t)
+    );
+    const rest = availableTags
+        .filter(t => !initialSet.has(t) && !priorityTags.includes(t) && matches(t))
+        .sort((a, b) => a.localeCompare(b));
+
+    return [...already, ...priority, ...rest];
+}
+
+function renderTagCheckboxes(container, orderedTags, selectedTags) {
+    if (!container) return;
+    if (orderedTags.length === 0) {
+        container.innerHTML = `<div style="color:var(--text-dim); font-size:12px;">Нет тегов по фильтру</div>`;
+        return;
+    }
+    container.innerHTML = orderedTags.map(t => `
+        <label style="display:flex; align-items:center; gap:4px; font-size:12px;
+                      cursor:pointer; padding:3px 8px; background:var(--bg);
+                      border:1px solid var(--border); border-radius:4px;">
+            <input type="checkbox" class="tag-cb" value="${esc(t)}" ${selectedTags.has(t) ? 'checked' : ''}>
+            ${esc(t)}
+        </label>
+    `).join('');
+}
+
+// ==================== TAB ====================
 
 export const perfile = {
     id: 'perfile',
@@ -333,7 +381,7 @@ export const perfile = {
                             <h3 style="margin:0;">${esc(d.project)} · ${esc(d.severity)}/${esc(d.quality)} · ${d.issuesCount} issues · ${d.filesCount} файлов</h3>
                         </div>
                         <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
-                            <label style="display:flex; align-items:center; gap:4px; font-size:12px; cursor:pointer;" title="Скрыть issues, у которых уже установлен статус">
+                            <label style="display:flex; align-items:center; gap:4px; font-size:12px; cursor:pointer;">
                                 <input type="checkbox" id="pf-hide-processed"> Скрыть обработанные
                             </label>
                             <input type="text" id="pf-filter" placeholder="Фильтр по файлу или сообщению..." style="padding:6px 10px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text); width:250px;">
@@ -371,7 +419,6 @@ export const perfile = {
 
             const renderList = () => {
                 const filtered = applyFilters();
-
                 if (filtered.length === 0) {
                     listEl.innerHTML = '<div class="empty">Ничего не найдено по фильтру</div>';
                     return;
@@ -385,7 +432,6 @@ export const perfile = {
                                 <h4 style="margin:0; text-transform:none;">${esc(f.file)} — ${f.issues.length}</h4>
                             </div>
                         </div>
-
                         ${f.issues.length > 0 ? `
                         <table><thead><tr>
                             <th style="width:30px; padding-left:16px;"></th>
@@ -509,7 +555,6 @@ export const perfile = {
             const updateBulkBtn = () => {
                 bulkBtn.style.display = selectedKeys.size > 0 ? 'inline-block' : 'none';
                 bulkBtn.textContent = `Действия с выбранными (${selectedKeys.size})`;
-
                 const visibleIssues = applyFilters().flatMap(f => f.issues);
                 const allVisibleChecked = visibleIssues.length > 0 && visibleIssues.every(it => selectedKeys.has(it.key));
                 masterCb.checked = allVisibleChecked;
@@ -578,7 +623,6 @@ function showIssueContextMenu(x, y, clickedIssue, targetIssues, filteredData, ct
     `;
 
     document.body.appendChild(menu);
-
     const closeMenu = () => menu.remove();
     document.addEventListener('click', closeMenu, { once: true });
 
@@ -609,7 +653,6 @@ function showIssueContextMenu(x, y, clickedIssue, targetIssues, filteredData, ct
     if (hasMarked) {
         menu.querySelector('#ctx-remove').addEventListener('click', async () => {
             const reopenableIssues = targetIssues.filter(it => it.status !== 'OPEN' && it.status !== 'REOPENED');
-
             if (!confirm(`Отменить комментарий (reopen) у ${reopenableIssues.length} issues?`)) return;
 
             let success = 0;
@@ -635,7 +678,7 @@ function showIssueContextMenu(x, y, clickedIssue, targetIssues, filteredData, ct
     }
 }
 
-// ==================== МОДАЛЬНЫЕ ОКНА ====================
+// ==================== МОДАЛКА "ДЕТАЛИ ОШИБКИ" ====================
 
 async function openIssueModal(issue, ctx, reloadCb) {
     const overlay = document.createElement('div');
@@ -664,11 +707,23 @@ async function openIssueModal(issue, ctx, reloadCb) {
         const d = await ctx.api('/api/snippet?' + p);
         const it = d.issue || issue;
 
-        // Загружаем доступные теги для промпта
         const availableTags = await fetchAvailableTags(ctx);
 
         const currentStatusValue = getMappedStatus(it.status);
         const canReopen = it.status && it.status !== 'OPEN' && it.status !== 'REOPENED';
+
+        const currentTags = it.tags || [];
+        currentTags.forEach(t => { if (!availableTags.includes(t)) availableTags.push(t); });
+
+        const PRIORITY_TAGS = ['CWE', 'not-require-fix', 'require-fix'];
+        const initialTags = [...currentTags];
+        const selectedTags = new Set(initialTags);
+        let tagsQuery = '';
+
+        function renderModalTagList() {
+            const ordered = buildOrderedTags(availableTags, initialTags, PRIORITY_TAGS, tagsQuery);
+            renderTagCheckboxes(overlay.querySelector('#modal-tags-list'), ordered, selectedTags);
+        }
 
         const comments = it.comments || d.comments || [];
         const commentsHtml = comments.length > 0 ? `
@@ -684,10 +739,6 @@ async function openIssueModal(issue, ctx, reloadCb) {
                 </div>
             </div>
         ` : '';
-
-        // Состояние для AI-предложенных тегов
-        let parsedTags = [];
-        let tagsManuallyEdited = false;
 
         const body = overlay.querySelector('#modal-body');
         body.innerHTML = `
@@ -709,7 +760,22 @@ async function openIssueModal(issue, ctx, reloadCb) {
 
             ${commentsHtml}
 
-            <div id="modal-ai-tags-hint" style="display:none; margin-top:12px; padding:8px; background:var(--bg3); border:1px solid var(--accent); border-radius:6px; font-size:12px;"></div>
+            <div style="margin-top:16px;">
+                <label style="display:block; font-size:12px; margin-bottom:4px;">Теги</label>
+                <input type="text" id="modal-tags-filter" placeholder="Фильтр по тегам..."
+                       style="width:100%; box-sizing:border-box; padding:6px 10px; margin-bottom:8px;
+                              border-radius:6px; border:1px solid var(--border);
+                              background:var(--bg); color:var(--text);">
+                <div id="modal-tags-list"
+                     style="max-height:200px; overflow-y:auto; display:flex; flex-wrap:wrap;
+                            gap:6px; padding:8px; background:var(--bg3);
+                            border:1px solid var(--border); border-radius:6px;"></div>
+            </div>
+
+            <div id="modal-ai-tags-hint"
+                 style="display:none; margin-top:12px; padding:8px;
+                        background:var(--bg3); border:1px solid var(--accent);
+                        border-radius:6px; font-size:12px;"></div>
 
             <div style="margin-top:20px; padding-top:16px; border-top:1px solid var(--border);">
                 <div style="margin-bottom:12px;">
@@ -723,14 +789,13 @@ async function openIssueModal(issue, ctx, reloadCb) {
                     </select>
                 </div>
                 <div>
-                    <label style="display:block; font-size:12px; margin-bottom:4px;">Новый комментарий</label>
+                    <label style="display:block; font-size:12px; margin-bottom:4px;">Новый комментарий (старые сохраняются в истории SonarQube)</label>
                     <textarea id="modal-comment" rows="4" style="width:100%; padding:8px; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:6px; resize:vertical;" placeholder="Введите новый комментарий..."></textarea>
                 </div>
                 <div style="margin-top:16px; display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;">
                     <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
                         <button id="modal-btn-gen-prompt" type="button" class="btn" title="Сформировать промпт для LLM">Сгенерировать промпт</button>
-                        <button id="modal-btn-ai-resolve" type="button" class="btn" title="Получить резолюцию от Ollama">Получить резолюцию ИИ</button>
-                        <button id="modal-btn-tags" type="button" class="btn">🏷️ Изменить теги</button>
+                        <button id="modal-btn-ai-resolve" type="button" class="btn" title="Отправить промпт в Ollama">Получить резолюцию ИИ</button>
                         ${canReopen ? `<button id="modal-btn-reopen" class="btn btn-danger">Отменить комментарий (Reopen)</button>` : ''}
                     </div>
                     <div style="display:flex; gap:8px; align-items:center;">
@@ -742,12 +807,30 @@ async function openIssueModal(issue, ctx, reloadCb) {
             </div>
         `;
 
-        // Кнопка "Сгенерировать промпт" (копирование в буфер + textarea fallback)
+        renderModalTagList();
+
+        overlay.querySelector('#modal-tags-filter').addEventListener('input', (e) => {
+            tagsQuery = e.target.value;
+            renderModalTagList();
+        });
+
+        overlay.querySelector('#modal-tags-list').addEventListener('change', (e) => {
+            if (e.target.classList.contains('tag-cb')) {
+                if (e.target.checked) selectedTags.add(e.target.value);
+                else                  selectedTags.delete(e.target.value);
+            }
+        });
+
         overlay.querySelector('#modal-btn-gen-prompt').addEventListener('click', async () => {
             const sel = overlay.querySelector('#modal-status');
             const status = sel.value;
             const statusLabel = sel.selectedOptions[0].textContent.trim();
             const prompt = buildStatusCommentPrompt(it, d.ruleName, d.snippet, status, statusLabel, availableTags);
+
+            console.groupCollapsed('[Prompt] generated');
+            console.log(prompt);
+            console.groupEnd();
+
             try {
                 await navigator.clipboard.writeText(prompt);
                 toast('Промпт скопирован в буфер обмена');
@@ -768,39 +851,33 @@ async function openIssueModal(issue, ctx, reloadCb) {
                 const parsed = parseOllamaResponse(fullResponse);
 
                 const statusSelect = overlay.querySelector('#modal-status');
-                if (statusSelect && parsed.status) {
-                    statusSelect.value = parsed.status;
-                }
+                if (statusSelect && parsed.status) statusSelect.value = parsed.status;
 
                 const commentTa = overlay.querySelector('#modal-comment');
-                if (commentTa) {
-                    commentTa.value = parsed.comment;
-                }
+                if (commentTa) commentTa.value = parsed.comment;
 
-                // NEW: сохраняем теги и показываем подсказку
-                parsedTags = parsed.tags || [];
-                if (parsedTags.length > 0) {
+                if (parsed.tags && parsed.tags.length > 0) {
+                    parsed.tags.forEach(tag => {
+                        if (!availableTags.includes(tag)) availableTags.push(tag);
+                        selectedTags.add(tag);
+                    });
+                    renderModalTagList();
+
                     const hint = overlay.querySelector('#modal-ai-tags-hint');
                     hint.style.display = 'block';
-                    hint.innerHTML = `🤖 AI предлагает теги: <b>${esc(parsedTags.join(', '))}</b><br>
-                        <span style="color:var(--text-dim);">Будут применены при нажатии «Применить».</span>`;
+                    hint.innerHTML = `🤖 AI предлагает теги: <b>${esc(parsed.tags.join(', '))}</b>
+                        <span style="color:var(--text-dim);"> (отмечены в списке выше)</span>`;
                 }
             }
         });
         bindOllamaSettingsButton(overlay, ctx);
 
-        // Ручное редактирование тегов
-        overlay.querySelector('#modal-btn-tags').addEventListener('click', () => {
-            tagsManuallyEdited = true;
-            showTagEditor([it], ctx, () => {
-                close();
-                reloadCb();
-            });
-        });
-
         overlay.querySelector('#modal-btn-apply').addEventListener('click', async () => {
             const status = overlay.querySelector('#modal-status').value;
             const comment = overlay.querySelector('#modal-comment').value;
+            const tagsStr = [...selectedTags].join(',');
+            const tagsChanged = tagsStr !== (it.tags || []).join(',');
+
             try {
                 const p = new URLSearchParams(ctx.qs());
                 p.set('key', it.key);
@@ -810,12 +887,12 @@ async function openIssueModal(issue, ctx, reloadCb) {
                 const res = await ctx.api('/api/mark?' + p, { method: 'POST' });
                 if (res.success === false) throw new Error(res.error || 'Ошибка применения');
 
-                // NEW: применяем AI-теги (если не было ручного редактирования)
-                if (parsedTags.length > 0 && !tagsManuallyEdited) {
+                // FIX: set_tags теперь с project (helper setIssueTags)
+                if (tagsChanged) {
                     try {
-                        await ctx.api('/api/set_tags?keys=' + encodeURIComponent(it.key) + '&tags=' + encodeURIComponent(parsedTags.join(',')), { method: 'POST' });
+                        await setIssueTags(ctx, it.key, [...selectedTags]);
                     } catch (e) {
-                        console.warn('Не удалось применить AI-теги:', e);
+                        console.warn('Не удалось применить теги:', e);
                         ctx.toast('Статус применён, но теги не установлены: ' + e.message, true);
                     }
                 }
@@ -831,7 +908,7 @@ async function openIssueModal(issue, ctx, reloadCb) {
 
         if (canReopen) {
             overlay.querySelector('#modal-btn-reopen').addEventListener('click', async () => {
-                if (!confirm('Отменить комментарий (reopen)?')) return;
+                if (!confirm('Отменить комментарий (reopen)? Старые комментарии останутся в истории.')) return;
                 try {
                     const p = new URLSearchParams(ctx.qs());
                     p.set('key', it.key);
@@ -856,27 +933,19 @@ async function openIssueModal(issue, ctx, reloadCb) {
     }
 }
 
+// ==================== МАССОВАЯ МОДАЛКА ====================
+
 function openBulkModal(issues, ctx, reloadCb) {
     if (!issues.length) { toast('Нет доступных issues для изменения', true); return; }
 
-    // async IIFE чтобы дождаться тегов
     (async () => {
-        let availableTags = [];
-        try {
-            const d = await ctx.api('/api/tags');
-            availableTags = d.tags || [];
-        } catch (e) {
-            console.warn('Не удалось загрузить теги', e);
-        }
+        const availableTags = await fetchAvailableTags(ctx);
 
         const currentTags = issues[0].tags || [];
-        const initialTags = [...currentTags];
-        currentTags.forEach(t => {
-            if (!availableTags.includes(t)) availableTags.push(t);
-        });
+        currentTags.forEach(t => { if (!availableTags.includes(t)) availableTags.push(t); });
 
         const PRIORITY_TAGS = ['CWE', 'not-require-fix', 'require-fix'];
-        const initialSet = new Set(initialTags);
+        const initialTags = [...currentTags];
         const selectedTags = new Set(initialTags);
         let tagsQuery = '';
 
@@ -912,7 +981,7 @@ function openBulkModal(issues, ctx, reloadCb) {
                                       background:var(--bg); color:var(--text);">
                         <div id="bulk-tags-list"
                              style="max-height: 150px; overflow-y: auto; display: flex; flex-wrap: wrap;
-                                    gap: 8px; padding: 8px; background: var(--bg3);
+                                    gap: 6px; padding: 8px; background: var(--bg3);
                                     border: 1px solid var(--border); border-radius: 6px;"></div>
                     </div>
                     <div id="bulk-ai-tags-hint" style="display:none; margin-bottom:12px; padding:8px; background:var(--bg3); border:1px solid var(--accent); border-radius:6px; font-size:12px;"></div>
@@ -920,7 +989,6 @@ function openBulkModal(issues, ctx, reloadCb) {
                         <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
                             <button id="bulk-btn-gen-prompt" type="button" class="btn" title="Сформировать промпт для LLM">Сгенерировать промпт</button>
                             <button id="bulk-btn-ai-resolve" type="button" class="btn" title="Получить резолюцию от Ollama">Получить резолюцию ИИ</button>
-                            <button id="bulk-btn-tags" type="button" class="btn">🏷️ Изменить теги</button>
                         </div>
                         <div style="display:flex; gap:8px; align-items:center;">
                             <button id="bulk-cancel" class="btn">Отмена</button>
@@ -938,38 +1006,9 @@ function openBulkModal(issues, ctx, reloadCb) {
         overlay.querySelector('#bulk-cancel').addEventListener('click', close);
         overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
 
-        // ---------- Теги: рендер и обработчики ----------
-        function getOrderedTags(query) {
-            const q = String(query || '').trim().toLowerCase();
-            const matches = (t) => !q || t.toLowerCase().includes(q);
-
-            const already = initialTags.filter(matches);
-            const priority = PRIORITY_TAGS.filter(
-                t => availableTags.includes(t) && !initialSet.has(t) && matches(t)
-            );
-            const rest = availableTags
-                .filter(t => !initialSet.has(t) && !PRIORITY_TAGS.includes(t) && matches(t))
-                .sort((a, b) => a.localeCompare(b));
-
-            return [...already, ...priority, ...rest];
-        }
-
         function renderBulkTagList() {
-            const container = overlay.querySelector('#bulk-tags-list');
-            if (!container) return;
-            const ordered = getOrderedTags(tagsQuery);
-            if (ordered.length === 0) {
-                container.innerHTML = `<div style="color:var(--text-dim); font-size:12px;">${
-                    tagsQuery.trim() ? 'Нет тегов по фильтру' : 'Нет доступных тегов'
-                }</div>`;
-                return;
-            }
-            container.innerHTML = ordered.map(t => `
-                <label style="display: flex; align-items: center; gap: 4px; font-size: 12px; cursor: pointer;">
-                    <input type="checkbox" class="bulk-tag-cb" value="${esc(t)}" ${selectedTags.has(t) ? 'checked' : ''}>
-                    ${esc(t)}
-                </label>
-            `).join('');
+            const ordered = buildOrderedTags(availableTags, initialTags, PRIORITY_TAGS, tagsQuery);
+            renderTagCheckboxes(overlay.querySelector('#bulk-tags-list'), ordered, selectedTags);
         }
 
         renderBulkTagList();
@@ -980,17 +1019,21 @@ function openBulkModal(issues, ctx, reloadCb) {
         });
 
         overlay.querySelector('#bulk-tags-list').addEventListener('change', (e) => {
-            if (e.target.classList.contains('bulk-tag-cb')) {
+            if (e.target.classList.contains('tag-cb')) {
                 if (e.target.checked) selectedTags.add(e.target.value);
                 else                  selectedTags.delete(e.target.value);
             }
         });
 
-        // ---------- AI ----------
         overlay.querySelector('#bulk-btn-gen-prompt').addEventListener('click', async () => {
             const status = overlay.querySelector('#bulk-status').value;
             const statusLabel = overlay.querySelector('#bulk-status').selectedOptions[0].textContent.trim();
             const prompt = await buildBulkStatusCommentPrompt(issues, status, statusLabel, ctx, availableTags);
+
+            console.groupCollapsed('[Prompt] bulk generated');
+            console.log(prompt);
+            console.groupEnd();
+
             try {
                 await navigator.clipboard.writeText(prompt);
                 toast('Промпт скопирован в буфер обмена');
@@ -1015,13 +1058,9 @@ function openBulkModal(issues, ctx, reloadCb) {
                 const commentTa = overlay.querySelector('#bulk-comment');
                 if (commentTa) commentTa.value = parsed.comment;
 
-                // NEW: отмечаем AI-теги в чекбоксах
                 if (parsed.tags && parsed.tags.length > 0) {
                     parsed.tags.forEach(tag => {
-                        // Если тега нет в списке — добавим как "выбранный"
-                        if (!availableTags.includes(tag)) {
-                            availableTags.push(tag);
-                        }
+                        if (!availableTags.includes(tag)) availableTags.push(tag);
                         selectedTags.add(tag);
                     });
                     renderBulkTagList();
@@ -1035,22 +1074,10 @@ function openBulkModal(issues, ctx, reloadCb) {
         });
         bindOllamaSettingsButton(overlay, ctx, '#bulk-btn-ollama-settings');
 
-        // Ручное редактирование тегов
-        overlay.querySelector('#bulk-btn-tags').addEventListener('click', () => {
-            // Сбрасываем AI-флаг: пользователь выбрал ручной режим
-            showTagEditor(issues, ctx, () => {
-                close();
-                reloadCb();
-            });
-        });
-
-        // ---------- Apply ----------
         overlay.querySelector('#bulk-apply').addEventListener('click', async () => {
             const status = overlay.querySelector('#bulk-status').value;
             const comment = overlay.querySelector('#bulk-comment').value;
-
-            const checkedTags = [...selectedTags];
-            const tagsStr = checkedTags.join(',');
+            const tagsStr = [...selectedTags].join(',');
             const tagsChanged = tagsStr !== (issues[0].tags || []).join(',');
 
             const btn = overlay.querySelector('#bulk-apply');
@@ -1074,11 +1101,11 @@ function openBulkModal(issues, ctx, reloadCb) {
                 btn.textContent = `Применение ${success}/${issues.length}...`;
             }
 
-            // Применяем теги, если они изменились
+            // FIX: set_tags с project (helper setIssueTags)
             if (tagsChanged) {
                 try {
-                    const keysStr = issues.map(it => it.key).join(',');
-                    await ctx.api('/api/set_tags?keys=' + encodeURIComponent(keysStr) + '&tags=' + encodeURIComponent(tagsStr), { method: 'POST' });
+                    const keys = issues.map(it => it.key);
+                    await setIssueTags(ctx, keys, [...selectedTags]);
                 } catch (e) {
                     console.error('Ошибка применения тегов', e);
                     ctx.toast('Статусы применены, но теги не обновились: ' + e.message, true);
@@ -1093,11 +1120,12 @@ function openBulkModal(issues, ctx, reloadCb) {
     })();
 }
 
+// ==================== АВТОМАТИЧЕСКАЯ ОБРАБОТКА ====================
+
 function openAutoBulkModal(issues, ctx, reloadCb) {
     if (!issues.length) { toast('Нет доступных issues для изменения', true); return; }
 
     (async () => {
-        // Загружаем теги один раз
         const availableTags = await fetchAvailableTags(ctx);
 
         const overlay = document.createElement('div');
@@ -1187,7 +1215,7 @@ function openAutoBulkModal(issues, ctx, reloadCb) {
         let isProcessing = false;
         let hasGenerated = false;
         let abortController = null;
-        let currentSuggestedTags = []; // NEW: теги, предложенные AI для текущего issue
+        let currentSuggestedTags = [];
 
         const close = () => {
             if (isProcessing || hasGenerated) {
@@ -1201,13 +1229,9 @@ function openAutoBulkModal(issues, ctx, reloadCb) {
         overlay.querySelector('.modal-close').addEventListener('click', close);
         overlay.querySelector('#auto-btn-cancel').addEventListener('click', close);
 
-        // Ручное редактирование тегов для текущего issue
         ui.btnTags.addEventListener('click', () => {
             if (currentIndex >= issues.length) return;
-            const it = issues[currentIndex];
-            showTagEditor([it], ctx, () => {
-                // Не сбрасываем прогресс
-            });
+            showTagEditor([issues[currentIndex]], ctx, () => { /* не сбрасываем прогресс */ });
         });
 
         function updateUI() {
@@ -1271,6 +1295,15 @@ function openAutoBulkModal(issues, ctx, reloadCb) {
                 const settings = OllamaClient.getSettings();
                 if (!settings.url || !settings.model) throw new Error("Ollama не настроена. Нажмите ⚙ Ollama.");
 
+                console.groupCollapsed('[Ollama AUTO] request ' + it.key);
+                console.log('URL:', settings.url);
+                console.log('Model:', settings.model);
+                console.log('Prompt length:', prompt.length, 'chars');
+                console.log('--- PROMPT BEGIN ---');
+                console.log(prompt);
+                console.log('--- PROMPT END ---');
+                console.groupEnd();
+
                 ui.progress.textContent = 'Запрос к Ollama...';
                 ui.log.textContent = 'Ожидание ответа от модели...';
 
@@ -1283,11 +1316,14 @@ function openAutoBulkModal(issues, ctx, reloadCb) {
                     ui.commentTa.value = fullResponse;
                 }
 
+                console.groupCollapsed('[Ollama AUTO] response ' + it.key);
+                console.log(fullResponse);
+                console.groupEnd();
+
                 const parsed = parseOllamaResponse(fullResponse);
                 ui.statusSel.value = parsed.status;
                 ui.commentTa.value = parsed.comment;
 
-                // NEW: сохраняем предложенные AI теги и показываем подсказку
                 currentSuggestedTags = parsed.tags || [];
                 if (currentSuggestedTags.length > 0) {
                     ui.aiTagsHint.style.display = 'block';
@@ -1351,10 +1387,10 @@ function openAutoBulkModal(issues, ctx, reloadCb) {
                 const res = await ctx.api('/api/mark?' + p, { method: 'POST' });
                 if (res.success === false) throw new Error(res.error || 'Ошибка применения');
 
-                // NEW: применяем AI-теги для текущего issue
+                // FIX: set_tags с project (helper setIssueTags)
                 if (currentSuggestedTags.length > 0) {
                     try {
-                        await ctx.api('/api/set_tags?keys=' + encodeURIComponent(it.key) + '&tags=' + encodeURIComponent(currentSuggestedTags.join(',')), { method: 'POST' });
+                        await setIssueTags(ctx, it.key, currentSuggestedTags);
                     } catch (e) {
                         console.warn('Не удалось применить AI-теги:', e);
                         toast('Теги не установлены: ' + e.message, true);

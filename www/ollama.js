@@ -380,7 +380,7 @@ export function bindOllamaResolveButton(overlay, opts) {
         buildPrompt,
         commentSelector = '#modal-comment',
         btnSelector = '#modal-btn-ai-resolve',
-        onComplete // <--- ДОБАВЛЕНО: коллбэк для обработки финального ответа
+        onComplete
     } = opts;
 
     const btn = overlay.querySelector(btnSelector);
@@ -415,6 +415,17 @@ export function bindOllamaResolveButton(overlay, opts) {
             return;
         }
 
+        // NEW: лог отправляемого промпта
+        console.groupCollapsed('[Ollama] request');
+        console.log('URL:', settings.url);
+        console.log('Model:', settings.model);
+        console.log('Status:', status, '(' + statusLabel + ')');
+        console.log('Prompt length:', prompt.length, 'chars');
+        console.log('--- PROMPT BEGIN ---');
+        console.log(prompt);
+        console.log('--- PROMPT END ---');
+        console.groupEnd();
+
         const comment = overlay.querySelector(commentSelector);
         if (comment) comment.value = '';
 
@@ -426,7 +437,7 @@ export function bindOllamaResolveButton(overlay, opts) {
 
         try {
             const client = new OllamaClient(settings);
-            let fullResponse = ''; // <--- Собираем весь ответ
+            let fullResponse = '';
 
             for await (const chunk of client.streamChat({ prompt, signal })) {
                 fullResponse += chunk;
@@ -436,12 +447,14 @@ export function bindOllamaResolveButton(overlay, opts) {
                 }
             }
 
-            // Вывод в консоль для контроля
-            console.log("=== OLLAMA RAW RESPONSE ===");
+            // NEW: лог ответа
+            console.groupCollapsed('[Ollama] response');
+            console.log('Raw length:', fullResponse.length, 'chars');
+            console.log('--- RAW BEGIN ---');
             console.log(fullResponse);
-            console.log("===========================");
+            console.log('--- RAW END ---');
+            console.groupEnd();
 
-            // Вызываем коллбэк, если он передан
             if (onComplete) {
                 onComplete(fullResponse);
             }
@@ -451,6 +464,7 @@ export function bindOllamaResolveButton(overlay, opts) {
             if (e.name === 'AbortError') {
                 ctx.toast('Генерация прервана', true);
             } else {
+                console.error('[Ollama] error:', e);
                 ctx.toast('Ошибка Ollama: ' + e.message, true);
             }
         } finally {

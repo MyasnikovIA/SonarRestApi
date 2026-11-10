@@ -374,4 +374,11 @@ public class SonarIssuesApi {
         }
         return out;
     }
+    /**
+     * Загружает только необработанные замечания (OPEN и REOPENED).
+     * CONFIRMED не включается — он уже обработан пользователем.
+     */
+    public List<Issue> fetchOpen(String impactSeverity, String quality) throws Exception {
+        return fetchAllByStatuses("OPEN,REOPENED", impactSeverity, quality);
+    }
 }

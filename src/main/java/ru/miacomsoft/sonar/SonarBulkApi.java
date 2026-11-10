@@ -82,16 +82,21 @@ public class SonarBulkApi {
         client.postForm("/api/issues/add_comment", form);
     }
 
-    // НОВОЕ: Массовое обновление тегов
     public void setTags(List<Issue> issues, String tagsCsv) throws Exception {
-        if (issues.isEmpty()) return;
-        List<String> keys = new ArrayList<>();
-        for (Issue it : issues) keys.add(it.key);
+        if (issues == null || issues.isEmpty()) return;
 
-        Map<String, String> form = new LinkedHashMap<>();
-        form.put("issues", String.join(",", keys));
-        form.put("tags", tagsCsv);
-        client.postForm("/api/issues/set_tags", form);
+        for (Issue it : issues) {
+            if (it == null || it.key == null || it.key.isEmpty()) continue;
+
+            Map<String, String> form = new LinkedHashMap<>();
+            form.put("issue", it.key);            // ← SonarQube принимает issue=KEY
+            form.put("tags", tagsCsv == null ? "" : tagsCsv);
+            client.postForm("/api/issues/set_tags", form);
+
+            if (issues.size() > 1) {
+                try { Thread.sleep(50); } catch (InterruptedException ignore) {}
+            }
+        }
     }
 
     public Set<String> reopenIssues(List<Issue> issues) throws Exception {

@@ -26,17 +26,22 @@ public class SetTagsHandler extends BaseHandler {
     protected void handleRequest(HttpExchange ex) throws Exception {
         resolveProject(ex); // Валидация проекта
         Map<String, String> q = parseQuery(ex);
-        String keysStr = param(q, "keys", "");
-        String tagsStr = param(q, "tags", "");
+        String keysStr  = param(q, "keys",  "");
+        String issueStr = param(q, "issue", "");
+        String tagsStr  = param(q, "tags",  "");
 
+// Новый клиент шлёт keys=KEY&issue=KEY; старый — только keys=KEY1,KEY2.
+// Если keys пуст, но issue передан — используем issue как единственный ключ.
+        if (keysStr.isEmpty() && !issueStr.isEmpty()) {
+            keysStr = issueStr;
+        }
         if (keysStr.isEmpty()) {
-            sendError(ex, 400, "Параметр keys обязателен");
+            sendError(ex, 400, "Параметр keys (или issue) обязателен");
             return;
         }
 
-        String[] keys = keysStr.split(",");
         List<Issue> issues = new ArrayList<>();
-        for (String k : keys) {
+        for (String k : keysStr.split(",")) {
             if (!k.trim().isEmpty()) {
                 Issue stub = new Issue();
                 stub.key = k.trim();

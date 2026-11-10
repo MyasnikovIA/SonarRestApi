@@ -170,7 +170,6 @@ async function refreshStatusBar() {
             dot.classList.add('building');
             txt.textContent = 'building snapshot…';
 
-            // Показываем прогресс-бар
             progContainer.classList.remove('hidden');
 
             const cur = h.snapshotProgress || 0;
@@ -178,17 +177,14 @@ async function refreshStatusBar() {
             const phase = h.snapshotPhase || 'starting';
 
             if (tot > 0) {
-                // Определенный прогресс
                 progFill.classList.remove('indeterminate');
                 const pct = Math.min(100, Math.round((cur / tot) * 100));
                 progFill.style.width = pct + '%';
                 progText.textContent = `${phase} (${cur}/${tot})`;
             } else {
-                // Неопределенный прогресс (например, fetch issues)
                 progFill.classList.add('indeterminate');
                 progText.textContent = phase;
             }
-
         }
         else if (h.snapshotReady) {
             dot.classList.add('ok');
@@ -206,6 +202,7 @@ async function refreshStatusBar() {
         if (!state.project && h.defaultProject) {
             state.project = h.defaultProject;
             document.getElementById('project').value = state.project;
+            loadMeasures();
         }
     } catch {
         document.getElementById('status-dot').className = 'dot err';
@@ -214,6 +211,112 @@ async function refreshStatusBar() {
     }
 }
 
+// ============ measures (project statistics) ============
+
+async function loadMeasures() {
+    const bar = document.getElementById('measures-bar');
+    if (!bar) return;
+
+    if (!state.project) {
+        bar.classList.add('hidden');
+        return;
+    }
+
+    try {
+        const p = new URLSearchParams({ project: state.project });
+        const d = await api('/api/measures?' + p);
+        renderMeasures(d);
+    } catch (e) {
+        console.warn('measures load failed:', e.message);
+        bar.classList.add('hidden');
+    }
+}
+
+function formatNum(n) {
+    n = Number(n) || 0;
+    if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
+    if (n >= 1_000)     return (n / 1_000).toFixed(1) + 'K';
+    return String(n);
+}
+
+function ratingLetter(r) {
+    const n = Math.round(Number(r) || 0);
+    if (n < 1) return '—';
+    if (n > 5) return 'E';
+    return ['A', 'B', 'C', 'D', 'E'][n - 1];
+}
+
+function setRatingClass(el, r) {
+    if (!el) return;
+    el.classList.remove('rating-a', 'rating-b', 'rating-c', 'rating-d', 'rating-e');
+    const n = Math.round(Number(r) || 0);
+    if (n >= 1 && n <= 5) {
+        el.classList.add('rating-' + ['a', 'b', 'c', 'd', 'e'][n - 1]);
+    }
+}
+
+function setText(id, text) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = text;
+}
+
+function renderMeasures(d) {
+    const bar = document.getElementById('measures-bar');
+    if (!bar) return;
+    bar.classList.remove('hidden');
+
+    // Quality Gate
+    const status = String(d.alertStatus || '').toUpperCase();
+    const qg = document.getElementById('measure-qg');
+    if (qg) {
+        qg.textContent =
+            status === 'OK'    ? '✓ QG' :
+            status === 'ERROR' ? '✗ QG' :
+            status === 'WARN'  ? '⚠ QG' : '? QG';
+        qg.classList.remove('qg-ok', 'qg-err', 'qg-warn', 'qg-unknown');
+        qg.classList.add(
+            status === 'OK'    ? 'qg-ok' :
+            status === 'ERROR' ? 'qg-err' :
+            status === 'WARN'  ? 'qg-warn' : 'qg-unknown');
+    }
+
+    // Total: legacy violations, иначе сумма MQR
+    const total =
+        Number(d.violations) ||
+        (Number(d.maintainabilityIssues) + Number(d.reliabilityIssues) + Number(d.securityIssues)) ||
+        0;
+    setText('measure-total', formatNum(total));
+
+    // Разбивка: MQR приоритет, legacy fallback
+    const secCount = Number(d.securityIssues)        || Number(d.vulnerabilities) || 0;
+    const relCount = Number(d.reliabilityIssues)     || Number(d.bugs)            || 0;
+    const mntCount = Number(d.maintainabilityIssues) || Number(d.codeSmells)      || 0;
+
+    setText('measure-security-count',        formatNum(secCount));
+    setText('measure-reliability-count',     formatNum(relCount));
+    setText('measure-maintainability-count', formatNum(mntCount));
+
+    // Рейтинги
+    const secR = document.getElementById('measure-security-rating');
+    const relR = document.getElementById('measure-reliability-rating');
+    const mntR = document.getElementById('measure-maintainability-rating');
+
+    if (secR) { secR.textContent = ratingLetter(d.securityRating);        setRatingClass(secR, d.securityRating); }
+    if (relR) { relR.textContent = ratingLetter(d.reliabilityRating);     setRatingClass(relR, d.reliabilityRating); }
+    if (mntR) { mntR.textContent = ratingLetter(d.maintainabilityRating); setRatingClass(mntR, d.maintainabilityRating); }
+
+    // Дополнительные
+    setText('measure-accepted', formatNum(d.acceptedIssues || 0));
+
+    const cov = Number(d.coverage);
+    setText('measure-coverage', Number.isFinite(cov) ? cov.toFixed(1) + '%' : '—');
+
+    const dup = Number(d.duplicatedLinesDensity);
+    setText('measure-dup', Number.isFinite(dup) ? dup.toFixed(1) + '%' : '—');
+}
+
+// ============ refreshSnapshot ============
+
 async function refreshSnapshot() {
     if (!state.project) { toast('Сначала задайте project', true); return; }
     const p = new URLSearchParams({ project: state.project });
@@ -221,6 +324,7 @@ async function refreshSnapshot() {
         const d = await api('/api/refresh?' + p, { method: 'POST' });
         toast(d.message || d.status);
         refreshStatusBar();
+        loadMeasures();
     } catch (e) { toast(e.message, true); }
 }
 
@@ -252,11 +356,13 @@ function initUI() {
     $('snippets').value = state.snippets;
 
     loadKeysToSelect();
+    loadMeasures();
 
     $('project').addEventListener('change', e => {
         state.project = e.target.value.trim();
         localStorage.setItem('project', state.project);
         loadKeysToSelect();
+        loadMeasures();
     });
     $('sev').addEventListener('change', e => {
         state.sev = e.target.value;
@@ -284,11 +390,11 @@ function initUI() {
     $('btn-download-keys').addEventListener('click', downloadKeys);
     $('btn-load').addEventListener('click', () => {
         loadKeysToSelect();
+        loadMeasures();
         activateTab(state.activeTab);
     });
     $('btn-refresh').addEventListener('click', refreshSnapshot);
 
-    // НОВОЕ: обработчик клика по кнопке настроек Ollama
     $('btn-ollama-settings').addEventListener('click', () => {
         openOllamaSettingsModal(ctx);
     });
@@ -299,3 +405,6 @@ function initUI() {
 initUI();
 refreshStatusBar();
 setInterval(refreshStatusBar, 5000);
+
+// Периодическое обновление мер (отдельный интервал — реже, т.к. данные крупные)
+setInterval(loadMeasures, 30000);

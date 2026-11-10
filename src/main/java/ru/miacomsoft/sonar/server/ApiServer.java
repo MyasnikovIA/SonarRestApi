@@ -28,27 +28,32 @@ public final class ApiServer {
         server.createContext("/api/status",         new StatusHandler(state));
 
         // Данные
-        server.createContext("/api/health",   new HealthHandler(state));
-        server.createContext("/api/summary",  new SummaryHandler(state));
-        server.createContext("/api/matrix",   new MatrixHandler(state));
-        server.createContext("/api/perfile",  new PerFileHandler(state));
-        server.createContext("/api/details",  new DetailsHandler(state));
-        server.createContext("/api/issues",   new IssuesHandler(state));
-        server.createContext("/api/keys",     new KeysHandler(state));
-        server.createContext("/api/snippet",  new SnippetHandler(state));
+        server.createContext("/api/health",    new HealthHandler(state));
+        server.createContext("/api/measures",  new MeasuresHandler(state));
+        server.createContext("/api/summary",   new SummaryHandler(state));
+        server.createContext("/api/matrix",    new MatrixHandler(state));
+        server.createContext("/api/perfile",   new PerFileHandler(state));
+        server.createContext("/api/details",   new DetailsHandler(state));
+        server.createContext("/api/issues",    new IssuesHandler(state));
+        server.createContext("/api/keys",      new KeysHandler(state));
+        server.createContext("/api/snippet",   new SnippetHandler(state));
 
         // Изменения
-        server.createContext("/api/mark",     new MarkHandler(state));
-        server.createContext("/api/cancel",   new CancelHandler(state));
+        server.createContext("/api/mark",      new MarkHandler(state));
+        server.createContext("/api/cancel",    new CancelHandler(state));
 
-        ExecutorService pool = Executors.newFixedThreadPool(Math.max(1, threads));
-        server.setExecutor(pool);
-        server.start();
         // ==== Статика (WWW) ====
         Path www = resolveWwwDir();
         if (www != null) {
             server.createContext("/", new StaticHandler(www));
         }
+
+        // ВАЖНО: регистрируем ВСЕ контексты до server.start() — иначе
+        // первые запросы могут получить 404, пока контексты ещё не видны.
+        ExecutorService pool = Executors.newFixedThreadPool(Math.max(1, threads));
+        server.setExecutor(pool);
+        server.start();
+
         System.out.println("===================================================");
         System.out.println(" Sonar REST API server started");
         System.out.println(" Bind:        " + host + ":" + port);
@@ -66,6 +71,7 @@ public final class ApiServer {
         System.out.println("   POST /api/session/reload");
         System.out.println("   POST /api/refresh?project=&wait=true|false");
         System.out.println("   POST /api/refresh/issue?project=&key=");
+        System.out.println("   GET  /api/measures?project=");
         System.out.println("   GET  /api/summary?project=&sev=&qual=");
         System.out.println("   GET  /api/matrix?project=&sev=&qual=");
         System.out.println("   GET  /api/perfile?project=&sev=&qual=");
@@ -83,6 +89,7 @@ public final class ApiServer {
         }
         System.out.println("===================================================");
     }
+
     /** Ищем каталог WWW: -Dsonar.www → рядом с JAR → target/../WWW → ./WWW. */
     private static Path resolveWwwDir() {
         String sys = System.getProperty("sonar.www");

@@ -550,7 +550,7 @@ function showChangelogModal(issues, ctx) {
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
     overlay.innerHTML = `
-        <div class="modal-content" style="max-width: 600px;">
+        <div class="modal-content" style="max-width: 700px;">
             <div class="modal-header">
                 <h3 style="margin:0;">История изменений</h3>
                 <button class="modal-close">&times;</button>
@@ -566,40 +566,110 @@ function showChangelogModal(issues, ctx) {
     overlay.querySelector('.modal-close').addEventListener('click', close);
     overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
 
-    Promise.all(issues.map(it =>
-        ctx.api('/api/changelog?issueKey=' + encodeURIComponent(it.key))
-           .catch(() => ({ changelog: [] }))
-    )).then(results => {
-        let allLogs = [];
-        results.forEach((r, idx) => {
-            const it = issues[idx];
-            const logs = r.changelog || [];
-            logs.forEach(c => {
-                allLogs.push({ ...c, issueKey: it.key });
+    // FIX: /api/changelog возвращает только diffs (status/resolution/...),
+    // а комментарии лежат в issue.comments. Загружаем и snippet (для comments),
+    // и changelog параллельно, затем склеиваем в единый timeline по дате.
+    Promise.all(issues.map(async it => {
+        const params = new URLSearchParams();
+        if (ctx.state.project) params.set('project', ctx.state.project);
+        params.set('issueKey', it.key);
+
+        const [snippetRes, changelogRes] = await Promise.all([
+            ctx.api('/api/snippet?' + params).catch(() => ({})),
+            ctx.api('/api/changelog?' + params).catch(() => ({ changelog: [] }))
+        ]);
+
+        return {
+            issueKey: it.key,
+            issue: snippetRes.issue || it,
+            changelog: changelogRes.changelog || []
+        };
+    })).then(results => {
+        const timeline = [];
+
+        results.forEach(({ issueKey, issue, changelog }) => {
+            // 1) Комментарии
+            const comments = issue.comments || [];
+            comments.forEach(c => {
+                timeline.push({
+                    kind: 'comment',
+                    date: new Date(c.createdAt),
+                    user: c.login || 'Пользователь',
+                    text: c.markdown || c.htmlText || '',
+                    issueKey
+                });
             });
+
+            // 2) Изменения (status/resolution/assignee/...)
+            changelog.forEach(c => {
+                timeline.push({
+                    kind: 'changelog',
+                    date: new Date(c.creationDate),
+                    user: c.userName || c.user || 'Пользователь',
+                    diffs: c.diffs || [],
+                    issueKey
+                });
+            });
+
+            // 3) Создание замечания (синтетическое, т.к. /api/changelog его не возвращает)
+            if (issue.creationDate) {
+                timeline.push({
+                    kind: 'created',
+                    date: new Date(issue.creationDate),
+                    user: issue.author || 'Пользователь',
+                    issueKey
+                });
+            }
         });
 
-        allLogs.sort((a, b) => new Date(b.creationDate) - new Date(a.creationDate));
+        // Сортировка: сначала самые свежие
+        timeline.sort((a, b) => b.date - a.date);
 
         const body = overlay.querySelector('#changelog-body');
-        if (!allLogs.length) {
+        if (!timeline.length) {
             body.innerHTML = '<div class="empty">Нет истории изменений</div>';
             return;
         }
 
         body.innerHTML = `
             <div style="background:var(--bg3); border:1px solid var(--border); border-radius:6px; padding:12px; max-height:500px; overflow-y:auto; font-size:12px;">
-                ${allLogs.map(c => `
-                    <div style="margin-bottom:12px; padding-bottom:12px; border-bottom:1px solid var(--border);">
+                ${timeline.map(item => {
+                    const dateStr = item.date.toLocaleString('ru-RU');
+                    const header = `
                         <div style="color:var(--accent); font-weight:bold; margin-bottom:4px;">
-                            ${esc(c.userName || c.user)} <span style="color:var(--text-dim); font-weight:normal;">(${new Date(c.creationDate).toLocaleString()})</span>
-                            <span style="color:var(--text-dim); font-weight:normal; margin-left:8px;">[${esc(c.issueKey)}]</span>
+                            ${esc(item.user)}
+                            <span style="color:var(--text-dim); font-weight:normal;">(${esc(dateStr)})</span>
+                            <span style="color:var(--text-dim); font-weight:normal; margin-left:8px;">[${esc(item.issueKey)}]</span>
                         </div>
-                        <div>
-                            ${c.diffs.map(diff => `<div><span style="color:var(--text-dim)">${esc(diff.key)}:</span> ${esc(diff.oldValue || '—')} &rarr; <b>${esc(diff.newValue)}</b></div>`).join('')}
+                    `;
+
+                    if (item.kind === 'comment') {
+                        return `
+                            <div style="margin-bottom:12px; padding-bottom:12px; border-bottom:1px solid var(--border);">
+                                ${header}
+                                <div style="white-space:pre-wrap; background:var(--bg); padding:8px; border-radius:4px;">
+                                    ${esc(item.text)}
+                                </div>
+                            </div>
+                        `;
+                    }
+                    if (item.kind === 'created') {
+                        return `
+                            <div style="margin-bottom:12px; padding-bottom:12px; border-bottom:1px solid var(--border);">
+                                ${header}
+                                <div style="color:var(--text-dim);">Созданное замечание</div>
+                            </div>
+                        `;
+                    }
+                    return `
+                        <div style="margin-bottom:12px; padding-bottom:12px; border-bottom:1px solid var(--border);">
+                            ${header}
+                            <div>
+                                ${item.diffs.map(diff => `<div><span style="color:var(--text-dim)">${esc(diff.key)}:</span> ${esc(diff.oldValue || '—')} &rarr; <b>${esc(diff.newValue)}</b></div>`).join('')}
+                            </div>
                         </div>
-                    </div>
-                `).join('')}
+                    `;
+                }).join('')}
             </div>
         `;
     }).catch(e => {
@@ -622,9 +692,16 @@ async function openBulkModal(issues, ctx, reloadCb) {
     }
 
     const currentTags = issues[0].tags || [];
+    const initialTags = [...currentTags];
     currentTags.forEach(t => {
         if (!availableTags.includes(t)) availableTags.push(t);
     });
+
+    // Приоритетные теги + состояние выбора
+    const PRIORITY_TAGS = ['CWE', 'not-require-fix', 'require-fix'];
+    const initialSet = new Set(initialTags);
+    const selectedTags = new Set(initialTags);
+    let tagsQuery = '';
 
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
@@ -652,14 +729,14 @@ async function openBulkModal(issues, ctx, reloadCb) {
                 </div>
                 <div style="margin-bottom:16px;">
                     <label style="display:block; font-size:12px; margin-bottom:4px;">Теги</label>
-                    <div style="max-height: 150px; overflow-y: auto; display: flex; flex-wrap: wrap; gap: 8px; padding: 8px; background: var(--bg3); border: 1px solid var(--border); border-radius: 6px;">
-                        ${availableTags.map(t => `
-                            <label style="display: flex; align-items: center; gap: 4px; font-size: 12px; cursor: pointer;">
-                                <input type="checkbox" class="bulk-tag-cb" value="${esc(t)}" ${currentTags.includes(t) ? 'checked' : ''}>
-                                ${esc(t)}
-                            </label>
-                        `).join('')}
-                    </div>
+                    <input type="text" id="bulk-tags-filter" placeholder="Фильтр по тегам..."
+                           style="width:100%; box-sizing:border-box; padding:6px 10px; margin-bottom:8px;
+                                  border-radius:6px; border:1px solid var(--border);
+                                  background:var(--bg); color:var(--text);">
+                    <div id="bulk-tags-list"
+                         style="max-height: 150px; overflow-y: auto; display: flex; flex-wrap: wrap;
+                                gap: 8px; padding: 8px; background: var(--bg3);
+                                border: 1px solid var(--border); border-radius: 6px;"></div>
                 </div>
                 <div style="margin-top:16px; display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;">
                     <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
@@ -680,11 +757,64 @@ async function openBulkModal(issues, ctx, reloadCb) {
     overlay.querySelector('#bulk-cancel').addEventListener('click', close);
     overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
 
+    // ---------- Теги: рендер и обработчики ----------
+
+    function getOrderedTags(query) {
+        const q = String(query || '').trim().toLowerCase();
+        const matches = (t) => !q || t.toLowerCase().includes(q);
+
+        const already = initialTags.filter(matches);
+
+        const priority = PRIORITY_TAGS.filter(
+            t => availableTags.includes(t) && !initialSet.has(t) && matches(t)
+        );
+
+        const rest = availableTags
+            .filter(t => !initialSet.has(t) && !PRIORITY_TAGS.includes(t) && matches(t))
+            .sort((a, b) => a.localeCompare(b));
+
+        return [...already, ...priority, ...rest];
+    }
+
+    function renderBulkTagList() {
+        const container = overlay.querySelector('#bulk-tags-list');
+        if (!container) return;
+        const ordered = getOrderedTags(tagsQuery);
+        if (ordered.length === 0) {
+            container.innerHTML = `<div style="color:var(--text-dim); font-size:12px;">${
+                tagsQuery.trim() ? 'Нет тегов по фильтру' : 'Нет доступных тегов'
+            }</div>`;
+            return;
+        }
+        container.innerHTML = ordered.map(t => `
+            <label style="display: flex; align-items: center; gap: 4px; font-size: 12px; cursor: pointer;">
+                <input type="checkbox" class="bulk-tag-cb" value="${esc(t)}" ${selectedTags.has(t) ? 'checked' : ''}>
+                ${esc(t)}
+            </label>
+        `).join('');
+    }
+
+    renderBulkTagList();
+
+    overlay.querySelector('#bulk-tags-filter').addEventListener('input', (e) => {
+        tagsQuery = e.target.value;
+        renderBulkTagList();
+    });
+
+    overlay.querySelector('#bulk-tags-list').addEventListener('change', (e) => {
+        if (e.target.classList.contains('bulk-tag-cb')) {
+            if (e.target.checked) selectedTags.add(e.target.value);
+            else                  selectedTags.delete(e.target.value);
+        }
+    });
+
+    // ---------- Применение ----------
+
     overlay.querySelector('#bulk-apply').addEventListener('click', async () => {
         const status = overlay.querySelector('#bulk-status').value;
         const comment = overlay.querySelector('#bulk-comment').value;
 
-        const checkedTags = Array.from(overlay.querySelectorAll('.bulk-tag-cb:checked')).map(cb => cb.value);
+        const checkedTags = [...selectedTags];
         const tagsStr = checkedTags.join(',');
         const tagsChanged = tagsStr !== (issues[0].tags || []).join(',');
 

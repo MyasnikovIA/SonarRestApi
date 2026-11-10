@@ -68,6 +68,8 @@ export function statusBadge(status) {
 
 // ==================== TAGS EDITOR ====================
 
+// ==================== TAGS EDITOR ====================
+
 /**
  * Открывает модальное окно для редактирования тегов группы issues.
  * @param {Array} issues - список issue (должен содержать .key и .tags)
@@ -78,11 +80,10 @@ export async function showTagEditor(issues, ctx, onDone) {
     if (!issues.length) return;
 
     const keys = issues.map(it => it.key);
-    let currentTags = issues[0].tags || [];
+    const initialTags = [...(issues[0].tags || [])];
 
     let availableTags = [];
     try {
-        // Передаём project, чтобы избежать ошибок на бэкенде, если он его ожидает
         const p = new URLSearchParams();
         if (ctx.state.project) p.set('project', ctx.state.project);
         const d = await ctx.api('/api/tags?' + p.toString());
@@ -91,10 +92,33 @@ export async function showTagEditor(issues, ctx, onDone) {
         console.warn('Не удалось загрузить доступные теги', e);
     }
 
-    // Добавляем текущие теги, если их нет в доступных (например, кастомные)
-    currentTags.forEach(t => {
+    // Добавляем текущие теги, если их нет в доступных (кастомные/устаревшие)
+    initialTags.forEach(t => {
         if (!availableTags.includes(t)) availableTags.push(t);
     });
+
+    // Приоритетные теги (после «уже добавленных»)
+    const PRIORITY_TAGS = ['CWE', 'not-require-fix', 'require-fix'];
+    const initialSet = new Set(initialTags);
+    const selectedTags = new Set(initialTags); // состояние чекбоксов
+
+    // Порядок: уже добавленные → CWE → not-require-fix → require-fix → остальные (alphabet)
+    function getOrderedTags(query) {
+        const q = String(query || '').trim().toLowerCase();
+        const matches = (t) => !q || t.toLowerCase().includes(q);
+
+        const already = initialTags.filter(matches);
+
+        const priority = PRIORITY_TAGS.filter(
+            t => availableTags.includes(t) && !initialSet.has(t) && matches(t)
+        );
+
+        const rest = availableTags
+            .filter(t => !initialSet.has(t) && !PRIORITY_TAGS.includes(t) && matches(t))
+            .sort((a, b) => a.localeCompare(b));
+
+        return [...already, ...priority, ...rest];
+    }
 
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
@@ -109,14 +133,14 @@ export async function showTagEditor(issues, ctx, onDone) {
 
                 <div style="margin-bottom:12px;">
                     <label style="display:block; font-size:12px; margin-bottom:4px;">Доступные теги</label>
-                    <div style="max-height: 300px; overflow-y: auto; display: flex; flex-wrap: wrap; gap: 8px; padding: 8px; background: var(--bg3); border: 1px solid var(--border); border-radius: 6px;">
-                        ${availableTags.length > 0 ? availableTags.map(t => `
-                            <label style="display: flex; align-items: center; gap: 6px; padding: 4px 8px; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; cursor: pointer;">
-                                <input type="checkbox" class="tag-cb" value="${esc(t)}" ${currentTags.includes(t) ? 'checked' : ''}>
-                                ${esc(t)}
-                            </label>
-                        `).join('') : '<div style="color:var(--text-dim); font-size:12px;">Загрузка тегов...</div>'}
-                    </div>
+                    <input type="text" id="tags-filter" placeholder="Фильтр по тегам..."
+                           style="width:100%; box-sizing:border-box; padding:6px 10px; margin-bottom:8px;
+                                  border-radius:6px; border:1px solid var(--border);
+                                  background:var(--bg); color:var(--text);">
+                    <div id="tags-list"
+                         style="max-height: 300px; overflow-y: auto; display: flex; flex-wrap: wrap;
+                                gap: 8px; padding: 8px; background: var(--bg3);
+                                border: 1px solid var(--border); border-radius: 6px;"></div>
                 </div>
 
                 <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:20px;">
@@ -128,13 +152,46 @@ export async function showTagEditor(issues, ctx, onDone) {
     `;
     document.body.appendChild(overlay);
 
+    const listEl  = overlay.querySelector('#tags-list');
+    const filterEl = overlay.querySelector('#tags-filter');
+
+    function renderList() {
+        const ordered = getOrderedTags(filterEl.value);
+        if (ordered.length === 0) {
+            const msg = filterEl.value.trim()
+                ? 'Нет тегов по фильтру'
+                : 'Нет доступных тегов';
+            listEl.innerHTML = `<div style="color:var(--text-dim); font-size:12px;">${msg}</div>`;
+            return;
+        }
+        listEl.innerHTML = ordered.map(t => `
+            <label style="display: flex; align-items: center; gap: 6px; padding: 4px 8px;
+                          background: var(--bg); border: 1px solid var(--border);
+                          border-radius: 4px; cursor: pointer;">
+                <input type="checkbox" class="tag-cb" value="${esc(t)}" ${selectedTags.has(t) ? 'checked' : ''}>
+                ${esc(t)}
+            </label>
+        `).join('');
+    }
+
+    renderList();
+
+    // Делегирование: работает и после перерисовки списка при фильтрации
+    filterEl.addEventListener('input', renderList);
+    listEl.addEventListener('change', (e) => {
+        if (e.target.classList.contains('tag-cb')) {
+            if (e.target.checked) selectedTags.add(e.target.value);
+            else                  selectedTags.delete(e.target.value);
+        }
+    });
+
     const close = () => overlay.remove();
     overlay.querySelector('.modal-close').addEventListener('click', close);
     overlay.querySelector('#tags-cancel').addEventListener('click', close);
     overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
 
     overlay.querySelector('#tags-save').addEventListener('click', async () => {
-        const checkedTags = Array.from(overlay.querySelectorAll('.tag-cb:checked')).map(cb => cb.value);
+        const checkedTags = [...selectedTags];
         const tagsStr = checkedTags.join(',');
 
         const btn = overlay.querySelector('#tags-save');

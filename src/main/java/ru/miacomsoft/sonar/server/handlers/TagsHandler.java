@@ -18,11 +18,14 @@ public class TagsHandler extends BaseHandler {
 
     @Override
     protected void handleRequest(HttpExchange ex) throws Exception {
-        String project = resolveProject(ex);
+        // Теги в SonarQube глобальные, поэтому не вызываем resolveProject(ex).
         Map<String, String> q = parseQuery(ex);
         String query = param(q, "q", "");
 
-        SonarIssuesApi api = newApi(project);
+        // SonarIssuesApi требует projectKey в конструкторе, но метод fetchTags его не использует.
+        String project = param(q, "project", "default");
+
+        SonarIssuesApi api = new SonarIssuesApi(state.getClient(), project);
         List<String> tags = api.fetchTags(query);
 
         JSONArray arr = new JSONArray();

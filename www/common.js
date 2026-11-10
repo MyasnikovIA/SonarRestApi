@@ -82,16 +82,24 @@ export async function showTagEditor(issues, ctx, onDone) {
 
     let availableTags = [];
     try {
-        const d = await ctx.api('/api/tags');
+        // Передаём project, чтобы избежать ошибок на бэкенде, если он его ожидает
+        const p = new URLSearchParams();
+        if (ctx.state.project) p.set('project', ctx.state.project);
+        const d = await ctx.api('/api/tags?' + p.toString());
         availableTags = d.tags || [];
     } catch (e) {
         console.warn('Не удалось загрузить доступные теги', e);
     }
 
+    // Добавляем текущие теги, если их нет в доступных (например, кастомные)
+    currentTags.forEach(t => {
+        if (!availableTags.includes(t)) availableTags.push(t);
+    });
+
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
     overlay.innerHTML = `
-        <div class="modal-content" style="max-width: 500px;">
+        <div class="modal-content" style="max-width: 600px;">
             <div class="modal-header">
                 <h3 style="margin:0;">Редактирование тегов</h3>
                 <button class="modal-close">&times;</button>
@@ -100,13 +108,15 @@ export async function showTagEditor(issues, ctx, onDone) {
                 <p style="margin-top:0; color:var(--text-dim);">Выбрано ошибок: <b>${issues.length}</b></p>
 
                 <div style="margin-bottom:12px;">
-                    <label style="display:block; font-size:12px; margin-bottom:4px;">Текущие теги (через запятую)</label>
-                    <input type="text" id="tags-input" list="available-tags"
-                           value="${esc(currentTags.join(', '))}"
-                           style="width:100%; padding:8px; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:6px;">
-                    <datalist id="available-tags">
-                        ${availableTags.map(t => `<option value="${esc(t)}">`).join('')}
-                    </datalist>
+                    <label style="display:block; font-size:12px; margin-bottom:4px;">Доступные теги</label>
+                    <div style="max-height: 300px; overflow-y: auto; display: flex; flex-wrap: wrap; gap: 8px; padding: 8px; background: var(--bg3); border: 1px solid var(--border); border-radius: 6px;">
+                        ${availableTags.length > 0 ? availableTags.map(t => `
+                            <label style="display: flex; align-items: center; gap: 6px; padding: 4px 8px; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; cursor: pointer;">
+                                <input type="checkbox" class="tag-cb" value="${esc(t)}" ${currentTags.includes(t) ? 'checked' : ''}>
+                                ${esc(t)}
+                            </label>
+                        `).join('') : '<div style="color:var(--text-dim); font-size:12px;">Загрузка тегов...</div>'}
+                    </div>
                 </div>
 
                 <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:20px;">
@@ -124,8 +134,8 @@ export async function showTagEditor(issues, ctx, onDone) {
     overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
 
     overlay.querySelector('#tags-save').addEventListener('click', async () => {
-        const input = overlay.querySelector('#tags-input');
-        const tagsStr = input.value.trim();
+        const checkedTags = Array.from(overlay.querySelectorAll('.tag-cb:checked')).map(cb => cb.value);
+        const tagsStr = checkedTags.join(',');
 
         const btn = overlay.querySelector('#tags-save');
         btn.disabled = true;

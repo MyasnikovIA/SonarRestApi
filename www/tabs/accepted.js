@@ -130,7 +130,6 @@ export const accepted = {
                     </div>
                 `;
 
-                // Восстанавливаем состояние Master Checkbox после рендера
                 const currentMasterCb = listEl.querySelector('#acc-master-checkbox');
                 const allFilteredKeys = filtered.map(it => it.key);
                 if (allFilteredKeys.length > 0 && allFilteredKeys.every(k => selectedKeys.has(k))) {
@@ -281,8 +280,10 @@ function showContextMenu(x, y, clickedIssue, targetIssues, ctx, reloadCb) {
     menu.innerHTML = `
         <div class="ctx-item" id="ctx-add-comment">📝 Добавить комментарий</div>
         <div class="ctx-item" id="ctx-edit-tags">🏷️ Редактировать теги</div>
-        <div class="ctx-item" id="ctx-reopen">🔄 Снять пометку (Reopen)</div>
-        <div class="ctx-item" id="ctx-reopened">🔓 Переоткрытое замечание</div>
+        <div class="ctx-item" id="ctx-change-status">🔄 Изменить статус</div>
+        <div class="ctx-item" id="ctx-changelog">📜 История изменений</div>
+        <div class="ctx-item" style="border-top:1px solid var(--border); margin-top:4px; padding-top:8px;" id="ctx-reopen">🔓 Снять пометку (Reopen)</div>
+        <div class="ctx-item" id="ctx-reopened">❌ Переоткрытое замечание</div>
     `;
 
     document.body.appendChild(menu);
@@ -296,6 +297,14 @@ function showContextMenu(x, y, clickedIssue, targetIssues, ctx, reloadCb) {
 
     menu.querySelector('#ctx-edit-tags').addEventListener('click', () => {
         showTagEditor(targetIssues, ctx, reloadCb);
+    });
+
+    menu.querySelector('#ctx-change-status').addEventListener('click', () => {
+        showChangeStatusModal(targetIssues, ctx, reloadCb);
+    });
+
+    menu.querySelector('#ctx-changelog').addEventListener('click', () => {
+        showChangelogModal(targetIssues, ctx);
     });
 
     menu.querySelector('#ctx-reopen').addEventListener('click', async () => {
@@ -327,7 +336,7 @@ function showContextMenu(x, y, clickedIssue, targetIssues, ctx, reloadCb) {
             try {
                 const p = new URLSearchParams(ctx.qs());
                 p.set('key', it.key);
-                p.set('transition', 'reopen'); // Открывает заново
+                p.set('transition', 'reopen');
                 p.set('dryRun', 'false');
                 const res = await ctx.api('/api/mark?' + p, { method: 'POST' });
                 if (res.success === false) throw new Error(res.error || 'Не удалось открыть');
@@ -343,7 +352,7 @@ function showContextMenu(x, y, clickedIssue, targetIssues, ctx, reloadCb) {
     });
 }
 
-// ==================== МОДАЛЬНОЕ ОКНО ====================
+// ==================== МОДАЛЬНЫЕ ОКНА ====================
 
 async function openAcceptedModal(issue, ctx, onDone) {
     const overlay = document.createElement('div');
@@ -468,9 +477,155 @@ async function openAcceptedModal(issue, ctx, onDone) {
     }
 }
 
-// Модалка для добавления комментария (массового)
-function openBulkModal(issues, ctx, reloadCb) {
+// ==================== МОДАЛКА ИЗМЕНЕНИЯ СТАТУСА ====================
+
+function showChangeStatusModal(issues, ctx, reloadCb) {
+    if (!issues.length) return;
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.innerHTML = `
+        <div class="modal-content" style="max-width: 400px;">
+            <div class="modal-header">
+                <h3 style="margin:0;">Изменить статус</h3>
+                <button class="modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p>Выбрано ошибок: <b>${issues.length}</b></p>
+                <div style="margin-bottom:12px;">
+                    <label style="display:block; font-size:12px; margin-bottom:4px;">Новый статус</label>
+                    <select id="status-select" style="width:100%; padding:8px; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:6px;">
+                        <option value="accept">Принять (Это ошибка, но исправлена будет позднее)</option>
+                        <option value="falsepositive">Ложно (Анализ содержит ошибки)</option>
+                        <option value="confirm">Подтвердить</option>
+                        <option value="resolve">Исправлено</option>
+                        <option value="wontfix">Не исправлять</option>
+                    </select>
+                </div>
+                <div style="display:flex; justify-content:flex-end; gap:8px;">
+                    <button id="status-cancel" class="btn">Отмена</button>
+                    <button id="status-apply" class="btn btn-accent">Применить</button>
+                </div>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(overlay);
+
+    const close = () => overlay.remove();
+    overlay.querySelector('.modal-close').addEventListener('click', close);
+    overlay.querySelector('#status-cancel').addEventListener('click', close);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+
+    overlay.querySelector('#status-apply').addEventListener('click', async () => {
+        const status = overlay.querySelector('#status-select').value;
+        const btn = overlay.querySelector('#status-apply');
+        btn.disabled = true;
+        btn.textContent = 'Применение...';
+
+        let success = 0;
+        for (const it of issues) {
+            try {
+                const p = new URLSearchParams(ctx.qs());
+                p.set('key', it.key);
+                p.set('transition', status);
+                p.set('dryRun', 'false');
+                const res = await ctx.api('/api/mark?' + p, { method: 'POST' });
+                if (res.success === false) throw new Error(res.error || 'Ошибка');
+                success++;
+            } catch (e) {
+                console.error('Failed for ' + it.key, e);
+            }
+        }
+
+        ctx.toast(`Применено к ${success} из ${issues.length}`);
+        close();
+        ctx.refreshStatus?.();
+        if (reloadCb) reloadCb();
+    });
+}
+
+// ==================== МОДАЛКА ИСТОРИИ ИЗМЕНЕНИЙ ====================
+
+function showChangelogModal(issues, ctx) {
+    if (!issues.length) return;
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.innerHTML = `
+        <div class="modal-content" style="max-width: 600px;">
+            <div class="modal-header">
+                <h3 style="margin:0;">История изменений</h3>
+                <button class="modal-close">&times;</button>
+            </div>
+            <div class="modal-body" id="changelog-body">
+                <div class="empty">Загрузка...</div>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(overlay);
+
+    const close = () => overlay.remove();
+    overlay.querySelector('.modal-close').addEventListener('click', close);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+
+    Promise.all(issues.map(it =>
+        ctx.api('/api/changelog?issueKey=' + encodeURIComponent(it.key))
+           .catch(() => ({ changelog: [] }))
+    )).then(results => {
+        let allLogs = [];
+        results.forEach((r, idx) => {
+            const it = issues[idx];
+            const logs = r.changelog || [];
+            logs.forEach(c => {
+                allLogs.push({ ...c, issueKey: it.key });
+            });
+        });
+
+        allLogs.sort((a, b) => new Date(b.creationDate) - new Date(a.creationDate));
+
+        const body = overlay.querySelector('#changelog-body');
+        if (!allLogs.length) {
+            body.innerHTML = '<div class="empty">Нет истории изменений</div>';
+            return;
+        }
+
+        body.innerHTML = `
+            <div style="background:var(--bg3); border:1px solid var(--border); border-radius:6px; padding:12px; max-height:500px; overflow-y:auto; font-size:12px;">
+                ${allLogs.map(c => `
+                    <div style="margin-bottom:12px; padding-bottom:12px; border-bottom:1px solid var(--border);">
+                        <div style="color:var(--accent); font-weight:bold; margin-bottom:4px;">
+                            ${esc(c.userName || c.user)} <span style="color:var(--text-dim); font-weight:normal;">(${new Date(c.creationDate).toLocaleString()})</span>
+                            <span style="color:var(--text-dim); font-weight:normal; margin-left:8px;">[${esc(c.issueKey)}]</span>
+                        </div>
+                        <div>
+                            ${c.diffs.map(diff => `<div><span style="color:var(--text-dim)">${esc(diff.key)}:</span> ${esc(diff.oldValue || '—')} &rarr; <b>${esc(diff.newValue)}</b></div>`).join('')}
+                        </div>
+                    </div>
+                `).join('')}
+            </div>
+        `;
+    }).catch(e => {
+        overlay.querySelector('#changelog-body').innerHTML = `<div class="sev-HIGH">Ошибка: ${esc(e.message)}</div>`;
+    });
+}
+
+// ==================== МОДАЛЬНОЕ ОКНО ДОБАВЛЕНИЯ КОММЕНТАРИЯ ====================
+
+async function openBulkModal(issues, ctx, reloadCb) {
     if (!issues.length) { toast('Нет доступных issues для изменения', true); return; }
+
+    // Загружаем доступные теги для чекбоксов
+    let availableTags = [];
+    try {
+        const d = await ctx.api('/api/tags');
+        availableTags = d.tags || [];
+    } catch (e) {
+        console.warn('Не удалось загрузить теги', e);
+    }
+
+    const currentTags = issues[0].tags || [];
+    currentTags.forEach(t => {
+        if (!availableTags.includes(t)) availableTags.push(t);
+    });
+
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
     overlay.innerHTML = `
@@ -491,9 +646,20 @@ function openBulkModal(issues, ctx, reloadCb) {
                         <option value="wontfix">Не исправлять</option>
                     </select>
                 </div>
-                <div style="margin-bottom:16px;">
+                <div style="margin-bottom:12px;">
                     <label style="display:block; font-size:12px; margin-bottom:4px;">Комментарий</label>
                     <textarea id="bulk-comment" rows="4" style="width:100%; padding:8px; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:6px; resize:vertical;" placeholder="Введите многострочный комментарий..."></textarea>
+                </div>
+                <div style="margin-bottom:16px;">
+                    <label style="display:block; font-size:12px; margin-bottom:4px;">Теги</label>
+                    <div style="max-height: 150px; overflow-y: auto; display: flex; flex-wrap: wrap; gap: 8px; padding: 8px; background: var(--bg3); border: 1px solid var(--border); border-radius: 6px;">
+                        ${availableTags.map(t => `
+                            <label style="display: flex; align-items: center; gap: 4px; font-size: 12px; cursor: pointer;">
+                                <input type="checkbox" class="bulk-tag-cb" value="${esc(t)}" ${currentTags.includes(t) ? 'checked' : ''}>
+                                ${esc(t)}
+                            </label>
+                        `).join('')}
+                    </div>
                 </div>
                 <div style="margin-top:16px; display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;">
                     <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
@@ -518,11 +684,17 @@ function openBulkModal(issues, ctx, reloadCb) {
         const status = overlay.querySelector('#bulk-status').value;
         const comment = overlay.querySelector('#bulk-comment').value;
 
+        const checkedTags = Array.from(overlay.querySelectorAll('.bulk-tag-cb:checked')).map(cb => cb.value);
+        const tagsStr = checkedTags.join(',');
+        const tagsChanged = tagsStr !== (issues[0].tags || []).join(',');
+
         const btn = overlay.querySelector('#bulk-apply');
         btn.disabled = true;
         btn.textContent = 'Применение...';
 
         let success = 0;
+
+        // 1. Меняем статус и добавляем комментарий
         for (const it of issues) {
             try {
                 const p = new URLSearchParams(ctx.qs());
@@ -539,9 +711,20 @@ function openBulkModal(issues, ctx, reloadCb) {
             btn.textContent = `Применение ${success}/${issues.length}...`;
         }
 
+        // 2. Если теги изменились — обновляем их
+        if (tagsChanged) {
+            try {
+                const keysStr = issues.map(it => it.key).join(',');
+                await ctx.api('/api/set_tags?keys=' + encodeURIComponent(keysStr) + '&tags=' + encodeURIComponent(tagsStr), { method: 'POST' });
+            } catch (e) {
+                console.error('Ошибка применения тегов', e);
+                ctx.toast('Статусы применены, но теги не обновились: ' + e.message, true);
+            }
+        }
+
         ctx.toast(`Применено к ${success} из ${issues.length}`);
         close();
         ctx.refreshStatus?.();
-        reloadCb();
+        if (reloadCb) reloadCb();
     });
 }

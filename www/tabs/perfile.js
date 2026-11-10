@@ -10,6 +10,8 @@ import {
 
 const MAX_PROMPT_LENGTH = 16000;
 
+// ==================== HELPERS ====================
+
 function getMappedStatus(sonarStatus) {
     if (!sonarStatus) return 'accept';
     const s = String(sonarStatus).toUpperCase();
@@ -25,6 +27,286 @@ function getReopenTransition(status) {
     if (status === 'CONFIRMED') return 'unconfirm';
     return 'reopen';
 }
+
+/**
+ * Парсер ответа Ollama. Теперь возвращает { status, comment, tags }.
+ * Формат ответа:
+ *   Статус: <accept|falsepositive|confirm|resolve|wontfix>
+ *   Критичность: <вердикт> — <обоснование>
+ *   Теги: tag1, tag2, tag3
+ *   <1-3 предложения с объяснением>
+ */
+function parseOllamaResponse(raw) {
+    const text = String(raw || '');
+    let status = '';
+    let comment = '';
+    let tags = [];
+
+    const statusMatch = text.match(/Статус:\s*(accept|falsepositive|confirm|resolve|wontfix)/i);
+    if (statusMatch) status = statusMatch[1].toLowerCase();
+
+    const tagsMatch = text.match(/Теги:\s*([^\n]+)/i);
+    if (tagsMatch) {
+        tags = tagsMatch[1]
+            .split(/[,;]/)
+            .map(t => t.replace(/[*_`]/g, '').trim().toLowerCase())
+            .filter(t => t.length > 0);
+    }
+
+    // NEW: гарантируем наличие одного из фикс-тегов.
+    // Если модель вернула оба или ни одного — берём require-fix (безопаснее).
+    const hasRequire    = tags.includes('require-fix');
+    const hasNotRequire = tags.includes('not-require-fix');
+
+    // убираем оба из массива, чтобы нормализовать
+    tags = tags.filter(t => t !== 'require-fix' && t !== 'not-require-fix');
+
+    let fixDecision;
+    if (hasRequire && !hasNotRequire)      fixDecision = 'require-fix';
+    else if (hasNotRequire && !hasRequire) fixDecision = 'not-require-fix';
+    else                                    fixDecision = 'require-fix'; // fallback
+
+    // ставим фикс-тег первым
+    tags.unshift(fixDecision);
+
+    // Ограничиваем общее число тегов до 3
+    tags = tags.slice(0, 3);
+
+    // comment = всё, что после "Критичность:" (включая её)
+    const lines = text.split(/\r?\n/);
+    const commentLines = [];
+    let inComment = false;
+    for (const line of lines) {
+        const trimmed = line.trim();
+        if (/^Статус:/i.test(trimmed)) continue;
+        if (/^Теги:/i.test(trimmed)) continue;
+        if (/^Критичность:/i.test(trimmed)) {
+            inComment = true;
+            commentLines.push(line);
+            continue;
+        }
+        if (inComment) commentLines.push(line);
+    }
+    comment = commentLines.join('\n').trim();
+
+    if (!comment) {
+        comment = lines
+            .filter(l => !/^Статус:/i.test(l.trim()) && !/^Теги:/i.test(l.trim()))
+            .join('\n')
+            .trim();
+    }
+
+    return { status, comment, tags, fixDecision };
+}
+
+// ==================== PROMPT BUILDERS (с поддержкой тегов) ====================
+
+function buildStatusCommentPrompt(issue, ruleName, snippet, status, statusLabel, availableTags) {
+    const code = highlightForPrompt(snippet, issue.line).trim();
+    const lang = detectLanguage(issue.component);
+    const severity = issue.impactSeverity || issue.severity || '';
+    const tagsList = (availableTags && availableTags.length)
+        ? availableTags.join(', ')
+        : 'любые релевантные';
+
+    return [
+        'Ты — опытный разработчик и эксперт по статическому анализу кода (SonarQube).',
+        'Проект мультиязычный. НЕ предполагай язык — он указан ниже.',
+        '',
+        'ЗАДАЧА:',
+        '1. Подтверди или скорректируй выбранный пользователем статус: "' + status + '" — ' + statusLabel,
+        '2. Определи реальную критичность.',
+        '3. Дай РЕШЕНИЕ: нужно ли исправлять этот баг?',
+        '4. Выбери 2–3 тега из списка доступных (обязательно с фикс-тегом).',
+        '5. Объясни в 1–3 предложениях.',
+        '',
+        'ОПРЕДЕЛЕНИЯ СТАТУСОВ:',
+        '- falsepositive: SonarQube ошибся, проблемы нет.',
+        '- accept: реальная проблема, исправим позже (техдолг).',
+        '- confirm: реальная и срочная проблема (security, потеря данных).',
+        '- resolve: уже исправлено в коде.',
+        '- wontfix: реальная проблема, но не будем исправлять (генерированный код).',
+        '',
+        'РЕШЕНИЕ О НЕОБХОДИМОСТИ ИСПРАВЛЕНИЯ (обязательно!):',
+        'Верни РОВНО ОДИН из двух тегов в поле "Теги:"',
+        '- "require-fix"     — баг РЕАЛЬНЫЙ и его НУЖНО исправить (в т.ч. если status=confirm или resolve, но в коде ещё есть проблема).',
+        '- "not-require-fix" — баг НЕ требует исправления:',
+        '   * SonarQube ошибся (false positive),',
+        '   * код сгенерирован (OpenAPI, ORM, protobuf) и не должен правиться вручную,',
+        '   * стилистическая мелочь без функциональных последствий,',
+        '   * решено не исправлять (wontfix) по архитектурным причинам.',
+        '',
+        'СВЯЗЬ СТАТУСА И ФИКС-ТЕГА (подсказка):',
+        '- status=confirm  → обычно require-fix',
+        '- status=resolve  → обычно not-require-fix (уже исправлено)',
+        '- status=wontfix  → usually not-require-fix',
+        '- status=accept   → require-fix, если реальная проблема; not-require-fix, если сгенерировано/техдолг',
+        '- status=falsepositive → not-require-fix',
+        '',
+        'ДОСТУПНЫЕ ТЕГИ: ' + tagsList,
+        'В поле "Теги:" верни СНАЧАЛА require-fix или not-require-fix,',
+        'затем 1–2 любых подходящих тега из списка выше.',
+        '',
+        'Контекст:',
+        '- Правило: ' + (ruleName || issue.rule || ''),
+        '- Сообщение: ' + (issue.message || ''),
+        '- Файл: ' + (issue.component || '') + (issue.line ? ':' + issue.line : ''),
+        '- Severity: ' + severity,
+        '- Язык: ' + lang.name,
+        '',
+        'Код:',
+        '```' + lang.codeFence,
+        code,
+        '```',
+        '',
+        'ФОРМАТ ОТВЕТА (СТРОГО, без отклонений):',
+        '1. Строка 1: "Статус: <accept|falsepositive|confirm|resolve|wontfix>"',
+        '2. Строка 2: "Критичность: <подтверждаю|завышена|занижена> — <обоснование>"',
+        '3. Строка 3: "Теги: <require-fix|not-require-fix>, <tag2>, <tag3>"',
+        '   - Первый тег ОБЯЗАТЕЛЬНО "require-fix" ИЛИ "not-require-fix"',
+        '   - Затем 1–2 тега из списка доступных',
+        '   - Итого 2–3 тега',
+        '4. Строки 4+: 1–3 предложения, объясняющие решение (в т.ч. почему фиксить или нет).',
+        '',
+        'Пиши по-русски, без markdown (никаких **, __, #, списков).',
+        'Верни ТОЛЬКО этот текст.'
+    ].join('\n');
+}
+
+async function buildBulkStatusCommentPrompt(issues, status, statusLabel, ctx, availableTags) {
+    const tagsList = (availableTags && availableTags.length)
+        ? availableTags.join(', ')
+        : 'любые релевантные';
+
+    const issuesList = issues.map((it, idx) =>
+        `${idx + 1}. ${it.key} | ${it.rule} | ${it.component}:${it.line} | ${it.message || ''}`
+    ).join('\n');
+
+    return [
+        'Ты — опытный разработчик и эксперт по статическому анализу кода (SonarQube).',
+        'Тебе нужно обработать ГРУППУ замечаний (одинаковый статус для всех).',
+        '',
+        'ЗАДАЧА:',
+        '1. Подтверди статус "' + status + '" — ' + statusLabel + ' для всей группы.',
+        '2. Определи общую критичность.',
+        '3. Дай ОДНО общее РЕШЕНИЕ: нужно ли исправлять эти баги?',
+        '4. Предложи 2–3 общих тега (обязательно с фикс-тегом).',
+        '5. Объясни в 1–3 предложениях.',
+        '',
+        'ОПРЕДЕЛЕНИЯ СТАТУСОВ:',
+        '- falsepositive: SonarQube ошибся.',
+        '- accept: реальная проблема, исправим позже.',
+        '- confirm: реальная и срочная.',
+        '- resolve: уже исправлено.',
+        '- wontfix: не будем исправлять.',
+        '',
+        'РЕШЕНИЕ О НЕОБХОДИМОСТИ ИСПРАВЛЕНИЯ (обязательно!):',
+        'Верни РОВНО ОДИН из двух тегов в поле "Теги:"',
+        '- "require-fix"     — группа содержит РЕАЛЬНЫЕ баги, которые нужно исправить.',
+        '- "not-require-fix" — баги не требуют исправления (false positive, сгенерированный код, стилистика, wontfix).',
+        '',
+        'СВЯЗЬ СТАТУСА И ФИКС-ТЕГА (подсказка):',
+        '- status=confirm  → require-fix',
+        '- status=resolve  → not-require-fix',
+        '- status=wontfix  → not-require-fix',
+        '- status=falsepositive → not-require-fix',
+        '- status=accept   → require-fix или not-require-fix (по сути)',
+        '',
+        'ДОСТУПНЫЕ ТЕГИ: ' + tagsList,
+        '',
+        'Замечания (' + issues.length + '):',
+        issuesList,
+        '',
+        'ФОРМАТ ОТВЕТА (СТРОГО):',
+        '1. Строка 1: "Статус: <accept|falsepositive|confirm|resolve|wontfix>"',
+        '2. Строка 2: "Критичность: <подтверждаю|завышена|занижена> — <обоснование>"',
+        '3. Строка 3: "Теги: <require-fix|not-require-fix>, <tag2>, <tag3>"',
+        '   - Первый тег ОБЯЗАТЕЛЬНО "require-fix" ИЛИ "not-require-fix"',
+        '   - Затем 1–2 тега из списка',
+        '4. Строки 4+: 1–3 предложения.',
+        '',
+        'Пиши по-русски, без markdown. Верни ТОЛЬКО этот текст.'
+    ].join('\n');
+}
+
+function buildAutoResolvePromptAsync(issue, ctx, availableTags) {
+    const snippet = issue.snippet || [];
+    const code = snippet.join('\n');
+    const lang = detectLanguage(issue.component);
+    const severity = issue.impactSeverity || issue.severity || '';
+    const tagsList = (availableTags && availableTags.length)
+        ? availableTags.join(', ')
+        : 'любые релевантные';
+
+    return [
+        'Ты — опытный разработчик и эксперт по SonarQube.',
+        '',
+        'ЗАДАЧА: определить статус, критичность, решение о фиксе, теги и обоснование.',
+        '',
+        'ОПРЕДЕЛЕНИЯ СТАТУСОВ:',
+        '- falsepositive: SonarQube ошибся (проблемы нет).',
+        '- accept: реальная проблема, откладываем (техдолг).',
+        '- confirm: реальная и срочная (security/потеря данных/падение).',
+        '- resolve: уже исправлено.',
+        '- wontfix: реальная проблема, но не будем исправлять.',
+        '',
+        'РЕШЕНИЕ О НЕОБХОДИМОСТИ ИСПРАВЛЕНИЯ (обязательно!):',
+        'Верни РОВНО ОДИН из двух тегов в поле "Теги:"',
+        '- "require-fix"     — баг РЕАЛЬНЫЙ и его НУЖНО исправить.',
+        '- "not-require-fix" — баг НЕ требует исправления:',
+        '   * false positive,',
+        '   * сгенерированный код (OpenAPI/ORM/protobuf),',
+        '   * стилистическая мелочь без последствий,',
+        '   * решено не исправлять (wontfix).',
+        '',
+        'СВЯЗЬ СТАТУСА И ФИКС-ТЕГА (подсказка):',
+        '- confirm  → require-fix',
+        '- resolve  → not-require-fix',
+        '- wontfix  → not-require-fix',
+        '- falsepositive → not-require-fix',
+        '- accept   → require-fix или not-require-fix (по сути)',
+        '',
+        'ДОСТУПНЫЕ ТЕГИ: ' + tagsList,
+        'В поле "Теги:" верни СНАЧАЛА require-fix или not-require-fix,',
+        'затем 1–2 подходящих тега из списка.',
+        '',
+        'Контекст:',
+        '- Правило: ' + (issue.ruleName || issue.rule || ''),
+        '- Сообщение: ' + (issue.message || ''),
+        '- Файл: ' + (issue.component || '') + (issue.line ? ':' + issue.line : ''),
+        '- Severity: ' + severity,
+        '- Язык: ' + lang.name,
+        '',
+        'Код:',
+        '```' + lang.codeFence,
+        code,
+        '```',
+        '',
+        'ФОРМАТ ОТВЕТА (СТРОГО):',
+        '1. Строка 1: "Статус: <accept|falsepositive|confirm|resolve|wontfix>"',
+        '2. Строка 2: "Критичность: <подтверждаю|завышена|занижена> — <обоснование>"',
+        '3. Строка 3: "Теги: <require-fix|not-require-fix>, <tag2>, <tag3>"',
+        '   - Первый тег ОБЯЗАТЕЛЬНО "require-fix" ИЛИ "not-require-fix"',
+        '   - Затем 1–2 из списка',
+        '4. Строки 4+: 1–3 предложения (в т.ч. почему фиксить или нет).',
+        '',
+        'Пиши по-русски, без markdown. Верни ТОЛЬКО этот текст.'
+    ].join('\n');
+}
+
+// ==================== UTILS ====================
+
+async function fetchAvailableTags(ctx) {
+    try {
+        const d = await ctx.api('/api/tags');
+        return d.tags || [];
+    } catch (e) {
+        console.warn('Не удалось загрузить доступные теги', e);
+        return [];
+    }
+}
+
+// ==================== EXPORTED TAB ====================
 
 export const perfile = {
     id: 'perfile',
@@ -287,7 +569,7 @@ function showIssueContextMenu(x, y, clickedIssue, targetIssues, filteredData, ct
     menu.innerHTML = `
         <div class="ctx-item" id="ctx-ai-prompt">📝 Сгенерировать промпт</div>
         <div class="ctx-item" id="ctx-details">Посмотреть детали</div>
-        <div class="ctx-item" id="ctx-edit-tags">🏷️ Редактировать теги</div> <!-- НОВОЕ -->
+        <div class="ctx-item" id="ctx-edit-tags">🏷️ Редактировать теги</div>
         <div class="ctx-item" style="border-top:1px solid var(--border); margin-top:4px; padding-top:8px;" id="ctx-select-all">Выделить все</div>
         <div class="ctx-item" id="ctx-deselect-all">Снять выделение</div>
         ${hasUnmarked ? `<div class="ctx-item" style="border-top:1px solid var(--border); margin-top:4px; padding-top:8px;" id="ctx-comment">Добавить комментарий (${targetIssues.filter(it => it.status === 'OPEN' || it.status === 'REOPENED').length})</div>` : ''}
@@ -308,7 +590,6 @@ function showIssueContextMenu(x, y, clickedIssue, targetIssues, filteredData, ct
         openIssueModal(clickedIssue, ctx, reloadCb);
     });
 
-    // НОВОЕ: Обработчик тегов
     menu.querySelector('#ctx-edit-tags').addEventListener('click', () => {
         showTagEditor(targetIssues, ctx, reloadCb);
     });
@@ -383,6 +664,9 @@ async function openIssueModal(issue, ctx, reloadCb) {
         const d = await ctx.api('/api/snippet?' + p);
         const it = d.issue || issue;
 
+        // Загружаем доступные теги для промпта
+        const availableTags = await fetchAvailableTags(ctx);
+
         const currentStatusValue = getMappedStatus(it.status);
         const canReopen = it.status && it.status !== 'OPEN' && it.status !== 'REOPENED';
 
@@ -400,6 +684,10 @@ async function openIssueModal(issue, ctx, reloadCb) {
                 </div>
             </div>
         ` : '';
+
+        // Состояние для AI-предложенных тегов
+        let parsedTags = [];
+        let tagsManuallyEdited = false;
 
         const body = overlay.querySelector('#modal-body');
         body.innerHTML = `
@@ -421,6 +709,8 @@ async function openIssueModal(issue, ctx, reloadCb) {
 
             ${commentsHtml}
 
+            <div id="modal-ai-tags-hint" style="display:none; margin-top:12px; padding:8px; background:var(--bg3); border:1px solid var(--accent); border-radius:6px; font-size:12px;"></div>
+
             <div style="margin-top:20px; padding-top:16px; border-top:1px solid var(--border);">
                 <div style="margin-bottom:12px;">
                     <label style="display:block; font-size:12px; margin-bottom:4px;">Статус перехода</label>
@@ -433,17 +723,14 @@ async function openIssueModal(issue, ctx, reloadCb) {
                     </select>
                 </div>
                 <div>
-                    <label style="display:block; font-size:12px; margin-bottom:4px;">Новый комментарий (старые сохраняются в истории SonarQube)</label>
-                    <textarea id="modal-comment" rows="4" style="width:100%; padding:8px; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:6px; resize:vertical;" placeholder="Введите новый комментарий для изменения/дополнения..."></textarea>
+                    <label style="display:block; font-size:12px; margin-bottom:4px;">Новый комментарий</label>
+                    <textarea id="modal-comment" rows="4" style="width:100%; padding:8px; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:6px; resize:vertical;" placeholder="Введите новый комментарий..."></textarea>
                 </div>
                 <div style="margin-top:16px; display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;">
                     <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
-                        <button id="modal-btn-gen-prompt" type="button" class="btn" title="Сформировать промпт для LLM: сгенерировать короткий комментарий к выбранному статусу ошибки в SonarQube">Сгенерировать промпт</button>
-                        <button id="modal-btn-ai-resolve" type="button" class="btn" title="Отправить промпт в Ollama и вставить ответ в поле «Комментарий»">Получить резолюцию ИИ</button>
-
-                        <!-- НОВАЯ КНОПКА: ТЕГИ -->
+                        <button id="modal-btn-gen-prompt" type="button" class="btn" title="Сформировать промпт для LLM">Сгенерировать промпт</button>
+                        <button id="modal-btn-ai-resolve" type="button" class="btn" title="Получить резолюцию от Ollama">Получить резолюцию ИИ</button>
                         <button id="modal-btn-tags" type="button" class="btn">🏷️ Изменить теги</button>
-
                         ${canReopen ? `<button id="modal-btn-reopen" class="btn btn-danger">Отменить комментарий (Reopen)</button>` : ''}
                     </div>
                     <div style="display:flex; gap:8px; align-items:center;">
@@ -455,20 +742,30 @@ async function openIssueModal(issue, ctx, reloadCb) {
             </div>
         `;
 
-        bindStatusPromptButton(overlay, it, d.ruleName, d.snippet, ctx);
+        // Кнопка "Сгенерировать промпт" (копирование в буфер + textarea fallback)
+        overlay.querySelector('#modal-btn-gen-prompt').addEventListener('click', async () => {
+            const sel = overlay.querySelector('#modal-status');
+            const status = sel.value;
+            const statusLabel = sel.selectedOptions[0].textContent.trim();
+            const prompt = buildStatusCommentPrompt(it, d.ruleName, d.snippet, status, statusLabel, availableTags);
+            try {
+                await navigator.clipboard.writeText(prompt);
+                toast('Промпт скопирован в буфер обмена');
+            } catch (e) {
+                const ta = overlay.querySelector('#modal-comment');
+                ta.value = prompt;
+                ta.focus(); ta.select();
+                toast('Промпт вставлен в поле комментария', true);
+            }
+        });
 
         bindOllamaResolveButton(overlay, {
             ctx,
             buildPrompt: (status, statusLabel) =>
-                buildStatusCommentPrompt(it, d.ruleName, d.snippet, status, statusLabel),
+                buildStatusCommentPrompt(it, d.ruleName, d.snippet, status, statusLabel, availableTags),
             commentSelector: '#modal-comment',
             onComplete: (fullResponse) => {
                 const parsed = parseOllamaResponse(fullResponse);
-
-                console.log("=== PARSED RESULT ===");
-                console.log("Status:", parsed.status);
-                console.log("Comment:", parsed.comment);
-                console.log("=====================");
 
                 const statusSelect = overlay.querySelector('#modal-status');
                 if (statusSelect && parsed.status) {
@@ -479,12 +776,22 @@ async function openIssueModal(issue, ctx, reloadCb) {
                 if (commentTa) {
                     commentTa.value = parsed.comment;
                 }
+
+                // NEW: сохраняем теги и показываем подсказку
+                parsedTags = parsed.tags || [];
+                if (parsedTags.length > 0) {
+                    const hint = overlay.querySelector('#modal-ai-tags-hint');
+                    hint.style.display = 'block';
+                    hint.innerHTML = `🤖 AI предлагает теги: <b>${esc(parsedTags.join(', '))}</b><br>
+                        <span style="color:var(--text-dim);">Будут применены при нажатии «Применить».</span>`;
+                }
             }
         });
         bindOllamaSettingsButton(overlay, ctx);
 
-        // НОВОЕ: Обработчик кнопки тегов в модалке
+        // Ручное редактирование тегов
         overlay.querySelector('#modal-btn-tags').addEventListener('click', () => {
+            tagsManuallyEdited = true;
             showTagEditor([it], ctx, () => {
                 close();
                 reloadCb();
@@ -502,6 +809,17 @@ async function openIssueModal(issue, ctx, reloadCb) {
                 p.set('dryRun', 'false');
                 const res = await ctx.api('/api/mark?' + p, { method: 'POST' });
                 if (res.success === false) throw new Error(res.error || 'Ошибка применения');
+
+                // NEW: применяем AI-теги (если не было ручного редактирования)
+                if (parsedTags.length > 0 && !tagsManuallyEdited) {
+                    try {
+                        await ctx.api('/api/set_tags?keys=' + encodeURIComponent(it.key) + '&tags=' + encodeURIComponent(parsedTags.join(',')), { method: 'POST' });
+                    } catch (e) {
+                        console.warn('Не удалось применить AI-теги:', e);
+                        ctx.toast('Статус применён, но теги не установлены: ' + e.message, true);
+                    }
+                }
+
                 ctx.toast('Успешно применено');
                 close();
                 ctx.refreshStatus?.();
@@ -513,7 +831,7 @@ async function openIssueModal(issue, ctx, reloadCb) {
 
         if (canReopen) {
             overlay.querySelector('#modal-btn-reopen').addEventListener('click', async () => {
-                if (!confirm('Отменить комментарий (reopen)? Старые комментарии останутся в истории.')) return;
+                if (!confirm('Отменить комментарий (reopen)?')) return;
                 try {
                     const p = new URLSearchParams(ctx.qs());
                     p.set('key', it.key);
@@ -540,169 +858,41 @@ async function openIssueModal(issue, ctx, reloadCb) {
 
 function openBulkModal(issues, ctx, reloadCb) {
     if (!issues.length) { toast('Нет доступных issues для изменения', true); return; }
-    const overlay = document.createElement('div');
-    overlay.className = 'modal-overlay';
-    overlay.innerHTML = `
-        <div class="modal-content" style="max-width: 600px;">
-            <div class="modal-header">
-                <h3 style="margin:0;">Массовое действие</h3>
-                <button class="modal-close">&times;</button>
-            </div>
-            <div class="modal-body">
-                <p>Выбрано ошибок: <b>${issues.length}</b></p>
-                <div style="margin-bottom:12px;">
-                    <label style="display:block; font-size:12px; margin-bottom:4px;">Статус перехода</label>
-                    <select id="bulk-status" style="width:100%; padding:8px; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:6px;">
-                        <option value="accept">Принять (Это ошибка, но исправлена будет позднее)</option>
-                        <option value="falsepositive">Ложно (Анализ содержит ошибки)</option>
-                        <option value="confirm">Подтвердить</option>
-                        <option value="resolve">Исправлено</option>
-                        <option value="wontfix">Не исправлять</option>
-                    </select>
-                </div>
-                <div style="margin-bottom:16px;">
-                    <label style="display:block; font-size:12px; margin-bottom:4px;">Комментарий</label>
-                    <textarea id="bulk-comment" rows="4" style="width:100%; padding:8px; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:6px; resize:vertical;" placeholder="Введите многострочный комментарий..."></textarea>
-                </div>
-                <div style="margin-top:16px; display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;">
-                    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
-                        <button id="bulk-btn-gen-prompt" type="button" class="btn" title="Сформировать промпт для LLM для всей группы ошибок">Сгенерировать промпт</button>
-                        <button id="bulk-btn-ai-resolve" type="button" class="btn" title="Отправить промпт в Ollama и вставить ответ в поле «Комментарий»">Получить резолюцию ИИ</button>
 
-                        <!-- НОВАЯ КНОПКА: ТЕГИ -->
-                        <button id="bulk-btn-tags" type="button" class="btn">🏷️ Изменить теги</button>
-
-                    </div>
-                    <div style="display:flex; gap:8px; align-items:center;">
-                        <button id="bulk-cancel" class="btn">Отмена</button>
-                        <button id="bulk-apply" class="btn btn-accent">Применить</button>
-                        <button id="bulk-btn-ollama-settings" type="button" class="btn" title="Настройки Ollama">⚙ Ollama</button>
-                    </div>
-                </div>
-            </div>
-        </div>
-    `;
-    document.body.appendChild(overlay);
-
-    const close = () => overlay.remove();
-    overlay.querySelector('.modal-close').addEventListener('click', close);
-    overlay.querySelector('#bulk-cancel').addEventListener('click', close);
-    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
-
-    // НОВОЕ: Обработчик кнопки тегов в массовой модалке
-    overlay.querySelector('#bulk-btn-tags').addEventListener('click', () => {
-        showTagEditor(issues, ctx, () => {
-            close();
-            reloadCb();
-        });
-    });
-
-    overlay.querySelector('#bulk-btn-gen-prompt').addEventListener('click', async () => {
-        const status = overlay.querySelector('#bulk-status').value;
-        const statusLabel = overlay.querySelector('#bulk-status').selectedOptions[0].textContent.trim();
-
-        const btn = overlay.querySelector('#bulk-btn-gen-prompt');
-        const originalText = btn.textContent;
-        btn.textContent = 'Подготовка...';
-        btn.disabled = true;
-
+    // async IIFE чтобы дождаться тегов
+    (async () => {
+        let availableTags = [];
         try {
-            const prompt = await buildBulkStatusCommentPrompt(issues, status, statusLabel, ctx);
-            const ok = await copyToClipboard(prompt);
-
-            if (ok) {
-                toast('Промпт для группы скопирован в буфер обмена');
-            } else {
-                const ta = overlay.querySelector('#bulk-comment');
-                if (ta) {
-                    ta.value = prompt;
-                    ta.focus();
-                    ta.select();
-                }
-                toast('Промпт вставлен в поле комментария', true);
-            }
+            const d = await ctx.api('/api/tags');
+            availableTags = d.tags || [];
         } catch (e) {
-            toast(e.message, true);
-        } finally {
-            btn.textContent = originalText;
-            btn.disabled = false;
-        }
-    });
-
-    bindOllamaResolveButton(overlay, {
-        ctx,
-        buildPrompt: (status, statusLabel) => buildBulkStatusCommentPrompt(issues, status, statusLabel, ctx),
-        commentSelector: '#bulk-comment',
-        btnSelector: '#bulk-btn-ai-resolve'
-    });
-
-    bindOllamaSettingsButton(overlay, ctx, '#bulk-btn-ollama-settings');
-
-    overlay.querySelector('#bulk-apply').addEventListener('click', async () => {
-        const status = overlay.querySelector('#bulk-status').value;
-        const comment = overlay.querySelector('#bulk-comment').value;
-
-        const btn = overlay.querySelector('#bulk-apply');
-        btn.disabled = true;
-        btn.textContent = 'Применение...';
-
-        let success = 0;
-        for (const it of issues) {
-            try {
-                const p = new URLSearchParams(ctx.qs());
-                p.set('key', it.key);
-                p.set('transition', status);
-                p.set('comment', comment);
-                p.set('dryRun', 'false');
-                const res = await ctx.api('/api/mark?' + p, { method: 'POST' });
-                if (res.success === false) throw new Error(res.error || 'Ошибка');
-                success++;
-            } catch (e) {
-                console.error('Failed for ' + it.key, e);
-            }
-            btn.textContent = `Применение ${success}/${issues.length}...`;
+            console.warn('Не удалось загрузить теги', e);
         }
 
-        ctx.toast(`Применено к ${success} из ${issues.length}`);
-        close();
-        ctx.refreshStatus?.();
-        reloadCb();
-    });
-}
+        const currentTags = issues[0].tags || [];
+        const initialTags = [...currentTags];
+        currentTags.forEach(t => {
+            if (!availableTags.includes(t)) availableTags.push(t);
+        });
 
-function openAutoBulkModal(issues, ctx, reloadCb) {
-    if (!issues.length) { toast('Нет доступных issues для изменения', true); return; }
-    const overlay = document.createElement('div');
-    overlay.className = 'modal-overlay';
-    overlay.innerHTML = `
-        <div class="modal-content" style="max-width: 800px;">
-            <div class="modal-header">
-                <h3 style="margin:0;" id="auto-header">Автоматическая обработка (0 / ${issues.length})</h3>
-                <button class="modal-close">&times;</button>
-            </div>
-            <div class="modal-body">
-                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 16px;">
-                    <div id="auto-progress" style="font-weight: bold; color: var(--accent);">
-                        Ожидание запуска...
-                    </div>
-                    <label style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer; user-select:none;">
-                        <input type="checkbox" id="auto-chk-semi" checked style="width:16px; height:16px; cursor:pointer;">
-                        Полуавтоматический режим (с подтверждением)
-                    </label>
+        const PRIORITY_TAGS = ['CWE', 'not-require-fix', 'require-fix'];
+        const initialSet = new Set(initialTags);
+        const selectedTags = new Set(initialTags);
+        let tagsQuery = '';
+
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+        overlay.innerHTML = `
+            <div class="modal-content" style="max-width: 600px;">
+                <div class="modal-header">
+                    <h3 style="margin:0;">Массовое действие</h3>
+                    <button class="modal-close">&times;</button>
                 </div>
-
-                <div class="card" style="margin-bottom: 16px; border-color: var(--accent);">
-                    <div style="font-size: 12px; color: var(--text-dim); margin-bottom: 8px;">
-                        Текущая ошибка: <b id="auto-current-key">-</b> (Файл: <span id="auto-current-file">-</span>)
-                    </div>
-
-                    <div id="auto-current-msg" style="margin-bottom: 12px; font-size: 14px; font-weight: 500; line-height: 1.4; color: var(--text);">
-                        -
-                    </div>
-
+                <div class="modal-body">
+                    <p>Выбрано ошибок: <b>${issues.length}</b></p>
                     <div style="margin-bottom:12px;">
                         <label style="display:block; font-size:12px; margin-bottom:4px;">Статус перехода</label>
-                        <select id="auto-status" style="width:100%; padding:8px; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:6px;">
+                        <select id="bulk-status" style="width:100%; padding:8px; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:6px;">
                             <option value="accept">Принять (Это ошибка, но исправлена будет позднее)</option>
                             <option value="falsepositive">Ложно (Анализ содержит ошибки)</option>
                             <option value="confirm">Подтвердить</option>
@@ -710,278 +900,534 @@ function openAutoBulkModal(issues, ctx, reloadCb) {
                             <option value="wontfix">Не исправлять</option>
                         </select>
                     </div>
-
-                    <div style="margin-bottom:16px;">
+                    <div style="margin-bottom:12px;">
                         <label style="display:block; font-size:12px; margin-bottom:4px;">Комментарий</label>
-                        <textarea id="auto-comment" rows="4" style="width:100%; padding:8px; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:6px; resize:vertical;" placeholder="Введите многострочный комментарий..."></textarea>
+                        <textarea id="bulk-comment" rows="4" style="width:100%; padding:8px; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:6px; resize:vertical;" placeholder="Введите многострочный комментарий..."></textarea>
                     </div>
-
-                    <div style="display:flex; gap:10px; flex-wrap:wrap;">
-                        <button id="auto-btn-start" class="btn btn-accent">▶️ Запустить</button>
-                        <button id="auto-btn-apply" class="btn" disabled>✅ Подтвердить и далее</button>
-                        <button id="auto-btn-skip" class="btn" disabled>⏭️ Пропустить</button>
-                        <button id="auto-btn-stop" class="btn btn-danger" style="display:none;">⏹️ Остановить</button>
-
-                        <!-- НОВАЯ КНОПКА: ТЕГИ -->
-                        <button id="auto-btn-tags" type="button" class="btn">🏷️ Изменить теги</button>
-
-                        <button id="auto-btn-ollama-settings" type="button" class="btn" title="Настройки Ollama">⚙ Ollama</button>
+                    <div style="margin-bottom:16px;">
+                        <label style="display:block; font-size:12px; margin-bottom:4px;">Теги</label>
+                        <input type="text" id="bulk-tags-filter" placeholder="Фильтр по тегам..."
+                               style="width:100%; box-sizing:border-box; padding:6px 10px; margin-bottom:8px;
+                                      border-radius:6px; border:1px solid var(--border);
+                                      background:var(--bg); color:var(--text);">
+                        <div id="bulk-tags-list"
+                             style="max-height: 150px; overflow-y: auto; display: flex; flex-wrap: wrap;
+                                    gap: 8px; padding: 8px; background: var(--bg3);
+                                    border: 1px solid var(--border); border-radius: 6px;"></div>
                     </div>
-                </div>
-
-                <div style="display:flex; justify-content:space-between; align-items:center;">
-                    <span id="auto-log" style="font-size:12px; color:var(--text-dim);">Нажмите «Запустить» для начала</span>
-                    <button id="auto-btn-cancel" class="btn">Закрыть</button>
+                    <div id="bulk-ai-tags-hint" style="display:none; margin-bottom:12px; padding:8px; background:var(--bg3); border:1px solid var(--accent); border-radius:6px; font-size:12px;"></div>
+                    <div style="margin-top:16px; display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;">
+                        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                            <button id="bulk-btn-gen-prompt" type="button" class="btn" title="Сформировать промпт для LLM">Сгенерировать промпт</button>
+                            <button id="bulk-btn-ai-resolve" type="button" class="btn" title="Получить резолюцию от Ollama">Получить резолюцию ИИ</button>
+                            <button id="bulk-btn-tags" type="button" class="btn">🏷️ Изменить теги</button>
+                        </div>
+                        <div style="display:flex; gap:8px; align-items:center;">
+                            <button id="bulk-cancel" class="btn">Отмена</button>
+                            <button id="bulk-apply" class="btn btn-accent">Применить</button>
+                            <button id="bulk-btn-ollama-settings" type="button" class="btn" title="Настройки Ollama">⚙ Ollama</button>
+                        </div>
+                    </div>
                 </div>
             </div>
-        </div>
-    `;
-    document.body.appendChild(overlay);
+        `;
+        document.body.appendChild(overlay);
 
-    const ui = {
-        header: overlay.querySelector('#auto-header'),
-        progress: overlay.querySelector('#auto-progress'),
-        chkSemi: overlay.querySelector('#auto-chk-semi'),
-        currentKey: overlay.querySelector('#auto-current-key'),
-        currentFile: overlay.querySelector('#auto-current-file'),
-        currentMsg: overlay.querySelector('#auto-current-msg'),
-        statusSel: overlay.querySelector('#auto-status'),
-        commentTa: overlay.querySelector('#auto-comment'),
-        btnStart: overlay.querySelector('#auto-btn-start'),
-        btnApply: overlay.querySelector('#auto-btn-apply'),
-        btnSkip: overlay.querySelector('#auto-btn-skip'),
-        btnStop: overlay.querySelector('#auto-btn-stop'),
-        btnTags: overlay.querySelector('#auto-btn-tags'), // <-- НОВОЕ
-        log: overlay.querySelector('#auto-log')
-    };
+        const close = () => overlay.remove();
+        overlay.querySelector('.modal-close').addEventListener('click', close);
+        overlay.querySelector('#bulk-cancel').addEventListener('click', close);
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
 
-    let currentIndex = 0;
-    let isProcessing = false;
-    let hasGenerated = false;
-    let abortController = null;
+        // ---------- Теги: рендер и обработчики ----------
+        function getOrderedTags(query) {
+            const q = String(query || '').trim().toLowerCase();
+            const matches = (t) => !q || t.toLowerCase().includes(q);
 
-    const close = () => {
-        if (isProcessing || hasGenerated) {
-            if (!confirm('Процесс не завершен. Вы уверены, что хотите выйти?')) return;
+            const already = initialTags.filter(matches);
+            const priority = PRIORITY_TAGS.filter(
+                t => availableTags.includes(t) && !initialSet.has(t) && matches(t)
+            );
+            const rest = availableTags
+                .filter(t => !initialSet.has(t) && !PRIORITY_TAGS.includes(t) && matches(t))
+                .sort((a, b) => a.localeCompare(b));
+
+            return [...already, ...priority, ...rest];
         }
-        if (abortController) abortController.abort();
-        overlay.remove();
-        if (reloadCb) reloadCb();
-    };
 
-    overlay.querySelector('.modal-close').addEventListener('click', close);
-    overlay.querySelector('#auto-btn-cancel').addEventListener('click', close);
+        function renderBulkTagList() {
+            const container = overlay.querySelector('#bulk-tags-list');
+            if (!container) return;
+            const ordered = getOrderedTags(tagsQuery);
+            if (ordered.length === 0) {
+                container.innerHTML = `<div style="color:var(--text-dim); font-size:12px;">${
+                    tagsQuery.trim() ? 'Нет тегов по фильтру' : 'Нет доступных тегов'
+                }</div>`;
+                return;
+            }
+            container.innerHTML = ordered.map(t => `
+                <label style="display: flex; align-items: center; gap: 4px; font-size: 12px; cursor: pointer;">
+                    <input type="checkbox" class="bulk-tag-cb" value="${esc(t)}" ${selectedTags.has(t) ? 'checked' : ''}>
+                    ${esc(t)}
+                </label>
+            `).join('');
+        }
 
-    // НОВОЕ: Обработчик кнопки тегов для текущего issue
-    ui.btnTags.addEventListener('click', () => {
-        if (currentIndex >= issues.length) return;
-        const it = issues[currentIndex];
-        showTagEditor([it], ctx, () => {
-            // Ничего не делаем, чтобы не сбрасывать прогресс
+        renderBulkTagList();
+
+        overlay.querySelector('#bulk-tags-filter').addEventListener('input', (e) => {
+            tagsQuery = e.target.value;
+            renderBulkTagList();
         });
-    });
 
-    function updateUI() {
-        if (currentIndex >= issues.length) {
-            ui.header.textContent = `Обработка завершена (${issues.length} / ${issues.length})`;
-            ui.btnStart.style.display = 'none';
-            ui.btnApply.disabled = true;
-            ui.btnSkip.disabled = true;
-            ui.btnStop.style.display = 'none';
-            ui.progress.textContent = 'Все ошибки обработаны.';
-            return;
-        }
+        overlay.querySelector('#bulk-tags-list').addEventListener('change', (e) => {
+            if (e.target.classList.contains('bulk-tag-cb')) {
+                if (e.target.checked) selectedTags.add(e.target.value);
+                else                  selectedTags.delete(e.target.value);
+            }
+        });
 
-        ui.header.textContent = `Автоматическая обработка (${currentIndex + 1} / ${issues.length})`;
-        const it = issues[currentIndex];
-        ui.currentKey.textContent = it.key;
-        ui.currentFile.textContent = it.component;
-        ui.currentMsg.textContent = it.message || 'Нет описания ошибки';
+        // ---------- AI ----------
+        overlay.querySelector('#bulk-btn-gen-prompt').addEventListener('click', async () => {
+            const status = overlay.querySelector('#bulk-status').value;
+            const statusLabel = overlay.querySelector('#bulk-status').selectedOptions[0].textContent.trim();
+            const prompt = await buildBulkStatusCommentPrompt(issues, status, statusLabel, ctx, availableTags);
+            try {
+                await navigator.clipboard.writeText(prompt);
+                toast('Промпт скопирован в буфер обмена');
+            } catch (e) {
+                const ta = overlay.querySelector('#bulk-comment');
+                ta.value = prompt; ta.focus(); ta.select();
+                toast('Промпт вставлен в поле комментария', true);
+            }
+        });
 
-        if (isProcessing) {
-            ui.btnStart.style.display = 'none';
-            ui.btnStop.style.display = 'inline-block';
-            ui.btnApply.disabled = true;
-            ui.btnSkip.disabled = true;
-        } else if (hasGenerated) {
-            ui.btnStart.style.display = 'none';
-            ui.btnStop.style.display = 'none';
-            ui.btnApply.disabled = false;
-            ui.btnSkip.disabled = false;
-        } else {
-            ui.btnStart.style.display = 'inline-block';
-            ui.btnStop.style.display = 'none';
-            ui.btnApply.disabled = true;
-            ui.btnSkip.disabled = true;
-        }
-    }
+        bindOllamaResolveButton(overlay, {
+            ctx,
+            buildPrompt: (status, statusLabel) => buildBulkStatusCommentPrompt(issues, status, statusLabel, ctx, availableTags),
+            commentSelector: '#bulk-comment',
+            btnSelector: '#bulk-btn-ai-resolve',
+            onComplete: (fullResponse) => {
+                const parsed = parseOllamaResponse(fullResponse);
 
-    async function processNext() {
-        if (isProcessing || currentIndex >= issues.length) return;
-        isProcessing = true;
-        updateUI();
+                const statusSel = overlay.querySelector('#bulk-status');
+                if (statusSel && parsed.status) statusSel.value = parsed.status;
 
-        const it = issues[currentIndex];
-        ui.progress.textContent = 'Анализ кода...';
-        ui.commentTa.value = 'Генерация промпта...';
-        ui.log.textContent = 'Подготовка данных...';
+                const commentTa = overlay.querySelector('#bulk-comment');
+                if (commentTa) commentTa.value = parsed.comment;
 
-        try {
-            if (!it.snippet || !it.snippet.length) {
-                const p = new URLSearchParams();
-                if (ctx.state.project) p.set('project', ctx.state.project);
-                p.set('issueKey', it.key);
-                const d = await ctx.api('/api/snippet?' + p);
-                it.snippet = d.snippet || [];
-                it.ruleName = d.ruleName || it.rule;
+                // NEW: отмечаем AI-теги в чекбоксах
+                if (parsed.tags && parsed.tags.length > 0) {
+                    parsed.tags.forEach(tag => {
+                        // Если тега нет в списке — добавим как "выбранный"
+                        if (!availableTags.includes(tag)) {
+                            availableTags.push(tag);
+                        }
+                        selectedTags.add(tag);
+                    });
+                    renderBulkTagList();
+
+                    const hint = overlay.querySelector('#bulk-ai-tags-hint');
+                    hint.style.display = 'block';
+                    hint.innerHTML = `🤖 AI предлагает теги: <b>${esc(parsed.tags.join(', '))}</b>
+                        <span style="color:var(--text-dim);"> (отмечены в списке выше)</span>`;
+                }
+            }
+        });
+        bindOllamaSettingsButton(overlay, ctx, '#bulk-btn-ollama-settings');
+
+        // Ручное редактирование тегов
+        overlay.querySelector('#bulk-btn-tags').addEventListener('click', () => {
+            // Сбрасываем AI-флаг: пользователь выбрал ручной режим
+            showTagEditor(issues, ctx, () => {
+                close();
+                reloadCb();
+            });
+        });
+
+        // ---------- Apply ----------
+        overlay.querySelector('#bulk-apply').addEventListener('click', async () => {
+            const status = overlay.querySelector('#bulk-status').value;
+            const comment = overlay.querySelector('#bulk-comment').value;
+
+            const checkedTags = [...selectedTags];
+            const tagsStr = checkedTags.join(',');
+            const tagsChanged = tagsStr !== (issues[0].tags || []).join(',');
+
+            const btn = overlay.querySelector('#bulk-apply');
+            btn.disabled = true;
+            btn.textContent = 'Применение...';
+
+            let success = 0;
+            for (const it of issues) {
+                try {
+                    const p = new URLSearchParams(ctx.qs());
+                    p.set('key', it.key);
+                    p.set('transition', status);
+                    p.set('comment', comment);
+                    p.set('dryRun', 'false');
+                    const res = await ctx.api('/api/mark?' + p, { method: 'POST' });
+                    if (res.success === false) throw new Error(res.error || 'Ошибка');
+                    success++;
+                } catch (e) {
+                    console.error('Failed for ' + it.key, e);
+                }
+                btn.textContent = `Применение ${success}/${issues.length}...`;
             }
 
-            const prompt = buildAutoResolvePromptAsync(it, ctx);
-            const settings = OllamaClient.getSettings();
-            if (!settings.url || !settings.model) throw new Error("Ollama не настроена. Нажмите ⚙ Ollama.");
-
-            console.log("=== OLLAMA REQUEST PROMPT (AUTO) ===");
-            console.log(prompt);
-            console.log("====================================");
-
-            ui.progress.textContent = 'Запрос к Ollama...';
-            ui.log.textContent = 'Ожидание ответа от модели...';
-
-            abortController = new AbortController();
-            const client = new OllamaClient(settings);
-            let fullResponse = '';
-
-            for await (const chunk of client.streamChat({ prompt, signal: abortController.signal })) {
-                fullResponse += chunk;
-                ui.commentTa.value = fullResponse;
+            // Применяем теги, если они изменились
+            if (tagsChanged) {
+                try {
+                    const keysStr = issues.map(it => it.key).join(',');
+                    await ctx.api('/api/set_tags?keys=' + encodeURIComponent(keysStr) + '&tags=' + encodeURIComponent(tagsStr), { method: 'POST' });
+                } catch (e) {
+                    console.error('Ошибка применения тегов', e);
+                    ctx.toast('Статусы применены, но теги не обновились: ' + e.message, true);
+                }
             }
 
-            console.log("=== OLLAMA FINAL RESPONSE (AUTO) ===");
-            console.log(fullResponse);
-            console.log("====================================");
+            ctx.toast(`Применено к ${success} из ${issues.length}`);
+            close();
+            ctx.refreshStatus?.();
+            if (reloadCb) reloadCb();
+        });
+    })();
+}
 
-            const parsed = parseOllamaResponse(fullResponse);
-            ui.statusSel.value = parsed.status;
-            ui.commentTa.value = parsed.comment;
-            hasGenerated = true;
+function openAutoBulkModal(issues, ctx, reloadCb) {
+    if (!issues.length) { toast('Нет доступных issues для изменения', true); return; }
 
-            ui.progress.textContent = 'Готово к применению';
-            isProcessing = false;
+    (async () => {
+        // Загружаем теги один раз
+        const availableTags = await fetchAvailableTags(ctx);
+
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+        overlay.innerHTML = `
+            <div class="modal-content" style="max-width: 800px;">
+                <div class="modal-header">
+                    <h3 style="margin:0;" id="auto-header">Автоматическая обработка (0 / ${issues.length})</h3>
+                    <button class="modal-close">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 16px;">
+                        <div id="auto-progress" style="font-weight: bold; color: var(--accent);">
+                            Ожидание запуска...
+                        </div>
+                        <label style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer; user-select:none;">
+                            <input type="checkbox" id="auto-chk-semi" checked style="width:16px; height:16px; cursor:pointer;">
+                            Полуавтоматический режим (с подтверждением)
+                        </label>
+                    </div>
+
+                    <div class="card" style="margin-bottom: 16px; border-color: var(--accent);">
+                        <div style="font-size: 12px; color: var(--text-dim); margin-bottom: 8px;">
+                            Текущая ошибка: <b id="auto-current-key">-</b> (Файл: <span id="auto-current-file">-</span>)
+                        </div>
+
+                        <div id="auto-current-msg" style="margin-bottom: 12px; font-size: 14px; font-weight: 500; line-height: 1.4; color: var(--text);">
+                            -
+                        </div>
+
+                        <div style="margin-bottom:12px;">
+                            <label style="display:block; font-size:12px; margin-bottom:4px;">Статус перехода</label>
+                            <select id="auto-status" style="width:100%; padding:8px; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:6px;">
+                                <option value="accept">Принять (Это ошибка, но исправлена будет позднее)</option>
+                                <option value="falsepositive">Ложно (Анализ содержит ошибки)</option>
+                                <option value="confirm">Подтвердить</option>
+                                <option value="resolve">Исправлено</option>
+                                <option value="wontfix">Не исправлять</option>
+                            </select>
+                        </div>
+
+                        <div style="margin-bottom:12px;">
+                            <label style="display:block; font-size:12px; margin-bottom:4px;">Комментарий</label>
+                            <textarea id="auto-comment" rows="4" style="width:100%; padding:8px; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:6px; resize:vertical;" placeholder="Введите многострочный комментарий..."></textarea>
+                        </div>
+
+                        <div id="auto-ai-tags-hint" style="display:none; margin-bottom:12px; padding:8px; background:var(--bg3); border:1px solid var(--accent); border-radius:6px; font-size:12px;"></div>
+
+                        <div style="display:flex; gap:10px; flex-wrap:wrap;">
+                            <button id="auto-btn-start" class="btn btn-accent">▶️ Запустить</button>
+                            <button id="auto-btn-apply" class="btn" disabled>✅ Подтвердить и далее</button>
+                            <button id="auto-btn-skip" class="btn" disabled>⏭️ Пропустить</button>
+                            <button id="auto-btn-stop" class="btn btn-danger" style="display:none;">⏹️ Остановить</button>
+                            <button id="auto-btn-tags" type="button" class="btn">🏷️ Изменить теги</button>
+                            <button id="auto-btn-ollama-settings" type="button" class="btn" title="Настройки Ollama">⚙ Ollama</button>
+                        </div>
+                    </div>
+
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                        <span id="auto-log" style="font-size:12px; color:var(--text-dim);">Нажмите «Запустить» для начала</span>
+                        <button id="auto-btn-cancel" class="btn">Закрыть</button>
+                    </div>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(overlay);
+
+        const ui = {
+            header: overlay.querySelector('#auto-header'),
+            progress: overlay.querySelector('#auto-progress'),
+            chkSemi: overlay.querySelector('#auto-chk-semi'),
+            currentKey: overlay.querySelector('#auto-current-key'),
+            currentFile: overlay.querySelector('#auto-current-file'),
+            currentMsg: overlay.querySelector('#auto-current-msg'),
+            statusSel: overlay.querySelector('#auto-status'),
+            commentTa: overlay.querySelector('#auto-comment'),
+            btnStart: overlay.querySelector('#auto-btn-start'),
+            btnApply: overlay.querySelector('#auto-btn-apply'),
+            btnSkip: overlay.querySelector('#auto-btn-skip'),
+            btnStop: overlay.querySelector('#auto-btn-stop'),
+            btnTags: overlay.querySelector('#auto-btn-tags'),
+            aiTagsHint: overlay.querySelector('#auto-ai-tags-hint'),
+            log: overlay.querySelector('#auto-log')
+        };
+
+        let currentIndex = 0;
+        let isProcessing = false;
+        let hasGenerated = false;
+        let abortController = null;
+        let currentSuggestedTags = []; // NEW: теги, предложенные AI для текущего issue
+
+        const close = () => {
+            if (isProcessing || hasGenerated) {
+                if (!confirm('Процесс не завершен. Вы уверены, что хотите выйти?')) return;
+            }
+            if (abortController) abortController.abort();
+            overlay.remove();
+            if (reloadCb) reloadCb();
+        };
+
+        overlay.querySelector('.modal-close').addEventListener('click', close);
+        overlay.querySelector('#auto-btn-cancel').addEventListener('click', close);
+
+        // Ручное редактирование тегов для текущего issue
+        ui.btnTags.addEventListener('click', () => {
+            if (currentIndex >= issues.length) return;
+            const it = issues[currentIndex];
+            showTagEditor([it], ctx, () => {
+                // Не сбрасываем прогресс
+            });
+        });
+
+        function updateUI() {
+            if (currentIndex >= issues.length) {
+                ui.header.textContent = `Обработка завершена (${issues.length} / ${issues.length})`;
+                ui.btnStart.style.display = 'none';
+                ui.btnApply.disabled = true;
+                ui.btnSkip.disabled = true;
+                ui.btnStop.style.display = 'none';
+                ui.progress.textContent = 'Все ошибки обработаны.';
+                return;
+            }
+
+            ui.header.textContent = `Автоматическая обработка (${currentIndex + 1} / ${issues.length})`;
+            const it = issues[currentIndex];
+            ui.currentKey.textContent = it.key;
+            ui.currentFile.textContent = it.component;
+            ui.currentMsg.textContent = it.message || 'Нет описания ошибки';
+
+            if (isProcessing) {
+                ui.btnStart.style.display = 'none';
+                ui.btnStop.style.display = 'inline-block';
+                ui.btnApply.disabled = true;
+                ui.btnSkip.disabled = true;
+            } else if (hasGenerated) {
+                ui.btnStart.style.display = 'none';
+                ui.btnStop.style.display = 'none';
+                ui.btnApply.disabled = false;
+                ui.btnSkip.disabled = false;
+            } else {
+                ui.btnStart.style.display = 'inline-block';
+                ui.btnStop.style.display = 'none';
+                ui.btnApply.disabled = true;
+                ui.btnSkip.disabled = true;
+            }
+        }
+
+        async function processNext() {
+            if (isProcessing || currentIndex >= issues.length) return;
+            isProcessing = true;
             updateUI();
 
-            if (ui.chkSemi.checked) {
-                ui.log.textContent = 'Проверьте данные и нажмите «Подтвердить» или «Пропустить».';
-            } else {
-                ui.log.textContent = 'Автоматический режим. Применение через 1 сек...';
+            const it = issues[currentIndex];
+            ui.progress.textContent = 'Анализ кода...';
+            ui.commentTa.value = 'Генерация промпта...';
+            ui.log.textContent = 'Подготовка данных...';
+            ui.aiTagsHint.style.display = 'none';
+            currentSuggestedTags = [];
+
+            try {
+                if (!it.snippet || !it.snippet.length) {
+                    const p = new URLSearchParams();
+                    if (ctx.state.project) p.set('project', ctx.state.project);
+                    p.set('issueKey', it.key);
+                    const d = await ctx.api('/api/snippet?' + p);
+                    it.snippet = d.snippet || [];
+                    it.ruleName = d.ruleName || it.rule;
+                }
+
+                const prompt = buildAutoResolvePromptAsync(it, ctx, availableTags);
+                const settings = OllamaClient.getSettings();
+                if (!settings.url || !settings.model) throw new Error("Ollama не настроена. Нажмите ⚙ Ollama.");
+
+                ui.progress.textContent = 'Запрос к Ollama...';
+                ui.log.textContent = 'Ожидание ответа от модели...';
+
+                abortController = new AbortController();
+                const client = new OllamaClient(settings);
+                let fullResponse = '';
+
+                for await (const chunk of client.streamChat({ prompt, signal: abortController.signal })) {
+                    fullResponse += chunk;
+                    ui.commentTa.value = fullResponse;
+                }
+
+                const parsed = parseOllamaResponse(fullResponse);
+                ui.statusSel.value = parsed.status;
+                ui.commentTa.value = parsed.comment;
+
+                // NEW: сохраняем предложенные AI теги и показываем подсказку
+                currentSuggestedTags = parsed.tags || [];
+                if (currentSuggestedTags.length > 0) {
+                    ui.aiTagsHint.style.display = 'block';
+                    ui.aiTagsHint.innerHTML = `🤖 AI предлагает теги: <b>${esc(currentSuggestedTags.join(', '))}</b>
+                        <span style="color:var(--text-dim);"> (будут применены при подтверждении)</span>`;
+                }
+
+                hasGenerated = true;
+                ui.progress.textContent = 'Готово к применению';
+                isProcessing = false;
+                updateUI();
+
+                if (ui.chkSemi.checked) {
+                    ui.log.textContent = 'Проверьте данные и нажмите «Подтвердить» или «Пропустить».';
+                } else {
+                    ui.log.textContent = 'Автоматический режим. Применение через 1 сек...';
+                    setTimeout(() => {
+                        if (!ui.chkSemi.checked && hasGenerated && !isProcessing) {
+                            applyCurrent();
+                        }
+                    }, 1000);
+                }
+
+            } catch (e) {
+                if (e.name === 'AbortError') {
+                    ui.log.textContent = 'Остановлено пользователем.';
+                    ui.progress.textContent = 'Пауза.';
+                    isProcessing = false;
+                    hasGenerated = false;
+                    updateUI();
+                    return;
+                }
+                ui.log.textContent = 'Ошибка: ' + e.message;
+                ui.progress.textContent = 'Остановлено из-за ошибки Ollama';
+                isProcessing = false;
+                hasGenerated = false;
+                updateUI();
+                toast('Ошибка Ollama: ' + e.message, true);
+            } finally {
+                abortController = null;
+            }
+        }
+
+        async function applyCurrent() {
+            if (isProcessing || currentIndex >= issues.length) return;
+            isProcessing = true;
+            updateUI();
+
+            const it = issues[currentIndex];
+            const status = ui.statusSel.value;
+            const comment = ui.commentTa.value;
+
+            ui.log.textContent = 'Применение...';
+
+            try {
+                const p = new URLSearchParams(ctx.qs());
+                p.set('key', it.key);
+                p.set('transition', status);
+                p.set('comment', comment);
+                p.set('dryRun', 'false');
+                const res = await ctx.api('/api/mark?' + p, { method: 'POST' });
+                if (res.success === false) throw new Error(res.error || 'Ошибка применения');
+
+                // NEW: применяем AI-теги для текущего issue
+                if (currentSuggestedTags.length > 0) {
+                    try {
+                        await ctx.api('/api/set_tags?keys=' + encodeURIComponent(it.key) + '&tags=' + encodeURIComponent(currentSuggestedTags.join(',')), { method: 'POST' });
+                    } catch (e) {
+                        console.warn('Не удалось применить AI-теги:', e);
+                        toast('Теги не установлены: ' + e.message, true);
+                    }
+                }
+
+                it.status = status;
+                currentIndex++;
+                hasGenerated = false;
+                currentSuggestedTags = [];
+                ui.aiTagsHint.style.display = 'none';
+                ui.commentTa.value = '';
+                ui.log.textContent = 'Успешно применено. Переход к следующей...';
+
+                isProcessing = false;
+                updateUI();
+
+                if (currentIndex < issues.length) {
+                    processNext();
+                }
+
+            } catch (e) {
+                ui.log.textContent = 'Ошибка применения: ' + e.message;
+                isProcessing = false;
+                updateUI();
+                toast(e.message, true);
+            }
+        }
+
+        function skipCurrent() {
+            if (currentIndex >= issues.length) return;
+            currentIndex++;
+            hasGenerated = false;
+            currentSuggestedTags = [];
+            ui.aiTagsHint.style.display = 'none';
+            ui.commentTa.value = '';
+            ui.log.textContent = 'Пропущено пользователем.';
+            updateUI();
+            if (currentIndex < issues.length) {
+                processNext();
+            }
+        }
+
+        ui.btnStart.addEventListener('click', () => {
+            if (currentIndex >= issues.length) return;
+            processNext();
+        });
+
+        ui.btnStop.addEventListener('click', () => {
+            if (abortController) abortController.abort();
+        });
+
+        ui.btnApply.addEventListener('click', () => {
+            applyCurrent();
+        });
+
+        ui.btnSkip.addEventListener('click', () => {
+            skipCurrent();
+        });
+
+        ui.chkSemi.addEventListener('change', () => {
+            if (!ui.chkSemi.checked && hasGenerated && !isProcessing) {
+                ui.log.textContent = 'Режим изменен на автоматический. Применение...';
                 setTimeout(() => {
                     if (!ui.chkSemi.checked && hasGenerated && !isProcessing) {
                         applyCurrent();
                     }
-                }, 1000);
+                }, 500);
             }
+        });
 
-        } catch (e) {
-            if (e.name === 'AbortError') {
-                ui.log.textContent = 'Остановлено пользователем.';
-                ui.progress.textContent = 'Пауза.';
-                isProcessing = false;
-                hasGenerated = false;
-                updateUI();
-                return;
-            }
-            ui.log.textContent = 'Ошибка: ' + e.message;
-            ui.progress.textContent = 'Остановлено из-за ошибки Ollama';
-            isProcessing = false;
-            hasGenerated = false;
-            updateUI();
-            toast('Ошибка Ollama: ' + e.message, true);
-        } finally {
-            abortController = null;
-        }
-    }
+        overlay.querySelector('#auto-btn-ollama-settings').addEventListener('click', () => openOllamaSettingsModal(ctx));
 
-    async function applyCurrent() {
-        if (isProcessing || currentIndex >= issues.length) return;
-        isProcessing = true;
         updateUI();
-
-        const it = issues[currentIndex];
-        const status = ui.statusSel.value;
-        const comment = ui.commentTa.value;
-
-        ui.log.textContent = 'Применение...';
-
-        try {
-            const p = new URLSearchParams(ctx.qs());
-            p.set('key', it.key);
-            p.set('transition', status);
-            p.set('comment', comment);
-            p.set('dryRun', 'false');
-            const res = await ctx.api('/api/mark?' + p, { method: 'POST' });
-            if (res.success === false) throw new Error(res.error || 'Ошибка применения');
-
-            it.status = status;
-            currentIndex++;
-            hasGenerated = false;
-            ui.commentTa.value = '';
-            ui.log.textContent = 'Успешно применено. Переход к следующей...';
-
-            isProcessing = false;
-            updateUI();
-
-            if (currentIndex < issues.length) {
-                processNext();
-            }
-
-        } catch (e) {
-            ui.log.textContent = 'Ошибка применения: ' + e.message;
-            isProcessing = false;
-            updateUI();
-            toast(e.message, true);
-        }
-    }
-
-    function skipCurrent() {
-        if (currentIndex >= issues.length) return;
-        currentIndex++;
-        hasGenerated = false;
-        ui.commentTa.value = '';
-        ui.log.textContent = 'Пропущено пользователем.';
-        updateUI();
-        if (currentIndex < issues.length) {
-            processNext();
-        }
-    }
-
-    ui.btnStart.addEventListener('click', () => {
-        if (currentIndex >= issues.length) return;
-        processNext();
-    });
-
-    ui.btnStop.addEventListener('click', () => {
-        if (abortController) abortController.abort();
-    });
-
-    ui.btnApply.addEventListener('click', () => {
-        applyCurrent();
-    });
-
-    ui.btnSkip.addEventListener('click', () => {
-        skipCurrent();
-    });
-
-    ui.chkSemi.addEventListener('change', () => {
-        if (!ui.chkSemi.checked && hasGenerated && !isProcessing) {
-            ui.log.textContent = 'Режим изменен на автоматический. Применение...';
-            setTimeout(() => {
-                if (!ui.chkSemi.checked && hasGenerated && !isProcessing) {
-                    applyCurrent();
-                }
-            }, 500);
-        }
-    });
-
-    overlay.querySelector('#auto-btn-ollama-settings').addEventListener('click', () => openOllamaSettingsModal(ctx));
-
-    updateUI();
+    })();
 }

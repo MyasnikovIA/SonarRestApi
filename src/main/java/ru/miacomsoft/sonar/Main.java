@@ -2,29 +2,11 @@ package ru.miacomsoft.sonar;
 
 import ru.miacomsoft.sonar.server.ApiServer;
 import ru.miacomsoft.sonar.server.Console;
+import ru.miacomsoft.sonar.server.OllamaConfig;
 import ru.miacomsoft.sonar.server.ServerState;
 
 import java.nio.file.Path;
 
-/**
- * Точка входа.
- *
- * Без аргументов: REST на 0.0.0.0:6060 + Console, session.txt из CWD.
- *
- * Аргументы / system properties:
- *   --host=0.0.0.0            адрес REST (по умолчанию 0.0.0.0)
- *   --port=6060               порт REST (по умолчанию 6060)
- *   --threads=8               пул потоков HTTP
- *   --batch=500               размер батча для bulk_change
- *   --delay=500               пауза между батчами, мс
- *   --session=session.txt     путь к session.txt (иначе CWD/session.txt)
- *   --project=KEY             проект по умолчанию (иначе env SONAR_PROJECT)
- *   --snippet-limit=N         ограничить число префетченных сниппетов
- *   --no-warmup               не собирать снимок на старте
- *   --async-warmup            собирать снимок в фоне
- *   --no-snippets             не префетчить сниппеты в снимке
- *   --no-console              не запускать интерактивную консоль (демон)
- */
 public class Main {
 
     private static final int DEFAULT_PORT = 6060;
@@ -43,6 +25,9 @@ public class Main {
         int snippetLimit = 0;
         boolean console = true;
 
+        // NEW: путь к конфигу Ollama
+        String ollamaConfigFile = "ollama.properties";
+
         for (int i = 0; i < args.length; i++) {
             String a = args[i];
             if (a.startsWith("--host="))                host = a.substring("--host=".length());
@@ -53,6 +38,7 @@ public class Main {
             else if (a.startsWith("--session="))        sessionFile = a.substring("--session=".length());
             else if (a.startsWith("--project="))        project = a.substring("--project=".length());
             else if (a.startsWith("--snippet-limit="))  snippetLimit = Integer.parseInt(a.substring("--snippet-limit=".length()));
+            else if (a.startsWith("--ollama-config="))  ollamaConfigFile = a.substring("--ollama-config=".length()); // NEW
             else if ("--no-warmup".equals(a))           warmup = false;
             else if ("--async-warmup".equals(a))        asyncWarmup = true;
             else if ("--no-snippets".equals(a))         warmupSnippets = false;
@@ -65,21 +51,24 @@ public class Main {
                 Path.of(sessionFile), project, batchSize, delayMs,
                 warmupSnippets, snippetLimit);
 
-        // Консоль запускаем до прогрева, чтобы пользователь видел прогресс
-        // и мог переключать project / запускать refresh вручную.
+        // NEW: конфиг Ollama — создаётся всегда (читает файл, если есть)
+        OllamaConfig ollamaConfig = new OllamaConfig(Path.of(ollamaConfigFile));
+        System.out.println("[main] Ollama config: " + ollamaConfig.getConfigFile()
+                + " (url=" + ollamaConfig.getUrl()
+                + ", model=" + ollamaConfig.getModel() + ")");
+
         if (console) {
-            new Console(state).start();
+            new Console(state, ollamaConfig).start();          // ← передаём конфиг
         } else {
             System.out.println("[main] Console disabled (--no-console)");
         }
 
-        // ===== прогрев снимка =====
+        // ... остальной код (warmup, ApiServer.start) без изменений ...
         if (warmup) {
             if (!state.isSessionReady()) {
                 System.out.println("[Warmup] SKIP: сессия не загружена");
             } else if (project == null || project.isEmpty()) {
-                System.out.println("[Warmup] SKIP: project не задан. "
-                        + "Задайте SONAR_PROJECT / --project=KEY или запустите 'refresh' в консоли / POST /api/refresh");
+                System.out.println("[Warmup] SKIP: project не задан.");
             } else if (asyncWarmup) {
                 System.out.println("[Warmup] async: запускаю пересбор снимка в фоне");
                 state.buildSnapshotAsync(project);
@@ -88,8 +77,7 @@ public class Main {
                 try {
                     state.buildSnapshotSync(project);
                 } catch (Exception e) {
-                    System.err.println("[Warmup] FAILED: " + e.getMessage()
-                            + ". Сервер всё равно стартует; снимок можно пересобрать через 'refresh' или POST /api/refresh");
+                    System.err.println("[Warmup] FAILED: " + e.getMessage());
                 }
             }
         } else {

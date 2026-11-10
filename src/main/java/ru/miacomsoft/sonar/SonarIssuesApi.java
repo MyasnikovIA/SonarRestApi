@@ -378,7 +378,28 @@ public class SonarIssuesApi {
      * Загружает только необработанные замечания (OPEN и REOPENED).
      * CONFIRMED не включается — он уже обработан пользователем.
      */
+    /**
+     * Загружает только необработанные замечания.
+     *
+     * В SonarQube 9.x/10.x статуса REOPENED больше нет — переоткрытое
+     * замечание возвращается в OPEN. В старых версиях REOPENED ещё
+     * существовал, но такие инстансы на запрос со REOPENED отвечают 400.
+     *
+     * Поэтому: сначала пробуем современный запрос (OPEN,REOPENED), при
+     * ошибке «must be one of» откатываемся на OPEN — это безопасно для
+     * обеих моделей (OPEN покрывает и переоткрытые замечания).
+     */
     public List<Issue> fetchOpen(String impactSeverity, String quality) throws Exception {
-        return fetchAllByStatuses("OPEN,REOPENED", impactSeverity, quality);
+        try {
+            return fetchAllByStatuses("OPEN,REOPENED", impactSeverity, quality);
+        } catch (RuntimeException e) {
+            String msg = e.getMessage();
+            if (msg != null && (msg.contains("REOPENED") || msg.contains("issueStatuses"))) {
+                System.err.println("[SonarIssuesApi] REOPENED not supported by this SonarQube, "
+                        + "retrying with OPEN only");
+                return fetchAllByStatuses("OPEN", impactSeverity, quality);
+            }
+            throw e;
+        }
     }
 }

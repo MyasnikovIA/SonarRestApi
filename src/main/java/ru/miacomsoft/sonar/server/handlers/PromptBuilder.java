@@ -212,4 +212,92 @@ public final class PromptBuilder {
 
         return sb.toString();
     }
+
+    // ==================== NEW: авто-промпт (LLM сам выбирает статус) ====================
+
+    public static String buildAutoResolvePrompt(Issue issue, List<String> snippet,
+                                                List<String> availableTags) {
+        String code = highlightForPrompt(snippet, issue.line).trim();
+        Lang lang = detectLanguage(issue.component);
+        String severity = (issue.impactSeverity != null && !issue.impactSeverity.isEmpty())
+                ? issue.impactSeverity
+                : (issue.severity != null ? issue.severity : "");
+
+        String tagsList = (availableTags != null && !availableTags.isEmpty())
+                ? String.join(", ", availableTags)
+                : "любые релевантные";
+
+        String filePath = issue.component != null ? issue.component : "";
+        String ruleCtx  = (issue.ruleName != null && !issue.ruleName.isEmpty())
+                ? issue.ruleName
+                : (issue.rule != null ? issue.rule : "");
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("Ты — опытный разработчик и эксперт по SonarQube.\n\n");
+
+        sb.append("ЗАДАЧА: определить статус, критичность, решение о фиксе, теги и обоснование.\n\n");
+
+        sb.append("ОПРЕДЕЛЕНИЯ СТАТУСОВ:\n");
+        sb.append("- falsepositive: SonarQube ошибся.\n");
+        sb.append("- accept: реальная проблема, откладываем.\n");
+        sb.append("- confirm: реальная и срочная.\n");
+        sb.append("- resolve: уже исправлено.\n");
+        sb.append("- wontfix: не будем исправлять.\n\n");
+
+        sb.append("=== КРИТИЧЕСКИ ВАЖНО: СГЕНЕРИРОВАННЫЙ КОД ===\n");
+        sb.append("Файл СГЕНЕРИРОВАН, если ЛЮБОЙ признак верен:\n");
+        sb.append("- путь содержит \"/Api/\" и имя файла заканчивается на \"Api.php\" (OpenAPI client),\n");
+        sb.append("- путь содержит \"/Model/\" (сгенерированные модели),\n");
+        sb.append("- маркеры в коде: \"ObjectSerializer\", \"handleResponseWithDataType\", \"ApiException\",\n");
+        sb.append("  \"$this->config\", \"$this->headerSelector\", \"buildQuery\",\n");
+        sb.append("- расширения: .pb.go, .pb.php, .pb.cc, .g.cs, *_generated.*, *_pb2.py, *-openapi.*, *.g.dart.\n");
+        sb.append("Для СГЕНЕРИРОВАННОГО кода:\n");
+        sb.append("- статус = accept ИЛИ wontfix (никогда confirm/resolve/falsepositive),\n");
+        sb.append("- фикс-тег = ВСЕГДА \"not-require-fix\",\n");
+        sb.append("- НЕ предлагай рефакторинг, объединение веток, добавление default в switch,\n");
+        sb.append("  удаление дублирования — правки затрутся при следующей регенерации.\n\n");
+
+        sb.append("=== ЯЗЫКОВЫЕ СИГНАЛЫ ===\n");
+        sb.append("Если пишешь \"функционально работает корректно\", \"не влияет на работу\",\n");
+        sb.append("\"нарушает читаемость но не ломает\", \"косметическая проблема\" —\n");
+        sb.append("это ЯВНЫЙ СИГНАЛ поставить фикс-тег \"not-require-fix\", а не \"require-fix\".\n\n");
+
+        sb.append("=== РЕШЕНИЕ О НЕОБХОДИМОСТИ ИСПРАВЛЕНИЯ ===\n");
+        sb.append("Верни РОВНО ОДИН из двух тегов в поле \"Теги:\"\n");
+        sb.append("- \"require-fix\"     — баг РЕАЛЬНЫЙ, в РУЧНОМ коде, его НУЖНО исправить.\n");
+        sb.append("- \"not-require-fix\" — не требует исправления: сгенерированный код,\n");
+        sb.append("  false positive, стилистика без последствий, wontfix.\n\n");
+
+        sb.append("СВЯЗЬ СТАТУСА И ФИКС-ТЕГА:\n");
+        sb.append("- status=confirm       → require-fix\n");
+        sb.append("- status=resolve       → not-require-fix (уже исправлено)\n");
+        sb.append("- status=wontfix       → not-require-fix\n");
+        sb.append("- status=falsepositive → not-require-fix\n");
+        sb.append("- status=accept        → require-fix (ручной код) или not-require-fix (сгенерированный)\n\n");
+
+        sb.append("ДОСТУПНЫЕ ТЕГИ (используй ТОЛЬКО из этого списка): ").append(tagsList).append("\n");
+        sb.append("В поле \"Теги:\" верни СНАЧАЛА require-fix или not-require-fix,\n");
+        sb.append("затем 1–2 тега СТРОГО из списка выше.\n\n");
+
+        sb.append("Контекст:\n");
+        sb.append("- Правило: ").append(ruleCtx).append("\n");
+        sb.append("- Сообщение: ").append(issue.message != null ? issue.message : "").append("\n");
+        sb.append("- Файл: ").append(filePath).append(issue.line > 0 ? ":" + issue.line : "").append("\n");
+        sb.append("- Severity: ").append(severity).append("\n");
+        sb.append("- Язык: ").append(lang.name).append("\n\n");
+
+        sb.append("Код:\n");
+        sb.append("```").append(lang.codeFence).append("\n");
+        sb.append(code).append("\n");
+        sb.append("```\n\n");
+
+        sb.append("ФОРМАТ ОТВЕТА (СТРОГО, без отклонений):\n");
+        sb.append("1. Строка 1: \"Статус: <accept|falsepositive|confirm|resolve|wontfix>\"\n");
+        sb.append("2. Строка 2: \"Критичность: <подтверждаю|завышена|занижена> — <обоснование>\"\n");
+        sb.append("3. Строка 3: \"Теги: <require-fix|not-require-fix>, <tag2>, <tag3>\"\n");
+        sb.append("4. Строки 4+: 1–3 предложения.\n\n");
+        sb.append("Пиши по-русски, без markdown. Верни ТОЛЬКО этот текст.\n");
+
+        return sb.toString();
+    }
 }

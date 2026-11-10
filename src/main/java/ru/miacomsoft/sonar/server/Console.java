@@ -3,6 +3,9 @@ package ru.miacomsoft.sonar.server;
 import ru.miacomsoft.sonar.Issue;
 import ru.miacomsoft.sonar.SonarBulkApi;
 import ru.miacomsoft.sonar.SonarIssuesApi;
+import ru.miacomsoft.sonar.server.handlers.PromptBuilder;
+import ru.miacomsoft.sonar.server.ollama.OllamaClient;
+import ru.miacomsoft.sonar.server.ollama.OllamaResponse;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
@@ -19,15 +22,17 @@ public class Console {
     private static final Set<String> KNOWN_TRANSITIONS = Set.of(
             "accept", "falsepositive", "confirm", "resolve", "wontfix", "reopen");
 
-    private final ServerState state;
-    private volatile String project;
-    private volatile boolean running = true;
-    private final Thread thread;
+    private final ServerState    state;
+    private final OllamaConfig   ollamaConfig;
+    private volatile String      project;
+    private volatile boolean     running = true;
+    private final Thread         thread;
 
-    public Console(ServerState state) {
-        this.state = state;
-        this.project = state.getDefaultProject() != null ? state.getDefaultProject() : "";
-        this.thread = new Thread(this::loop, "console");
+    public Console(ServerState state, OllamaConfig ollamaConfig) {
+        this.state        = state;
+        this.ollamaConfig = ollamaConfig;
+        this.project      = state.getDefaultProject() != null ? state.getDefaultProject() : "";
+        this.thread       = new Thread(this::loop, "console");
         this.thread.setDaemon(true);
     }
 
@@ -76,23 +81,25 @@ public class Console {
         String[] a = Arrays.copyOfRange(tokens, 1, tokens.length);
 
         switch (cmd) {
-            case "help", "?", "h"        -> help();
-            case "quit", "exit", "q"     -> { running = false; }
-            case "status"                -> cmdStatus();
-            case "health"                -> cmdHealth();
-            case "project"               -> cmdProject(a);
-            case "session"               -> cmdSession(a);
-            case "refresh"               -> cmdRefresh(a);
-            case "summary"               -> cmdSummary(a);
-            case "matrix"                -> cmdMatrix(a);
-            case "perfile"               -> cmdPerFile(a);
-            case "details"               -> cmdDetails(a);
-            case "issues"                -> cmdIssues(a);
-            case "keys"                  -> cmdKeys(a);
-            case "snippet"               -> cmdSnippet(a);
-            case "mark"                  -> cmdMark(a);          // single или bulk (детект)
-            case "cancel"                -> cmdCancel(a);        // single reopen
-            case "cancelall", "cancel-all" -> cmdCancelAll(a);   // bulk reopen
+            case "help", "?", "h"           -> help();
+            case "quit", "exit", "q"        -> { running = false; }
+            case "status"                   -> cmdStatus();
+            case "health"                   -> cmdHealth();
+            case "project"                  -> cmdProject(a);
+            case "session"                  -> cmdSession(a);
+            case "refresh"                  -> cmdRefresh(a);
+            case "summary"                  -> cmdSummary(a);
+            case "matrix"                   -> cmdMatrix(a);
+            case "perfile"                  -> cmdPerFile(a);
+            case "details"                  -> cmdDetails(a);
+            case "issues"                   -> cmdIssues(a);
+            case "keys"                     -> cmdKeys(a);
+            case "snippet"                  -> cmdSnippet(a);
+            case "mark"                     -> cmdMark(a);
+            case "cancel"                   -> cmdCancel(a);
+            case "cancelall", "cancel-all"  -> cmdCancelAll(a);
+            case "ollama"                   -> cmdOllama(a);
+            case "auto", "autoall"          -> cmdAuto(a);
             default -> System.out.println("Unknown command: '" + cmd + "'. Try 'help'");
         }
     }
@@ -365,7 +372,6 @@ public class Console {
 
     private void cmdMark(String[] a) throws Exception {
         if (a.length < 1) { printMarkHelp(); return; }
-        // если первый токен — известный transition → bulk; иначе single
         if (KNOWN_TRANSITIONS.contains(a[0].toLowerCase(Locale.ROOT))) {
             cmdMarkBulk(a);
         } else {
@@ -380,7 +386,6 @@ public class Console {
         System.out.println("  transition = accept | falsepositive | confirm | resolve | wontfix | reopen");
     }
 
-    /** mark <KEY> <transition> [comment...] — пометить один issue. */
     private void cmdMarkOne(String[] a) throws Exception {
         if (a.length < 2) { printMarkHelp(); return; }
         if (!requireProject()) return;
@@ -415,7 +420,6 @@ public class Console {
         }
     }
 
-    /** mark <transition> [SEV] [QUAL] [--yes] — массовая пометка по фильтру. */
     private void cmdMarkBulk(String[] a) throws Exception {
         if (!requireProject()) return;
 
@@ -472,7 +476,6 @@ public class Console {
         }
     }
 
-    /** cancel <KEY> — снять пометку (reopen) с одного issue. */
     private void cmdCancel(String[] a) throws Exception {
         if (a.length < 1) { System.out.println("usage: cancel <KEY>"); return; }
         if (!requireProject()) return;
@@ -495,7 +498,6 @@ public class Console {
         }
     }
 
-    /** cancelall [SEV] [QUAL] [--yes] — массовый reopen по фильтру. */
     private void cmdCancelAll(String[] a) throws Exception {
         if (!requireProject()) return;
 
@@ -548,6 +550,244 @@ public class Console {
             } catch (Exception e) {
                 System.err.println("[refresh] auto-refresh failed: " + e.getMessage());
             }
+        }
+    }
+
+    // ==================== ollama ====================
+
+    private void cmdOllama(String[] a) throws Exception {
+        if (a.length == 0 || "show".equalsIgnoreCase(a[0])) {
+            System.out.println("Ollama settings  (" + ollamaConfig.getConfigFile() + ")");
+            System.out.println("  url         = " + ollamaConfig.getUrl());
+            System.out.println("  model       = " + ollamaConfig.getModel());
+            System.out.println("  timeout     = " + ollamaConfig.getTimeoutSeconds() + "s");
+            System.out.println("  temperature = " + ollamaConfig.getTemperature());
+            System.out.println();
+            System.out.println("Usage:");
+            System.out.println("  ollama show");
+            System.out.println("  ollama set url <URL>");
+            System.out.println("  ollama set model <MODEL>");
+            System.out.println("  ollama set timeout <SECONDS>");
+            System.out.println("  ollama set temperature <FLOAT>");
+            System.out.println("  ollama test");
+            System.out.println("  ollama reload");
+            return;
+        }
+
+        String sub = a[0].toLowerCase(Locale.ROOT);
+        switch (sub) {
+            case "set" -> {
+                if (a.length < 3) {
+                    System.out.println("usage: ollama set <url|model|timeout|temperature> <value>");
+                    return;
+                }
+                switch (a[1].toLowerCase(Locale.ROOT)) {
+                    case "url"         -> ollamaConfig.setUrl(a[2]);
+                    case "model"       -> ollamaConfig.setModel(a[2]);
+                    case "timeout"     -> ollamaConfig.setTimeoutSeconds(Integer.parseInt(a[2]));
+                    case "temperature" -> ollamaConfig.setTemperature(Double.parseDouble(a[2]));
+                    default -> { System.out.println("unknown key: " + a[1]); return; }
+                }
+                ollamaConfig.save();
+                System.out.println("[ollama] saved");
+            }
+            case "test" -> {
+                try {
+                    new OllamaClient(ollamaConfig).testConnection();
+                    System.out.println("[ollama] OK: " + ollamaConfig.getUrl());
+                } catch (Exception e) {
+                    System.err.println("[ollama] FAIL: " + e.getMessage());
+                }
+            }
+            case "reload" -> {
+                OllamaConfig fresh = new OllamaConfig(ollamaConfig.getConfigFile());
+                ollamaConfig.setUrl(fresh.getUrl());
+                ollamaConfig.setModel(fresh.getModel());
+                ollamaConfig.setTimeoutSeconds(fresh.getTimeoutSeconds());
+                ollamaConfig.setTemperature(fresh.getTemperature());
+                System.out.println("[ollama] reloaded from " + ollamaConfig.getConfigFile());
+            }
+            default -> System.out.println("unknown sub-command: " + sub);
+        }
+    }
+
+    // ==================== auto ====================
+
+    private void cmdAuto(String[] a) throws Exception {
+        if (!requireProject()) return;
+
+        if (!ollamaConfig.isConfigured()) {
+            System.out.println("[auto] Ollama не настроена.");
+            System.out.println("       Установите: ollama set url http://host:port");
+            System.out.println("                   ollama set model llama3");
+            return;
+        }
+
+        boolean confirm = false;
+        List<String> rest = new ArrayList<>();
+        for (String t : a) {
+            if ("--yes".equals(t)) confirm = true;
+            else rest.add(t);
+        }
+
+        if (!rest.isEmpty() && "key".equalsIgnoreCase(rest.get(0))) {
+            if (rest.size() < 2) {
+                System.out.println("usage: auto key <ISSUE_KEY> [--yes]");
+                return;
+            }
+            cmdAutoSingle(rest.get(1), confirm);
+            return;
+        }
+
+        String[] sq = sevQual(rest.toArray(new String[0]), 0);
+        SonarIssuesApi api = state.newApi(project);
+        List<Issue> issues = api.fetchOpen(sq[0], sq[1]);
+
+        System.out.printf("%nproject    = %s%n", project);
+        System.out.printf("severity   = %s%n", sq[0]);
+        System.out.printf("quality    = %s%n", sq[1]);
+        System.out.printf("issues     = %d  (OPEN / REOPENED)%n", issues.size());
+        System.out.printf("ollama     = %s  (model: %s)%n",
+                ollamaConfig.getUrl(), ollamaConfig.getModel());
+
+        if (issues.isEmpty()) {
+            System.out.println("\nНет issues для обработки.");
+            return;
+        }
+
+        if (!confirm) {
+            System.out.println("\nDRY RUN — ничего не изменено.");
+            System.out.println("Первые " + Math.min(5, issues.size()) + " issues:");
+            for (int i = 0; i < Math.min(5, issues.size()); i++) {
+                Issue it = issues.get(i);
+                System.out.printf("  %-20s  %-12s  %s%n",
+                        it.key,
+                        it.impactSeverity != null && !it.impactSeverity.isEmpty()
+                                ? it.impactSeverity : it.severity,
+                        shorten(it.message, 70));
+            }
+            if (issues.size() > 5) {
+                System.out.println("  ... и ещё " + (issues.size() - 5));
+            }
+            System.out.println("\nЧтобы запустить обработку: auto "
+                    + sq[0] + " " + sq[1] + " --yes");
+            return;
+        }
+
+        System.out.println("\n=== Запуск массовой обработки через Ollama ===\n");
+
+        long t0 = System.currentTimeMillis();
+        AutoProcessor.Stats stats = AutoProcessor.processAll(
+                state, project, sq[0], sq[1], ollamaConfig,
+                this::printProgress
+        );
+        long elapsedMs = System.currentTimeMillis() - t0;
+
+        System.out.println();
+        System.out.println("=== Результат ===");
+        System.out.printf("Всего:         %d%n", stats.total);
+        System.out.printf("Успешно:       %d%n", stats.success);
+        System.out.printf("Ошибок:        %d%n", stats.failed);
+        System.out.printf("Время:         %.1f сек%n", elapsedMs / 1000.0);
+        if (!stats.byStatus.isEmpty()) {
+            System.out.println("По статусам:   " + stats.byStatus);
+        }
+        if (!stats.byFixDecision.isEmpty()) {
+            System.out.println("По фикс-тегам: " + stats.byFixDecision);
+        }
+        if (!stats.failedKeys.isEmpty()) {
+            System.out.println("Failed keys:   " + String.join(", ", stats.failedKeys));
+        }
+
+        if (state.isSnapshotReady()
+                && state.getSnapshot().projectKey.equals(project)
+                && !state.isSnapshotBuilding()) {
+            System.out.println("\n[auto] Обновляю снимок в фоне (status — прогресс)");
+            state.buildSnapshotAsync(project);
+        }
+    }
+
+    private void cmdAutoSingle(String key, boolean confirm) throws Exception {
+        SonarIssuesApi api = state.newApi(project);
+        Issue it = api.fetchIssue(key);
+        if (it == null) {
+            System.out.println("[auto] issue не найден: " + key);
+            return;
+        }
+
+        System.out.printf("%nkey        = %s%n", it.key);
+        System.out.printf("status     = %s%n", it.status);
+        System.out.printf("component  = %s:%d%n", it.component, it.line);
+        System.out.printf("rule       = %s%n", it.rule);
+        System.out.printf("message    = %s%n", shorten(it.message, 120));
+        System.out.printf("ollama     = %s  (model: %s)%n",
+                ollamaConfig.getUrl(), ollamaConfig.getModel());
+
+        if (!confirm) {
+            System.out.println("\nDRY RUN — добавьте --yes, чтобы применить.");
+            return;
+        }
+
+        try {
+            String ruleName = it.ruleName;
+            if (ruleName == null || ruleName.isEmpty()) {
+                try { ruleName = api.fetchRuleName(it.rule); }
+                catch (Exception e) { ruleName = it.rule; }
+            }
+            List<String> snippet;
+            try { snippet = api.fetchSnippet(it.key); }
+            catch (Exception e) { snippet = new ArrayList<>(); }
+
+            List<String> tags = new ArrayList<>();
+            try { tags = api.fetchTags(null); }
+            catch (Exception e) { /* ignore */ }
+
+            String prompt = PromptBuilder.buildAutoResolvePrompt(it, snippet, tags);
+
+            System.out.println("[auto] запрос к Ollama...");
+            String raw = new OllamaClient(ollamaConfig).chat(prompt);
+
+            OllamaResponse parsed = OllamaResponse.parse(raw);
+            if (parsed.status.isEmpty()) {
+                System.err.println("[auto] Не удалось извлечь статус из ответа.");
+                return;
+            }
+
+            System.out.printf("[auto] статус     = %s%n", parsed.status);
+            System.out.printf("[auto] теги       = %s%n", parsed.tags);
+            System.out.printf("[auto] комментарий:%n%s%n", parsed.comment);
+
+            SonarBulkApi bulk = state.newBulk();
+            bulk.change(List.of(it), parsed.status, parsed.comment);
+            if (!parsed.tags.isEmpty()) {
+                try { bulk.setTags(List.of(it), String.join(",", parsed.tags)); }
+                catch (Exception e) { System.err.println("[auto] setTags: " + e.getMessage()); }
+            }
+
+            System.out.println("[auto] OK");
+
+            if (state.isSnapshotReady() && !state.isSnapshotBuilding()) {
+                state.refreshIssue(project, it.key);
+            }
+        } catch (Exception e) {
+            System.err.println("[auto] FAIL: " + e.getMessage());
+        }
+    }
+
+    private void printProgress(AutoProcessor.Progress p) {
+        if (p == null || p.total == 0) return;
+        switch (p.phase) {
+            case "preparing" -> System.out.printf("[%d/%d] %s — подготовка...%n",
+                    p.current, p.total, p.issueKey);
+            case "ollama"    -> System.out.printf("[%d/%d] %s — Ollama (%s)...%n",
+                    p.current, p.total, p.issueKey, p.detail);
+            case "applying"  -> System.out.printf("[%d/%d] %s — применяю %s...%n",
+                    p.current, p.total, p.issueKey, p.detail);
+            case "done"      -> System.out.printf("[%d/%d] %s → %s  OK%n",
+                    p.current, p.total, p.issueKey, p.detail);
+            case "failed"    -> System.out.printf("[%d/%d] %s → FAIL: %s%n",
+                    p.current, p.total, p.issueKey, p.detail);
+            // "complete" не печатаем — итог выводится в cmdAuto
         }
     }
 
@@ -639,6 +879,24 @@ public class Console {
                   без --yes — dry-run
               cancel <KEY>                          — снять пометку (reopen)
               cancelall [SEV] [QUAL] [--yes]        — снять пометки по фильтру
+
+            Ollama (LLM для авто-обработки):
+              ollama show                         — текущие настройки
+              ollama set url <URL>                — например http://localhost:11434
+              ollama set model <MODEL>            — например llama3 или qwen2.5-coder
+              ollama set timeout <SECONDS>        — таймаут запроса (по умолчанию 300)
+              ollama set temperature <FLOAT>      — температура (по умолчанию 0.2)
+              ollama test                         — проверить соединение и список моделей
+              ollama reload                       — перечитать *.properties с диска
+
+            Авто-обработка всех issues через Ollama:
+              auto [SEV] [QUAL] [--yes]     — обработать все OPEN/REOPENED issues
+              auto key <KEY> [--yes]        — обработать один issue
+                  Аналог "Добавить автоматически комментарий" в UI.
+                  Для каждого issue: промпт → Ollama → парсинг ответа →
+                  применение статуса + установка тегов.
+                  Без --yes — dry-run (только список).
+                  По умолчанию SEV=ALL, QUAL=ALL.
 
             SEV  = MEDIUM | HIGH | LOW | INFO | ALL
             QUAL = MAINTAINABILITY | RELIABILITY | SECURITY | ALL

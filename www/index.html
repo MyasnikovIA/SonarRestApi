@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sonar Rest API — Web Client</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+    <div class="brand">
+        <span class="logo">◈</span>
+        <span class="title">Sonar Rest API</span>
+    </div>
+    <div class="project-box">
+        <label>project</label>
+        <input id="project" type="text" placeholder="MEDMIS-MISmobile.doctor_api_spec">
+    </div>
+
+    <!-- НОВЫЙ БЛОК: Прогресс-бар -->
+    <div class="progress-container hidden" id="progress-container">
+        <div class="progress-bar-bg">
+            <div class="progress-bar-fill" id="progress-bar-fill" style="width: 0%;"></div>
+        </div>
+        <span class="progress-text" id="progress-text">...</span>
+    </div>
+
+    <div class="status">
+        <span class="dot building" id="status-dot"></span>
+        <span id="status-text">building snapshot…</span>
+    </div>
+    <button id="btn-refresh" class="btn btn-accent">↻ Refresh snapshot</button>
+    <button id="btn-ollama-settings" class="btn" title="Настройки Ollama">⚙ Ollama</button>
+</header>
+
+<nav class="tabs" id="tabs"></nav>
+
+<main class="content">
+    <section class="filters hidden" id="filters">
+        <label data-filter="sev">Критичность (sev)
+            <select id="sev">
+                <option value="MEDIUM">MEDIUM (Средняя)</option>
+                <option value="HIGH">HIGH (Высокая)</option>
+                <option value="LOW">LOW (Низкая)</option>
+                <option value="INFO">INFO (Инфо)</option>
+                <option value="ALL">ALL (Все)</option>
+            </select>
+        </label>
+        <label data-filter="qual">Качество (qual)
+            <select id="qual">
+                <option value="MAINTAINABILITY">MAINTAINABILITY (Сопровождаемость)</option>
+                <option value="RELIABILITY">RELIABILITY (Надежность)</option>
+                <option value="SECURITY">SECURITY (Безопасность)</option>
+                <option value="ALL">ALL (Все)</option>
+            </select>
+        </label>
+        <label data-filter="snippets">Сниппеты (snippets)
+            <input id="snippets" type="number" value="5" min="0" max="100">
+        </label>
+        <label data-filter="issueKey">Ключ (issueKey)
+            <div style="display:flex; gap:8px;">
+                <select id="issueKey" style="flex:1; max-width:300px; padding:6px 10px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text); font-size:13px;">
+                    <option value="">-- Выберите ключ --</option>
+                </select>
+                <button id="btn-download-keys" class="btn" title="Скачать список ключей в TXT">📥 Экспорт</button>
+            </div>
+        </label>
+        <button id="btn-load" class="btn">Загрузить</button>
+    </section>
+
+    <div id="panels"></div>
+</main>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

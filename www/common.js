@@ -59,7 +59,10 @@ export function statusBadge(status) {
         'RESOLVED':       { icon: '✔',  text: 'исправлено' },
         'FIXED':          { icon: '✔',  text: 'исправлено' },
         'WONTFIX':        { icon: '✗',  text: 'не исправлять' },
-        'CLOSED':         { icon: '⛔', text: 'закрыто' }
+        'CLOSED':         { icon: '⛔', text: 'закрыто' },
+        // Security Hotspots
+        'TO_REVIEW':      { icon: '⚠',  text: 'к проверке' },
+        'REVIEWED':       { icon: '✔',  text: 'проверено' }
     };
     const m = map[s] || { icon: '💬', text: s.toLowerCase() };
 

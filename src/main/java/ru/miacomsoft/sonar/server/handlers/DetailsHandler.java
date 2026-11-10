@@ -35,14 +35,20 @@ public class DetailsHandler extends BaseHandler {
 
             JSONArray issuesArr = new JSONArray();
             int n = 0;
+            boolean isHotspot = "SECURITY_HOTSPOT".equalsIgnoreCase(qual);
+
             for (Issue it : issues) {
                 if (n >= maxSnippets) break;
                 JSONObject io = it.toJson();
                 try { io.put("ruleName", it.ruleName != null && !it.ruleName.isEmpty()
                         ? it.ruleName : newApi(project).fetchRuleName(it.rule)); }
                 catch (Exception ex2) { io.put("ruleName", ""); }
-                try { io.put("snippet", new JSONArray(fetchSnippetCached(project, it.key))); }
-                catch (Exception ex2) { io.put("snippet", new JSONArray()); }
+                if (!isHotspot) {
+                    try { io.put("snippet", new JSONArray(fetchSnippetCached(project, it.key))); }
+                    catch (Exception ex2) { io.put("snippet", new JSONArray()); }
+                } else {
+                    io.put("snippet", new JSONArray());
+                }
                 issuesArr.put(io);
                 n++;
             }

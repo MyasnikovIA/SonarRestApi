@@ -322,4 +322,56 @@ public class SonarIssuesApi {
                 .replace("&#39;", "'")
                 .replace("&nbsp;", " ");
     }
+    /**
+     * Загружает Security Hotspots проекта.
+     *
+     * SonarQube /api/hotspots/search принимает только ОДИН status за запрос
+     * (TO_REVIEW ИЛИ REVIEWED — CSV не поддерживается), поэтому делаем два запроса
+     * и склеиваем. Фильтр по vulnerabilityProbability — на клиенте, т.к. серверной
+     * фильтрации по нему нет.
+     *
+     * @param vulnerabilityProbability HIGH | MEDIUM | LOW | ALL | null
+     */
+    public List<Issue> fetchHotspots(String vulnerabilityProbability) throws Exception {
+        List<Issue> out = new ArrayList<>();
+        String[] statuses = { "TO_REVIEW", "REVIEWED" };
+
+        for (String status : statuses) {
+            int page = 1, pageSize = 500, total = -1, fetched = 0;
+
+            while (total < 0 || fetched < total) {
+                String url = "/api/hotspots/search?project=" + enc(projectKey)
+                        + "&status=" + enc(status)
+                        + "&ps=" + pageSize
+                        + "&p=" + page;
+
+                JSONObject root = new JSONObject(client.get(url));
+
+                int rootTotal = root.optInt("total", -1);
+                JSONObject paging = root.optJSONObject("paging");
+                if (paging != null) rootTotal = paging.optInt("total", rootTotal);
+                total = rootTotal;
+
+                JSONArray arr = root.optJSONArray("hotspots");
+                if (arr == null || arr.isEmpty()) break;
+
+                fetched += arr.length();
+
+                for (int i = 0; i < arr.length(); i++) {
+                    Issue issue = Issue.fromHotspot(arr.getJSONObject(i), projectKey);
+
+                    if (vulnerabilityProbability != null
+                            && !"ALL".equalsIgnoreCase(vulnerabilityProbability)
+                            && !vulnerabilityProbability.isEmpty()
+                            && !vulnerabilityProbability.equalsIgnoreCase(issue.severity)) {
+                        continue;
+                    }
+                    out.add(issue);
+                }
+                page++;
+                if (page > 100) break;  // safety
+            }
+        }
+        return out;
+    }
 }

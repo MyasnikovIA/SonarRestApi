@@ -10,6 +10,7 @@ import ru.miacomsoft.sonar.server.Snapshot;
 
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 
 public class SummaryHandler extends BaseHandler {
 
@@ -25,20 +26,47 @@ public class SummaryHandler extends BaseHandler {
         String qual = param(q, "qual", "MAINTAINABILITY");
 
         int total;
-        Map<String, Integer> byRules, byFiles, bySev;
-        Snapshot snap = snapshotFor(project);
-        if (snap != null) {
-            List<Issue> filtered = snap.filter(sev, qual);
-            total = filtered.size();
-            byRules = snap.facetRules(sev, qual);
-            byFiles = snap.facetFiles(sev, qual);
-            bySev = snap.facetSeverities(sev, qual);
+        Map<String, Integer> byRules;
+        Map<String, Integer> byFiles;
+        Map<String, Integer> bySev;
+
+        if ("SECURITY_HOTSPOT".equalsIgnoreCase(qual)) {
+            // Hotspots живут в /api/hotspots/search, не в issues.
+            // Снимок их не содержит — тянем live.
+            List<Issue> list = newApi(project).fetchHotspots(sev);
+
+            total = list.size();
+            byRules = new TreeMap<>();
+            byFiles = new TreeMap<>();
+            bySev   = new TreeMap<>();
+
+            for (Issue i : list) {
+                if (i.rule != null && !i.rule.isEmpty()) {
+                    byRules.merge(i.rule, 1, Integer::sum);
+                }
+                if (i.component != null && !i.component.isEmpty()) {
+                    byFiles.merge(i.component, 1, Integer::sum);
+                }
+                String key = (i.severity != null && !i.severity.isEmpty())
+                        ? i.severity
+                        : "UNKNOWN";
+                bySev.merge(key, 1, Integer::sum);
+            }
         } else {
-            SonarIssuesApi api = newApi(project);
-            total = api.count(sev, qual);
-            byRules = api.facet(sev, qual, "rules");
-            byFiles = api.facet(sev, qual, "files");
-            bySev = api.facet(sev, qual, "severities");
+            Snapshot snap = snapshotFor(project);
+            if (snap != null) {
+                List<Issue> filtered = snap.filter(sev, qual);
+                total   = filtered.size();
+                byRules = snap.facetRules(sev, qual);
+                byFiles = snap.facetFiles(sev, qual);
+                bySev   = snap.facetSeverities(sev, qual);
+            } else {
+                SonarIssuesApi api = newApi(project);
+                total   = api.count(sev, qual);
+                byRules = api.facet(sev, qual, "rules");
+                byFiles = api.facet(sev, qual, "files");
+                bySev   = api.facet(sev, qual, "severities");
+            }
         }
 
         JSONObject o = new JSONObject();

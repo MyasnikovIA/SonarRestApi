@@ -11,9 +11,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 public abstract class BaseHandler implements HttpHandler {
 
@@ -85,21 +83,6 @@ public abstract class BaseHandler implements HttpHandler {
         Snapshot s = state.getSnapshot();
         if (s != null && s.projectKey.equals(projectKey)) return s;
         return null;
-    }
-
-    /** Получить список issues: из snapshot если есть, иначе live. */
-    protected List<Issue> fetchIssues(String project, String sev, String qual) throws Exception {
-        Snapshot s = snapshotFor(project);
-        if (s != null) return s.filter(sev, qual);
-        return newApi(project).fetchAll(sev, qual);
-    }
-
-    /** Получить issues, сгруппированные по файлам. */
-    protected Map<String, List<Issue>> fetchIssuesByFile(String project, String sev, String qual)
-            throws Exception {
-        Snapshot s = snapshotFor(project);
-        if (s != null) return s.filterByFile(sev, qual);
-        return newApi(project).issuesByFile(sev, qual);
     }
 
     /** Facet (rules/files/severities) — из snapshot или live. */
@@ -200,5 +183,36 @@ public abstract class BaseHandler implements HttpHandler {
         ex.getResponseHeaders().set("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS");
         ex.getResponseHeaders().set("Access-Control-Allow-Headers", "Content-Type, X-Requested-With");
         ex.getResponseHeaders().set("Access-Control-Max-Age", "86400");
+    }
+    /** Служебный QUAL-фильтр для Security Hotspots (SonarQube такого QUAL не знает). */
+    protected boolean isHotspotQuery(String qual) {
+        return "SECURITY_HOTSPOT".equalsIgnoreCase(qual);
+    }
+
+    protected List<Issue> fetchIssues(String project, String sev, String qual) throws Exception {
+        if (isHotspotQuery(qual)) {
+            return newApi(project).fetchHotspots(sev);
+        }
+        Snapshot s = snapshotFor(project);
+        if (s != null) return s.filter(sev, qual);
+        return newApi(project).fetchAll(sev, qual);
+    }
+
+    protected Map<String, List<Issue>> fetchIssuesByFile(String project, String sev, String qual)
+            throws Exception {
+        if (isHotspotQuery(qual)) {
+            List<Issue> all = newApi(project).fetchHotspots(sev);
+            Map<String, List<Issue>> byFile = new TreeMap<>();
+            for (Issue it : all) {
+                byFile.computeIfAbsent(it.component, k -> new ArrayList<>()).add(it);
+            }
+            for (List<Issue> list : byFile.values()) {
+                list.sort(Comparator.comparingInt(i -> i.line));
+            }
+            return byFile;
+        }
+        Snapshot s = snapshotFor(project);
+        if (s != null) return s.filterByFile(sev, qual);
+        return newApi(project).issuesByFile(sev, qual);
     }
 }

@@ -34,14 +34,10 @@ public class SonarIssuesApi {
         return URLEncoder.encode(s, StandardCharsets.UTF_8);
     }
 
-    // ==================== buildQuery ====================
-
-    /** Базовый buildQuery — сохраняет прежнее поведение (OPEN+CONFIRMED). */
     private String buildQuery(String impactSeverity, String quality) {
         return buildQueryWithStatuses("CONFIRMED,OPEN", impactSeverity, quality);
     }
 
-    /** Универсальный построитель запроса с произвольным issueStatuses. */
     private String buildQueryWithStatuses(String statuses, String impactSeverity, String quality) {
         StringBuilder q = new StringBuilder();
         q.append("components=").append(enc(projectKey));
@@ -59,8 +55,6 @@ public class SonarIssuesApi {
         return q.toString();
     }
 
-    // ==================== count ====================
-
     public int count(String impactSeverity, String quality) throws Exception {
         return countWithStatuses("CONFIRMED,OPEN", impactSeverity, quality);
     }
@@ -73,13 +67,10 @@ public class SonarIssuesApi {
         return root.getInt("total");
     }
 
-    // ==================== fetchAll ====================
-
     public List<Issue> fetchAll(String impactSeverity, String quality) throws Exception {
         return fetchAllByStatuses("CONFIRMED,OPEN", impactSeverity, quality);
     }
 
-    /** Обработанные (accepted) issues. */
     public List<Issue> fetchAccepted(String impactSeverity, String quality) throws Exception {
         return fetchAllByStatuses("ACCEPTED", impactSeverity, quality);
     }
@@ -105,8 +96,6 @@ public class SonarIssuesApi {
         }
         return out;
     }
-
-    // ==================== facet ====================
 
     public Map<String, Integer> facet(String impactSeverity, String quality, String facetName)
             throws Exception {
@@ -136,43 +125,6 @@ public class SonarIssuesApi {
         return result;
     }
 
-    /** Несколько фасетов за один HTTP-запрос: property -> (val -> count). */
-    public Map<String, Map<String, Integer>> facetsWithStatuses(String statuses,
-                                                                String impactSeverity,
-                                                                String quality,
-                                                                String[] facetNames)
-            throws Exception {
-        if (facetNames == null || facetNames.length == 0) return Map.of();
-        StringBuilder fs = new StringBuilder();
-        for (String f : facetNames) {
-            if (fs.length() > 0) fs.append(",");
-            fs.append(f);
-        }
-        String url = "/api/issues/search?"
-                + buildQueryWithStatuses(statuses, impactSeverity, quality)
-                + "&ps=1&facets=" + enc(fs.toString());
-        JSONObject root = new JSONObject(client.get(url));
-        JSONArray facets = root.getJSONArray("facets");
-
-        Map<String, Map<String, Integer>> result = new LinkedHashMap<>();
-        for (int i = 0; i < facets.length(); i++) {
-            JSONObject f = facets.getJSONObject(i);
-            String property = f.optString("property", "");
-            if (property.isEmpty()) continue;
-            Map<String, Integer> values = new LinkedHashMap<>();
-            JSONArray vals = f.getJSONArray("values");
-            for (int j = 0; j < vals.length(); j++) {
-                JSONObject v = vals.getJSONObject(j);
-                int c = v.getInt("count");
-                if (c > 0) values.put(v.getString("val"), c);
-            }
-            result.put(property, values);
-        }
-        return result;
-    }
-
-    // ==================== issuesByFile ====================
-
     public Map<String, List<Issue>> issuesByFile(String impactSeverity, String quality)
             throws Exception {
         return issuesByFileByStatuses("CONFIRMED,OPEN", impactSeverity, quality);
@@ -192,8 +144,6 @@ public class SonarIssuesApi {
         return byFile;
     }
 
-    // ==================== existing ====================
-
     public Issue fetchIssue(String issueKey) throws Exception {
         String url = "/api/issues/search?issues=" + enc(issueKey)
                 + "&additionalFields=" + enc("_all");
@@ -201,6 +151,27 @@ public class SonarIssuesApi {
         JSONArray arr = root.getJSONArray("issues");
         if (arr.isEmpty()) return null;
         return Issue.from(arr.getJSONObject(0), projectKey);
+    }
+
+    public JSONArray fetchChangelog(String issueKey) throws Exception {
+        String url = "/api/issues/changelog?issue=" + enc(issueKey);
+        JSONObject root = new JSONObject(client.get(url));
+        return root.optJSONArray("changelog");
+    }
+
+    // НОВОЕ: Получение доступных тегов
+    public List<String> fetchTags(String query) throws Exception {
+        String url = "/api/issues/tags?ps=100";
+        if (query != null && !query.isEmpty()) {
+            url += "&q=" + enc(query);
+        }
+        JSONObject root = new JSONObject(client.get(url));
+        JSONArray arr = root.getJSONArray("tags");
+        List<String> res = new ArrayList<>();
+        for (int i = 0; i < arr.length(); i++) {
+            res.add(arr.getString(i));
+        }
+        return res;
     }
 
     public String fetchRuleName(String ruleKey) throws Exception {
@@ -258,8 +229,6 @@ public class SonarIssuesApi {
     public void invalidateIssue(String issueKey) {
         snippetCache.remove(issueKey);
     }
-
-    // ==================== highlight / clean ====================
 
     private String applyHighlight(String html, int lineNum, Issue.TextRange range) {
         if (range == null) return html;

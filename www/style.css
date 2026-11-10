@@ -453,3 +453,9 @@ mark.sonar-issue-mark {
 .facet-chip.active b {
     color: #fff !important;
 }
+
+th input[type="checkbox"] {
+    margin: 0;
+    cursor: pointer;
+    accent-color: var(--accent);
+}

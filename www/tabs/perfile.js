@@ -1,6 +1,7 @@
 import {
     esc, toast, highlightCode, fetchAndShowPrompt,
-    detectLanguage, cleanSnippet, highlightForPrompt, statusBadge
+    detectLanguage, cleanSnippet, highlightForPrompt, statusBadge,
+    showTagEditor
 } from '../common.js';
 import {
     bindOllamaResolveButton, bindOllamaSettingsButton,
@@ -270,379 +271,6 @@ export const perfile = {
     },
 };
 
-// ==================== ПРОМПТ ДЛЯ AI (комментарий к статусу Sonar) ====================
-function buildStatusCommentPrompt(issue, ruleName, snippet, status, statusLabel) {
-    const code = highlightForPrompt(snippet, issue.line).trim();
-    const lang = detectLanguage(issue.component);
-    const severity = issue.impactSeverity || issue.severity || '';
-    const hasSelectedStatus = !!(status && statusLabel);
-
-    const lines = [
-        'Ты — опытный разработчик и эксперт по статическому анализу кода (SonarQube).',
-        'Проект мультиязычный: PHP, JavaScript, TypeScript, Java, Kotlin, SQL, PL/SQL,',
-        'Python, Go, Ruby, C#, C++, C, Rust, Swift, Vue и другие языки.',
-        'НЕ делай предположений о языке — он указан ниже (определён по расширению файла).',
-        ''
-    ];
-
-    if (hasSelectedStatus) {
-        // Пользователь уже выбрал статус в UI — генерируем к нему комментарий
-        lines.push(
-            'ЗАДАЧА: Пользователь уже выбрал статус перехода в SonarQube:',
-            '  "' + status + '" — ' + statusLabel,
-            'Сгенерируй КОРОТКИЙ комментарий, объясняющий этот статус для данного кода.',
-            'Статус в ответе должен быть РОВНО "' + status + '" (не меняй его).',
-            ''
-        );
-    } else {
-        // Статус не задан — модель выбирает сама
-        lines.push(
-            'ЗАДАЧА: Определи, есть ли в коде РЕАЛЬНЫЙ дефект, на который указало правило,',
-            'и выбери корректный статус. Ты не обязан находить false positive —',
-            'если проблема реальна, так и скажи.',
-            '',
-            'ОПРЕДЕЛЕНИЯ СТАТУСОВ (согласованы с UI SonarQube):',
-            '- falsepositive: SonarQube ОШИБСЯ в анализе. В коде НЕТ проблемы,',
-            '  на которую указало правило (примеры: параметризованный SQL выдан за',
-            '  инъекцию; пустой catch с логированием через SLF4J; магическое число,',
-            '  являющееся публичной константой фреймворка).',
-            '- accept: РЕАЛЬНАЯ ошибка, которую исправят ПОЗЖЕ (техдолг, бэклог).',
-            '  ЭТО СТАТУС ПО УМОЛЧАНИЮ для любой реальной, но НЕ срочной ошибки.',
-            '- confirm: РЕАЛЬНАЯ и СРОЧНАЯ ошибка — security, потеря данных,',
-            '  падение, некорректный контракт API.',
-            '- resolve: ошибка уже исправлена в коде (виден fix).',
-            '- wontfix: РЕАЛЬНАЯ ошибка, но решено НЕ исправлять (генерированный код,',
-            '  архитектурное решение).',
-            '',
-            'КРИТИЧЕСКИ ВАЖНО:',
-            '1. Сообщение правила само описывает конкретный дефект',
-            '   ("count() always >=0, update this test", "condition always true",',
-            '   "unused variable") — это РЕАЛЬНАЯ проблема, НЕ falsepositive.',
-            '   Ставь accept по умолчанию.',
-            '2. Сгенерированный код (OpenAPI, protobuf, ORM) — wontfix или accept,',
-            '   НЕ falsepositive.',
-            '3. Мёртвый код (count()<0, always-false/true, недостижимые ветки) —',
-            '   реальная ошибка, accept (или wontfix), НЕ falsepositive.',
-            '4. Не путай accept и confirm:',
-            '   accept  = "исправим позже" (техдолг);',
-            '   confirm = "исправляем прямо сейчас" (security/data loss/crash/контракт).',
-            '   Сомневаешься — выбирай accept.',
-            ''
-        );
-    }
-
-    // Общий хвост для обоих режимов
-    lines.push(
-        'АНАЛИЗ КРИТИЧНОСТИ:',
-        'SonarQube оценил как: **' + (severity || 'не указана') + '**',
-        '- HIGH/CRITICAL/BLOCKER + код реально безопасен → falsepositive.',
-        '- LOW/INFO + проблема реально опасна → confirm или accept.',
-        '- MEDIUM и любая другая — по сути (accept/confirm/wontfix/falsepositive).',
-        '',
-        'ЯЗЫКОВЫЕ ОСОБЕННОСТИ (примеры):',
-        '- PHP: дублирование строк в OpenAPI — wontfix (генерированный код).',
-        '- PHP: count() < 0 — реальная ошибка (мёртвая проверка), accept.',
-        '- Java: пустой catch без логирования — реальная ошибка, accept.',
-        '- Java: пустой catch с логированием SLF4J — falsepositive.',
-        '- JS/TS: == vs === — реальная ошибка, accept (confirm, если в auth/security).',
-        '- SQL: SELECT * — accept для мелкого; confirm для тяжёлого join на проде.',
-        '',
-        'Контекст ошибки:',
-        '- Правило: '   + (ruleName || issue.rule || ''),
-        '- Сообщение: ' + (issue.message || ''),
-        '- Файл: '      + (issue.component || '') + (issue.line ? ':' + issue.line : ''),
-        '- Язык: '      + lang.name,
-        '',
-        'Фрагмент кода (маркеры >>> и <<< показывают конкретное место):',
-        '```' + lang.codeFence,
-        code,
-        '```',
-        '',
-        'Требования к ответу (СТРОГО, без отклонений):',
-        'ВНИМАНИЕ: Слова "Статус:" и "Критичность:" должны встречаться в твоем ответе',
-        'ТОЛЬКО ОДИН РАЗ (в самом начале). НЕ ПОВТОРЯЙ структуру ответа!',
-        '1. Строка 1: "Статус: <accept|falsepositive|confirm|resolve|wontfix>"',
-        '2. Строка 2: "Критичность: <вердикт> — <обоснование в одном предложении>"',
-        '   Допустимые вердикты: подтверждаю, завышена, занижена, требует уточнения.',
-        '3. Строка 3 и далее: 1–3 предложения (БЕЗ префиксов "Статус:" или',
-        '   "Критичность:"), объясняющие суть проблемы и причину выбора.',
-        '4. Пиши по-русски, БЕЗ markdown (никаких **, __, ###, списков).',
-        '',
-        'Верни ТОЛЬКО этот текст. Ничего кроме него.'
-    );
-
-    return lines.join('\n');
-}
-
-async function buildBulkStatusCommentPrompt(issues, status, statusLabel, ctx) {
-    const count = issues.length;
-    let issuesList = '';
-
-    const fetchPromises = issues.map(async (it) => {
-        if (!it.snippet || !it.snippet.length) {
-            try {
-                const p = new URLSearchParams();
-                if (ctx.state.project) p.set('project', ctx.state.project);
-                p.set('issueKey', it.key);
-                const d = await ctx.api('/api/snippet?' + p);
-                it.snippet = d.snippet || [];
-            } catch (e) {
-                console.warn('Не удалось загрузить код для', it.key, e);
-            }
-        }
-        return it;
-    });
-
-    await Promise.all(fetchPromises);
-
-    for (let i = 0; i < issues.length; i++) {
-        const it = issues[i];
-        let snippetText = '';
-
-        if (it.snippet && it.snippet.length) {
-            const lang = detectLanguage(it.component);
-            const cleanCode = highlightForPrompt(it.snippet, it.line).trim();
-
-            snippetText =
-                `\nФайл: ${it.component}:${it.line}\n` +
-                `Правило: ${it.rule} — ${it.message}\n` +
-                '```' + lang.codeFence + '\n' + cleanCode + '\n```\n';
-        } else {
-            snippetText = `\nФайл: ${it.component}:${it.line}\nПравило: ${it.rule} — ${it.message}\n(Код недоступен)\n`;
-        }
-
-        issuesList += `${i + 1}. ${snippetText}`;
-    }
-
-    const prompt = [
-        'Ты — опытный разработчик, помогающий команде работать с SonarQube.',
-        `ЗАДАЧА: сгенерируй ОДИН КОРОТКИЙ комментарий (2–4 предложения) на русском языке,`,
-        `который будет прикреплён к ГРУППЕ ошибок SonarQube (всего ${count} шт.) при установке их статуса.`,
-        '',
-        'Устанавливаемый статус: ' + status + ' — ' + statusLabel,
-        '',
-        'В каждом фрагменте кода маркеры >>> и <<< показывают конкретное место,',
-        'на которое указал анализатор SonarQube — обращай особое внимание именно на него.',
-        '',
-        'Список ошибок и фрагменты кода:',
-        issuesList,
-        '',
-        'Требования к комментарию:',
-        'ВНИМАНИЕ: Слово "Критичность:" должно встречаться в твоем ответе ТОЛЬКО ОДИН РАЗ (в самом начале).',
-        '1. Строка 1: "Критичность: <вердикт> — <обоснование в одном предложении>".',
-        '   Допустимые вердикты: подтверждаю, завышена, занижена, требует уточнения.',
-        '2. Строка 2 и далее (БЕЗ префиксов): 2–4 предложения, описывающие общую суть проблем и план действий (например, "Массовый рефакторинг", "Добавление проверок" и т.п.).',
-        '3. Пиши по-русски, без воды и без markdown.',
-        '4. Комментарий должен быть согласован с выбранным статусом (' + status + ').',
-        '',
-        'Верни ТОЛЬКО текст комментария, без пояснений.'
-    ].join('\n');
-
-    if (prompt.length > MAX_PROMPT_LENGTH) {
-        throw new Error(`Слишком большой объем данных: промпт занимает ${prompt.length} символов (лимит ${MAX_PROMPT_LENGTH}). Пожалуйста, уменьшите количество выбранных ошибок.`);
-    }
-
-    return prompt;
-}
-
-function buildAutoResolvePromptAsync(issue, ctx) {
-    const snippet = issue.snippet || [];
-    const lang = detectLanguage(issue.component);
-    const cleanCode = highlightForPrompt(snippet, issue.line).trim();
-    const severity = issue.impactSeverity || issue.severity || '';
-
-    return [
-        'Ты — опытный разработчик и эксперт по статическому анализу кода (SonarQube).',
-        'Проект мультиязычный: PHP, JavaScript, TypeScript, Java, Kotlin, SQL, PL/SQL,',
-        'Python, Go, Ruby, C#, C++, C, Rust, Swift, Vue и другие языки.',
-        'НЕ делай предположений о языке — он указан ниже.',
-        '',
-        'ЗАДАЧА: Определи, есть ли в коде РЕАЛЬНЫЙ дефект, на который указало правило,',
-        'и выбери корректный статус. Ты не обязан находить false positive —',
-        'если проблема реальна, так и скажи.',
-        '',
-        'ОПРЕДЕЛЕНИЯ СТАТУСОВ (согласованы с UI SonarQube):',
-        '- falsepositive: SonarQube ОШИБСЯ в анализе. В коде НЕТ проблемы,',
-        '  на которую указало правило. Примеры: параметризованный SQL выдан за',
-        '  инъекцию; пустой catch с логированием через SLF4J; магическое число,',
-        '  являющееся публичной константой фреймворка.',
-        '- accept: РЕАЛЬНАЯ ошибка, которую исправят ПОЗЖЕ (техдолг, бэклог).',
-        '  ЭТО СТАТУС ПО УМОЛЧАНИЮ для любой реальной, но НЕ срочной ошибки.',
-        '- confirm: РЕАЛЬНАЯ и СРОЧНАЯ ошибка — security, потеря данных,',
-        '  падение, некорректный контракт API. Требует немедленного исправления.',
-        '- resolve: ошибка уже исправлена в коде (виден fix).',
-        '- wontfix: РЕАЛЬНАЯ ошибка, но решено НЕ исправлять (генерированный код,',
-        '  архитектурное решение).',
-        '',
-        'КРИТИЧЕСКИ ВАЖНО:',
-        '1. Сообщение правила само описывает конкретный дефект',
-        '   ("count() always >=0, update this test", "condition always true",',
-        '   "unused variable") — это РЕАЛЬНАЯ проблема. Ставь accept по умолчанию',
-        '   или confirm, если дефект срочный. НЕ falsepositive.',
-        '2. Сгенерированный код (OpenAPI Generator, protobuf, ORM) —',
-        '   wontfix, если править нельзя; accept, если можно; НЕ falsepositive.',
-        '3. Мёртвый код (count()<0, always-false/true, недостижимые ветки) —',
-        '   РЕАЛЬНАЯ ошибка. Ставь accept (по умолчанию) или wontfix.',
-        '   НЕ falsepositive.',
-        '4. "Проблема не имеет реального влияния" — это НЕ критерий falsepositive.',
-        '   Влияние на программу и корректность анализа — разные вещи.',
-        '5. Не путай accept и confirm:',
-        '   accept  = "ошибка реальна, исправим позже" (обычный техдолг);',
-        '   confirm = "ошибка реальна и КРИТИЧНА, исправляем прямо сейчас".',
-        '   Если сомневаешься между accept и confirm — выбирай accept.',
-        '',
-        'ПРАВИЛО ДЛЯ CONFIRM (ставь ТОЛЬКО если выполнено хотя бы одно):',
-        '- это security (SQL/command injection, XSS, утечка секретов, path traversal);',
-        '- это потеря/порча данных (запись мимо, неверный тип, race condition);',
-        '- это падение/500 (NPE, деление на ноль, необработанное исключение);',
-        '- это нарушение контракта API (неверный код ответа, неверный формат).',
-        'Во всех остальных случаях реальной ошибки → accept.',
-        '',
-        'АНАЛИЗ КРИТИЧНОСТИ:',
-        'SonarQube оценил как: **' + (severity || 'не указана') + '**',
-        '- HIGH/CRITICAL/BLOCKER + код реально безопасен → falsepositive.',
-        '- LOW/INFO + проблема реально опасна → confirm (если срочно) или accept.',
-        '- MEDIUM и любая другая — по сути:',
-        '    * реальная ошибка, исправим позже → accept;',
-        '    * реальная КРИТИЧНАЯ ошибка (security/data loss/crash) → confirm;',
-        '    * реальная, но не будем исправлять → wontfix;',
-        '    * правило ошиблось → falsepositive.',
-        '',
-        'ЯЗЫКОВЫЕ ОСОБЕННОСТИ (примеры корректной интерпретации):',
-        '- PHP: дублирование строк в OpenAPI — wontfix (генерированный код), НЕ falsepositive.',
-        '- PHP: count() < 0 — реальная ошибка (мёртвая проверка), accept.',
-        '- PHP: count() == 0 для массива — реальная ошибка, accept.',
-        '- Java: пустой catch без логирования — реальная ошибка, accept.',
-        '- Java: пустой catch с логированием SLF4J — falsepositive.',
-        '- JS/TS: == vs === — реальная ошибка, accept (или confirm, если сравнение в auth/security).',
-        '- SQL: SELECT * — accept для мелкого запроса; confirm, если в тяжёлом join на проде.',
-        '',
-        'Контекст ошибки:',
-        '- Правило: ' + (issue.rule || ''),
-        '- Сообщение: ' + (issue.message || ''),
-        '- Файл: ' + (issue.component || '') + ':' + (issue.line || ''),
-        '- Язык: ' + lang.name,
-        '',
-        'Фрагмент кода (маркеры >>> и <<< показывают конкретное место):',
-        '```' + lang.codeFence,
-        cleanCode,
-        '```',
-        '',
-        'Требования к ответу (СТРОГО, без отклонений):',
-        '1. Строка 1: "Статус: <accept|falsepositive|confirm|resolve|wontfix>"',
-        '2. Строка 2: "Критичность: <вердикт> — <обоснование в одном предложении>"',
-        '   Допустимые вердикты: подтверждаю, завышена, занижена, требует уточнения.',
-        '3. Строка 3 и далее: 1–3 предложения без префиксов, объясняющие суть',
-        '   проблемы и причину выбора статуса.',
-        '4. Пиши по-русски, БЕЗ markdown (никаких **, __, ###, списков).',
-        '5. Слова "Статус:" и "Критичность:" встречаются РОВНО ОДИН РАЗ.',
-        '',
-        'Верни ТОЛЬКО этот текст. Ничего кроме него.'
-    ].join('\n');
-}
-
-// Парсер ответа от Ollama для автоматического режима и модалки
-function parseOllamaResponse(text) {
-    let status = 'accept';
-    let comment = text.trim();
-
-    // Очистка от markdown-блоков, если модель их добавила
-    text = text.replace(/```[a-z]*\n/g, '').replace(/```/g, '');
-
-    const statusMatch = text.match(/Статус:\s*(accept|falsepositive|confirm|resolve|wontfix)/i);
-    if (statusMatch) {
-        status = statusMatch[1].toLowerCase();
-    }
-
-    const commentMatch = text.match(/Комментарий:\s*([\s\S]+)/i);
-    if (commentMatch) {
-        comment = commentMatch[1].trim();
-    } else {
-         // Если нет префикса "Комментарий:", берем всё после "Статус: ..."
-         const lines = text.split('\n');
-         let commentLines = [];
-         let foundStatus = false;
-         for(let line of lines) {
-             if (line.match(/Статус:/i)) {
-                 foundStatus = true;
-                 continue;
-             }
-             if (foundStatus) commentLines.push(line);
-         }
-         if (commentLines.length > 0) {
-             comment = commentLines.join('\n').trim();
-         }
-    }
-
-    // Убираем случайный префикс "Комментарий:", если он остался
-    comment = comment.replace(/^Комментарий:\s*/i, '');
-
-    return { status, comment };
-}
-
-async function copyToClipboard(text) {
-    if (navigator.clipboard && window.isSecureContext) {
-        try {
-            await navigator.clipboard.writeText(text);
-            return true;
-        } catch (e) { /* fallback ниже */ }
-    }
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    ta.setAttribute('readonly', '');
-    ta.style.position = 'fixed';
-    ta.style.top = '-1000px';
-    ta.style.left = '-1000px';
-    document.body.appendChild(ta);
-    ta.select();
-    let ok = false;
-    try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
-    document.body.removeChild(ta);
-    return ok;
-}
-
-function flashButton(btn, text, ms) {
-    if (!btn) return;
-    const original = btn.dataset.originalText || btn.textContent;
-    btn.dataset.originalText = original;
-    btn.textContent = text;
-    btn.disabled = true;
-    setTimeout(function () {
-        btn.textContent = original;
-        btn.disabled = false;
-    }, ms || 1500);
-}
-
-function bindStatusPromptButton(overlay, issue, ruleName, snippet, ctx) {
-    const btn = overlay.querySelector('#modal-btn-gen-prompt');
-    if (!btn) return;
-    btn.addEventListener('click', async function () {
-        const sel = overlay.querySelector('#modal-status');
-        if (!sel) return;
-        const status = sel.value;
-        const statusLabel = sel.selectedOptions[0]
-            ? sel.selectedOptions[0].textContent.trim()
-            : status;
-
-        const prompt = buildStatusCommentPrompt(issue, ruleName, snippet, status, statusLabel);
-        const ok = await copyToClipboard(prompt);
-
-        if (ok) {
-            flashButton(btn, 'Промпт скопирован!');
-            toast('Промпт для статуса "' + status + '" скопирован в буфер обмена');
-        } else {
-            const ta = overlay.querySelector('#modal-comment');
-            if (ta && !ta.value) {
-                ta.value = prompt;
-                ta.focus();
-                ta.select();
-            }
-            flashButton(btn, 'Не удалось скопировать', 2000);
-            toast('Промпт вставлен в поле комментария (статус "' + status + '")', true);
-        }
-    });
-}
-
 // ==================== КОНТЕКСТНОЕ МЕНЮ ====================
 
 function showIssueContextMenu(x, y, clickedIssue, targetIssues, filteredData, ctx, reloadCb, onSelectAll, onDeselectAll) {
@@ -659,6 +287,7 @@ function showIssueContextMenu(x, y, clickedIssue, targetIssues, filteredData, ct
     menu.innerHTML = `
         <div class="ctx-item" id="ctx-ai-prompt">📝 Сгенерировать промпт</div>
         <div class="ctx-item" id="ctx-details">Посмотреть детали</div>
+        <div class="ctx-item" id="ctx-edit-tags">🏷️ Редактировать теги</div> <!-- НОВОЕ -->
         <div class="ctx-item" style="border-top:1px solid var(--border); margin-top:4px; padding-top:8px;" id="ctx-select-all">Выделить все</div>
         <div class="ctx-item" id="ctx-deselect-all">Снять выделение</div>
         ${hasUnmarked ? `<div class="ctx-item" style="border-top:1px solid var(--border); margin-top:4px; padding-top:8px;" id="ctx-comment">Добавить комментарий (${targetIssues.filter(it => it.status === 'OPEN' || it.status === 'REOPENED').length})</div>` : ''}
@@ -677,6 +306,11 @@ function showIssueContextMenu(x, y, clickedIssue, targetIssues, filteredData, ct
 
     menu.querySelector('#ctx-details').addEventListener('click', () => {
         openIssueModal(clickedIssue, ctx, reloadCb);
+    });
+
+    // НОВОЕ: Обработчик тегов
+    menu.querySelector('#ctx-edit-tags').addEventListener('click', () => {
+        showTagEditor(targetIssues, ctx, reloadCb);
     });
 
     menu.querySelector('#ctx-select-all').addEventListener('click', onSelectAll);
@@ -806,6 +440,10 @@ async function openIssueModal(issue, ctx, reloadCb) {
                     <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
                         <button id="modal-btn-gen-prompt" type="button" class="btn" title="Сформировать промпт для LLM: сгенерировать короткий комментарий к выбранному статусу ошибки в SonarQube">Сгенерировать промпт</button>
                         <button id="modal-btn-ai-resolve" type="button" class="btn" title="Отправить промпт в Ollama и вставить ответ в поле «Комментарий»">Получить резолюцию ИИ</button>
+
+                        <!-- НОВАЯ КНОПКА: ТЕГИ -->
+                        <button id="modal-btn-tags" type="button" class="btn">🏷️ Изменить теги</button>
+
                         ${canReopen ? `<button id="modal-btn-reopen" class="btn btn-danger">Отменить комментарий (Reopen)</button>` : ''}
                     </div>
                     <div style="display:flex; gap:8px; align-items:center;">
@@ -844,6 +482,14 @@ async function openIssueModal(issue, ctx, reloadCb) {
             }
         });
         bindOllamaSettingsButton(overlay, ctx);
+
+        // НОВОЕ: Обработчик кнопки тегов в модалке
+        overlay.querySelector('#modal-btn-tags').addEventListener('click', () => {
+            showTagEditor([it], ctx, () => {
+                close();
+                reloadCb();
+            });
+        });
 
         overlay.querySelector('#modal-btn-apply').addEventListener('click', async () => {
             const status = overlay.querySelector('#modal-status').value;
@@ -922,6 +568,10 @@ function openBulkModal(issues, ctx, reloadCb) {
                     <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
                         <button id="bulk-btn-gen-prompt" type="button" class="btn" title="Сформировать промпт для LLM для всей группы ошибок">Сгенерировать промпт</button>
                         <button id="bulk-btn-ai-resolve" type="button" class="btn" title="Отправить промпт в Ollama и вставить ответ в поле «Комментарий»">Получить резолюцию ИИ</button>
+
+                        <!-- НОВАЯ КНОПКА: ТЕГИ -->
+                        <button id="bulk-btn-tags" type="button" class="btn">🏷️ Изменить теги</button>
+
                     </div>
                     <div style="display:flex; gap:8px; align-items:center;">
                         <button id="bulk-cancel" class="btn">Отмена</button>
@@ -938,6 +588,14 @@ function openBulkModal(issues, ctx, reloadCb) {
     overlay.querySelector('.modal-close').addEventListener('click', close);
     overlay.querySelector('#bulk-cancel').addEventListener('click', close);
     overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+
+    // НОВОЕ: Обработчик кнопки тегов в массовой модалке
+    overlay.querySelector('#bulk-btn-tags').addEventListener('click', () => {
+        showTagEditor(issues, ctx, () => {
+            close();
+            reloadCb();
+        });
+    });
 
     overlay.querySelector('#bulk-btn-gen-prompt').addEventListener('click', async () => {
         const status = overlay.querySelector('#bulk-status').value;
@@ -1012,7 +670,6 @@ function openBulkModal(issues, ctx, reloadCb) {
     });
 }
 
-// ==================== АВТОМАТИЧЕСКАЯ ОБРАБОТКА (AUTO MODAL) ====================
 function openAutoBulkModal(issues, ctx, reloadCb) {
     if (!issues.length) { toast('Нет доступных issues для изменения', true); return; }
     const overlay = document.createElement('div');
@@ -1039,7 +696,6 @@ function openAutoBulkModal(issues, ctx, reloadCb) {
                         Текущая ошибка: <b id="auto-current-key">-</b> (Файл: <span id="auto-current-file">-</span>)
                     </div>
 
-                    <!-- НОВОЕ: Блок для вывода текста ошибки (message) -->
                     <div id="auto-current-msg" style="margin-bottom: 12px; font-size: 14px; font-weight: 500; line-height: 1.4; color: var(--text);">
                         -
                     </div>
@@ -1065,6 +721,10 @@ function openAutoBulkModal(issues, ctx, reloadCb) {
                         <button id="auto-btn-apply" class="btn" disabled>✅ Подтвердить и далее</button>
                         <button id="auto-btn-skip" class="btn" disabled>⏭️ Пропустить</button>
                         <button id="auto-btn-stop" class="btn btn-danger" style="display:none;">⏹️ Остановить</button>
+
+                        <!-- НОВАЯ КНОПКА: ТЕГИ -->
+                        <button id="auto-btn-tags" type="button" class="btn">🏷️ Изменить теги</button>
+
                         <button id="auto-btn-ollama-settings" type="button" class="btn" title="Настройки Ollama">⚙ Ollama</button>
                     </div>
                 </div>
@@ -1084,13 +744,14 @@ function openAutoBulkModal(issues, ctx, reloadCb) {
         chkSemi: overlay.querySelector('#auto-chk-semi'),
         currentKey: overlay.querySelector('#auto-current-key'),
         currentFile: overlay.querySelector('#auto-current-file'),
-        currentMsg: overlay.querySelector('#auto-current-msg'), // НОВОЕ
+        currentMsg: overlay.querySelector('#auto-current-msg'),
         statusSel: overlay.querySelector('#auto-status'),
         commentTa: overlay.querySelector('#auto-comment'),
         btnStart: overlay.querySelector('#auto-btn-start'),
         btnApply: overlay.querySelector('#auto-btn-apply'),
         btnSkip: overlay.querySelector('#auto-btn-skip'),
         btnStop: overlay.querySelector('#auto-btn-stop'),
+        btnTags: overlay.querySelector('#auto-btn-tags'), // <-- НОВОЕ
         log: overlay.querySelector('#auto-log')
     };
 
@@ -1111,6 +772,15 @@ function openAutoBulkModal(issues, ctx, reloadCb) {
     overlay.querySelector('.modal-close').addEventListener('click', close);
     overlay.querySelector('#auto-btn-cancel').addEventListener('click', close);
 
+    // НОВОЕ: Обработчик кнопки тегов для текущего issue
+    ui.btnTags.addEventListener('click', () => {
+        if (currentIndex >= issues.length) return;
+        const it = issues[currentIndex];
+        showTagEditor([it], ctx, () => {
+            // Ничего не делаем, чтобы не сбрасывать прогресс
+        });
+    });
+
     function updateUI() {
         if (currentIndex >= issues.length) {
             ui.header.textContent = `Обработка завершена (${issues.length} / ${issues.length})`;
@@ -1126,7 +796,7 @@ function openAutoBulkModal(issues, ctx, reloadCb) {
         const it = issues[currentIndex];
         ui.currentKey.textContent = it.key;
         ui.currentFile.textContent = it.component;
-        ui.currentMsg.textContent = it.message || 'Нет описания ошибки'; // НОВОЕ: Выводим message
+        ui.currentMsg.textContent = it.message || 'Нет описания ошибки';
 
         if (isProcessing) {
             ui.btnStart.style.display = 'none';
@@ -1170,7 +840,6 @@ function openAutoBulkModal(issues, ctx, reloadCb) {
             const settings = OllamaClient.getSettings();
             if (!settings.url || !settings.model) throw new Error("Ollama не настроена. Нажмите ⚙ Ollama.");
 
-            // НОВОЕ: Вывод сформированного промпта в консоль ПЕРЕД отправкой
             console.log("=== OLLAMA REQUEST PROMPT (AUTO) ===");
             console.log(prompt);
             console.log("====================================");
@@ -1183,12 +852,10 @@ function openAutoBulkModal(issues, ctx, reloadCb) {
             let fullResponse = '';
 
             for await (const chunk of client.streamChat({ prompt, signal: abortController.signal })) {
-                // ИСПРАВЛЕНИЕ: Убрано console.log(chunk), чтобы не спамить в консоль
                 fullResponse += chunk;
                 ui.commentTa.value = fullResponse;
             }
 
-            // Вывод ТОЛЬКО итогового ответа
             console.log("=== OLLAMA FINAL RESPONSE (AUTO) ===");
             console.log(fullResponse);
             console.log("====================================");

@@ -1,16 +1,7 @@
 package ru.miacomsoft.sonar;
 
-import java.util.ArrayList;
-import java.util.HashSet;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 
-/**
- * Массовые изменения issues через /api/issues/bulk_change
- * и одиночные переходы через /api/issues/do_transition.
- */
 public class SonarBulkApi {
 
     public static final int DEFAULT_BATCH_SIZE = 500;
@@ -37,7 +28,6 @@ public class SonarBulkApi {
         return (totalIssues + batchSize - 1) / batchSize;
     }
 
-    /** Только показывает, что было бы сделано. */
     public Map<String, Object> dryRun(List<Issue> issues, String transition, String comment) {
         Map<String, Object> r = new LinkedHashMap<>();
         r.put("issues", issues.size());
@@ -48,7 +38,6 @@ public class SonarBulkApi {
         return r;
     }
 
-    /** Применяет переход ко всем issues батчами. Возвращает ответы сервера. */
     public List<String> change(List<Issue> issues, String transition, String comment) throws Exception {
         List<String> results = new ArrayList<>();
         for (int i = 0; i < issues.size(); i += batchSize) {
@@ -79,7 +68,6 @@ public class SonarBulkApi {
         return results;
     }
 
-    /** POST /api/issues/do_transition — одиночный переход. */
     public void doTransition(String issueKey, String transition) throws Exception {
         Map<String, String> form = new LinkedHashMap<>();
         form.put("issue", issueKey);
@@ -87,7 +75,6 @@ public class SonarBulkApi {
         client.postForm("/api/issues/do_transition", form);
     }
 
-    /** POST /api/issues/add_comment — добавить комментарий. */
     public void addComment(String issueKey, String text) throws Exception {
         Map<String, String> form = new LinkedHashMap<>();
         form.put("issue", issueKey);
@@ -95,13 +82,18 @@ public class SonarBulkApi {
         client.postForm("/api/issues/add_comment", form);
     }
 
-    /**
-     * Per-issue reopen через do_transition.
-     * Возвращает ключи, для которых reopen упал.
-     *
-     * Используется для «снятия пометки». Через bulk_change reopen
-     * работает не на всех версиях SonarQube, поэтому по одному.
-     */
+    // НОВОЕ: Массовое обновление тегов
+    public void setTags(List<Issue> issues, String tagsCsv) throws Exception {
+        if (issues.isEmpty()) return;
+        List<String> keys = new ArrayList<>();
+        for (Issue it : issues) keys.add(it.key);
+
+        Map<String, String> form = new LinkedHashMap<>();
+        form.put("issues", String.join(",", keys));
+        form.put("tags", tagsCsv);
+        client.postForm("/api/issues/set_tags", form);
+    }
+
     public Set<String> reopenIssues(List<Issue> issues) throws Exception {
         Set<String> failed = new HashSet<>();
         int total = issues.size();

@@ -1,15 +1,10 @@
-import { esc, toast, highlightCode, statusBadge } from '../common.js';
+import { esc, toast, highlightCode, statusBadge, showTagEditor } from '../common.js';
 
 function getReopenTransition(status) {
     if (status === 'CONFIRMED') return 'unconfirm';
     return 'reopen';
 }
 
-/**
- * Расшифровка статуса для обработанных issues.
- * Для ACCEPTED SonarQube отдаёт status="RESOLVED" + resolution="WONTFIX"/"FALSE_POSITIVE"/"FIXED".
- * Рендерим бейдж по resolution — это точнее отражает суть.
- */
 function acceptedBadge(it) {
     const res = (it.resolution || '').toUpperCase();
     if (res === 'WONTFIX') {
@@ -74,6 +69,7 @@ export const accepted = {
             const listEl      = el.querySelector('#acc-list');
             const filterInput = el.querySelector('#acc-filter');
             const bulkBtn     = el.querySelector('#acc-bulk-reopen');
+            const masterCb    = el.querySelector('#acc-master-checkbox');
 
             const applyFilters = () => {
                 const q = filterText.toLowerCase();
@@ -103,7 +99,9 @@ export const accepted = {
                             <table>
                                 <thead>
                                     <tr>
-                                        <th style="width:30px; padding-left:16px;"></th>
+                                        <th style="width:30px; padding-left:16px;">
+                                            <input type="checkbox" id="acc-master-checkbox" title="Выделить всё" style="cursor:pointer;">
+                                        </th>
                                         <th>key</th>
                                         <th>sev</th>
                                         <th>component:line</th>
@@ -132,6 +130,31 @@ export const accepted = {
                     </div>
                 `;
 
+                // Восстанавливаем состояние Master Checkbox после рендера
+                const currentMasterCb = listEl.querySelector('#acc-master-checkbox');
+                const allFilteredKeys = filtered.map(it => it.key);
+                if (allFilteredKeys.length > 0 && allFilteredKeys.every(k => selectedKeys.has(k))) {
+                    currentMasterCb.checked = true;
+                    currentMasterCb.indeterminate = false;
+                } else if (allFilteredKeys.some(k => selectedKeys.has(k))) {
+                    currentMasterCb.checked = false;
+                    currentMasterCb.indeterminate = true;
+                } else {
+                    currentMasterCb.checked = false;
+                    currentMasterCb.indeterminate = false;
+                }
+
+                currentMasterCb.addEventListener('change', e => {
+                    const isChecked = e.target.checked;
+                    if (isChecked) {
+                        filtered.forEach(it => selectedKeys.add(it.key));
+                    } else {
+                        filtered.forEach(it => selectedKeys.delete(it.key));
+                    }
+                    renderList();
+                    updateBulkBtn();
+                });
+
                 listEl.querySelectorAll('.acc-issue-checkbox').forEach(cb => {
                     cb.addEventListener('change', e => {
                         if (e.target.checked) selectedKeys.add(e.target.dataset.key);
@@ -146,6 +169,23 @@ export const accepted = {
                         const it = filtered.find(x => x.key === row.dataset.key);
                         if (it) openAcceptedModal(it, ctx, () => accepted.mount(el, ctx));
                     });
+
+                    row.addEventListener('contextmenu', e => {
+                        e.preventDefault();
+                        const key = row.dataset.key;
+                        const issue = filtered.find(x => x.key === key);
+
+                        let targetIssues = [];
+                        if (selectedKeys.size > 0) {
+                            targetIssues = issues.filter(it => selectedKeys.has(it.key));
+                        } else {
+                            targetIssues = [issue];
+                        }
+
+                        showContextMenu(e.pageX, e.pageY, issue, targetIssues, ctx, () => {
+                            accepted.mount(el, ctx);
+                        });
+                    });
                 });
 
                 updateBulkBtn();
@@ -156,15 +196,12 @@ export const accepted = {
                 bulkBtn.textContent = `Reopen выбранные (${selectedKeys.size})`;
             };
 
-            // ===== фильтры-чипы =====
-
             el.querySelectorAll('.facet-chip').forEach(chip => {
                 chip.addEventListener('click', () => {
                     const kind = chip.dataset.kind;
                     const val = chip.dataset.val;
                     const isActive = chip.classList.contains('active');
 
-                    // снять выделение со всех чипов этого типа
                     el.querySelectorAll(`.facet-chip[data-kind="${kind}"]`).forEach(c => c.classList.remove('active'));
 
                     if (isActive) {
@@ -231,7 +268,82 @@ function renderFacetChips(kind, values) {
     `).join('');
 }
 
-// ==================== MODAL ====================
+// ==================== КОНТЕКСТНОЕ МЕНЮ ====================
+
+function showContextMenu(x, y, clickedIssue, targetIssues, ctx, reloadCb) {
+    document.querySelector('.ctx-menu')?.remove();
+
+    const menu = document.createElement('div');
+    menu.className = 'ctx-menu';
+    menu.style.left = x + 'px';
+    menu.style.top = y + 'px';
+
+    menu.innerHTML = `
+        <div class="ctx-item" id="ctx-add-comment">📝 Добавить комментарий</div>
+        <div class="ctx-item" id="ctx-edit-tags">🏷️ Редактировать теги</div>
+        <div class="ctx-item" id="ctx-reopen">🔄 Снять пометку (Reopen)</div>
+        <div class="ctx-item" id="ctx-reopened">🔓 Переоткрытое замечание</div>
+    `;
+
+    document.body.appendChild(menu);
+
+    const closeMenu = () => menu.remove();
+    document.addEventListener('click', closeMenu, { once: true });
+
+    menu.querySelector('#ctx-add-comment').addEventListener('click', () => {
+        openBulkModal(targetIssues, ctx, reloadCb);
+    });
+
+    menu.querySelector('#ctx-edit-tags').addEventListener('click', () => {
+        showTagEditor(targetIssues, ctx, reloadCb);
+    });
+
+    menu.querySelector('#ctx-reopen').addEventListener('click', async () => {
+        if (!confirm(`Снять пометку (reopen) у ${targetIssues.length} issues?`)) return;
+        let success = 0;
+        for (const it of targetIssues) {
+            try {
+                const p = new URLSearchParams(ctx.qs());
+                p.set('key', it.key);
+                p.set('transition', getReopenTransition(it.status));
+                p.set('dryRun', 'false');
+                const res = await ctx.api('/api/mark?' + p, { method: 'POST' });
+                if (res.success === false) throw new Error(res.error || 'Не удалось сбросить');
+                success++;
+            } catch (e) {
+                console.error(e);
+                toast('Ошибка для ' + it.key + ': ' + e.message, true);
+            }
+        }
+        toast(`Отменено ${success} из ${targetIssues.length}`);
+        ctx.refreshStatus?.();
+        reloadCb();
+    });
+
+    menu.querySelector('#ctx-reopened').addEventListener('click', async () => {
+        if (!confirm(`Установить статус "Переоткрытое замечание" у ${targetIssues.length} issues?`)) return;
+        let success = 0;
+        for (const it of targetIssues) {
+            try {
+                const p = new URLSearchParams(ctx.qs());
+                p.set('key', it.key);
+                p.set('transition', 'reopen'); // Открывает заново
+                p.set('dryRun', 'false');
+                const res = await ctx.api('/api/mark?' + p, { method: 'POST' });
+                if (res.success === false) throw new Error(res.error || 'Не удалось открыть');
+                success++;
+            } catch (e) {
+                console.error(e);
+                toast('Ошибка для ' + it.key + ': ' + e.message, true);
+            }
+        }
+        toast(`Открыто ${success} из ${targetIssues.length}`);
+        ctx.refreshStatus?.();
+        reloadCb();
+    });
+}
+
+// ==================== МОДАЛЬНОЕ ОКНО ====================
 
 async function openAcceptedModal(issue, ctx, onDone) {
     const overlay = document.createElement('div');
@@ -257,8 +369,45 @@ async function openAcceptedModal(issue, ctx, onDone) {
         const p = new URLSearchParams();
         if (ctx.state.project) p.set('project', ctx.state.project);
         p.set('issueKey', issue.key);
-        const d = await ctx.api('/api/snippet?' + p);
+
+        const [d, ch] = await Promise.all([
+            ctx.api('/api/snippet?' + p),
+            ctx.api('/api/changelog?' + p).catch(() => ({ changelog: [] }))
+        ]);
+
         const it = d.issue || issue;
+        const changelog = ch.changelog || [];
+        const comments = it.comments || [];
+
+        const commentsHtml = comments.length > 0 ? `
+            <div style="margin-top:16px;">
+                <label style="display:block; font-size:12px; margin-bottom:4px; color:var(--text-dim);">Комментарии:</label>
+                <div style="background:var(--bg3); border:1px solid var(--border); border-radius:6px; padding:12px; max-height:150px; overflow-y:auto; font-size:12px;">
+                    ${comments.map(c => `
+                        <div style="margin-bottom:8px; padding-bottom:8px; border-bottom:1px solid var(--border);">
+                            <div style="color:var(--accent); font-weight:bold; margin-bottom:4px;">${esc(c.login || 'Пользователь')} (${new Date(c.createdAt).toLocaleString()}):</div>
+                            <div style="white-space:pre-wrap;">${esc(c.markdown || c.htmlText || '')}</div>
+                        </div>
+                    `).join('')}
+                </div>
+            </div>
+        ` : '';
+
+        const changelogHtml = changelog.length > 0 ? `
+            <div style="margin-top:16px;">
+                <label style="display:block; font-size:12px; margin-bottom:4px; color:var(--text-dim);">История изменений:</label>
+                <div style="background:var(--bg3); border:1px solid var(--border); border-radius:6px; padding:12px; max-height:150px; overflow-y:auto; font-size:12px;">
+                    ${changelog.map(c => `
+                        <div style="margin-bottom:8px; padding-bottom:8px; border-bottom:1px solid var(--border);">
+                            <div style="color:var(--accent); font-weight:bold; margin-bottom:4px;">${esc(c.userName || c.user)} (${new Date(c.creationDate).toLocaleString()}):</div>
+                            <div>
+                                ${c.diffs.map(diff => `<div><span style="color:var(--text-dim)">${esc(diff.key)}:</span> ${esc(diff.oldValue || '—')} &rarr; <b>${esc(diff.newValue)}</b></div>`).join('')}
+                            </div>
+                        </div>
+                    `).join('')}
+                </div>
+            </div>
+        ` : '';
 
         const body = overlay.querySelector('#acc-modal-body');
         body.innerHTML = `
@@ -275,16 +424,27 @@ async function openAcceptedModal(issue, ctx, onDone) {
             </div>
 
             ${(d.snippet && d.snippet.length)
-                ? `<pre class="code" style="max-height:400px; overflow:auto;">${highlightCode(d.snippet.join('\n'))}</pre>`
+                ? `<pre class="code" style="max-height:300px; overflow:auto;">${highlightCode(d.snippet.join('\n'))}</pre>`
                 : `<div class="empty">Код недоступен</div>`}
 
+            ${changelogHtml}
+            ${commentsHtml}
+
             <div style="margin-top:20px; padding-top:16px; border-top:1px solid var(--border); display:flex; justify-content:flex-end; gap:8px;">
+                <button id="acc-modal-tags" class="btn" style="margin-right:auto;">🏷️ Изменить теги</button>
                 <button id="acc-modal-reopen" class="btn btn-danger">Снять пометку (Reopen)</button>
                 <button id="acc-modal-close" class="btn">Закрыть</button>
             </div>
         `;
 
         overlay.querySelector('#acc-modal-close').addEventListener('click', close);
+        overlay.querySelector('#acc-modal-tags').addEventListener('click', () => {
+            showTagEditor([it], ctx, () => {
+                close();
+                if (onDone) onDone();
+            });
+        });
+
         overlay.querySelector('#acc-modal-reopen').addEventListener('click', async () => {
             if (!confirm('Снять пометку с этого issue?')) return;
             try {
@@ -306,4 +466,82 @@ async function openAcceptedModal(issue, ctx, onDone) {
         overlay.querySelector('#acc-modal-body').innerHTML =
             `<div class="sev-HIGH">${esc(e.message)}</div>`;
     }
+}
+
+// Модалка для добавления комментария (массового)
+function openBulkModal(issues, ctx, reloadCb) {
+    if (!issues.length) { toast('Нет доступных issues для изменения', true); return; }
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.innerHTML = `
+        <div class="modal-content" style="max-width: 600px;">
+            <div class="modal-header">
+                <h3 style="margin:0;">Массовое действие</h3>
+                <button class="modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p>Выбрано ошибок: <b>${issues.length}</b></p>
+                <div style="margin-bottom:12px;">
+                    <label style="display:block; font-size:12px; margin-bottom:4px;">Статус перехода</label>
+                    <select id="bulk-status" style="width:100%; padding:8px; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:6px;">
+                        <option value="accept">Принять (Это ошибка, но исправлена будет позднее)</option>
+                        <option value="falsepositive">Ложно (Анализ содержит ошибки)</option>
+                        <option value="confirm">Подтвердить</option>
+                        <option value="resolve">Исправлено</option>
+                        <option value="wontfix">Не исправлять</option>
+                    </select>
+                </div>
+                <div style="margin-bottom:16px;">
+                    <label style="display:block; font-size:12px; margin-bottom:4px;">Комментарий</label>
+                    <textarea id="bulk-comment" rows="4" style="width:100%; padding:8px; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:6px; resize:vertical;" placeholder="Введите многострочный комментарий..."></textarea>
+                </div>
+                <div style="margin-top:16px; display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;">
+                    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                        <button id="bulk-btn-gen-prompt" type="button" class="btn" title="Сформировать промпт">Сгенерировать промпт</button>
+                    </div>
+                    <div style="display:flex; gap:8px; align-items:center;">
+                        <button id="bulk-cancel" class="btn">Отмена</button>
+                        <button id="bulk-apply" class="btn btn-accent">Применить</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(overlay);
+
+    const close = () => overlay.remove();
+    overlay.querySelector('.modal-close').addEventListener('click', close);
+    overlay.querySelector('#bulk-cancel').addEventListener('click', close);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+
+    overlay.querySelector('#bulk-apply').addEventListener('click', async () => {
+        const status = overlay.querySelector('#bulk-status').value;
+        const comment = overlay.querySelector('#bulk-comment').value;
+
+        const btn = overlay.querySelector('#bulk-apply');
+        btn.disabled = true;
+        btn.textContent = 'Применение...';
+
+        let success = 0;
+        for (const it of issues) {
+            try {
+                const p = new URLSearchParams(ctx.qs());
+                p.set('key', it.key);
+                p.set('transition', status);
+                p.set('comment', comment);
+                p.set('dryRun', 'false');
+                const res = await ctx.api('/api/mark?' + p, { method: 'POST' });
+                if (res.success === false) throw new Error(res.error || 'Ошибка');
+                success++;
+            } catch (e) {
+                console.error('Failed for ' + it.key, e);
+            }
+            btn.textContent = `Применение ${success}/${issues.length}...`;
+        }
+
+        ctx.toast(`Применено к ${success} из ${issues.length}`);
+        close();
+        ctx.refreshStatus?.();
+        reloadCb();
+    });
 }

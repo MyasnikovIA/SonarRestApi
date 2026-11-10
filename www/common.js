@@ -6,7 +6,6 @@ export function esc(s) {
     }[c]));
 }
 
-// Функция для подсветки кода
 export function highlightCode(codeStr) {
     let safe = esc(codeStr);
     return safe.replace(/§HL_START§/g, '<mark class="sonar-issue-mark">')
@@ -48,16 +47,6 @@ export async function apiText(path, body, method = 'POST') {
     return data;
 }
 
-// ==================== STATUS BADGE (расшифровка 💬) ====================
-/**
- * Возвращает HTML-бейдж для статуса issue.
- * Для OPEN / REOPENED / пустого — возвращает пустую строку.
- *
- * Примеры:
- *   statusBadge('ACCEPTED')       → <span class="status-tag" data-status="ACCEPTED">✓ принято</span>
- *   statusBadge('CONFIRMED')      → <span class="status-tag" data-status="CONFIRMED">❗ подтверждено</span>
- *   statusBadge('FALSE_POSITIVE') → <span class="status-tag" data-status="FALSE_POSITIVE">✕ ложно</span>
- */
 export function statusBadge(status) {
     if (!status) return '';
     const s = String(status).toUpperCase();
@@ -77,9 +66,90 @@ export function statusBadge(status) {
     return `<span class="status-tag" data-status="${esc(s)}" title="Статус: ${esc(s)}">${m.icon} ${m.text}</span>`;
 }
 
+// ==================== TAGS EDITOR ====================
+
+/**
+ * Открывает модальное окно для редактирования тегов группы issues.
+ * @param {Array} issues - список issue (должен содержать .key и .tags)
+ * @param {Object} ctx - контекст приложения
+ * @param {Function} onDone - коллбэк после успешного сохранения
+ */
+export async function showTagEditor(issues, ctx, onDone) {
+    if (!issues.length) return;
+
+    const keys = issues.map(it => it.key);
+    let currentTags = issues[0].tags || [];
+
+    let availableTags = [];
+    try {
+        const d = await ctx.api('/api/tags');
+        availableTags = d.tags || [];
+    } catch (e) {
+        console.warn('Не удалось загрузить доступные теги', e);
+    }
+
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.innerHTML = `
+        <div class="modal-content" style="max-width: 500px;">
+            <div class="modal-header">
+                <h3 style="margin:0;">Редактирование тегов</h3>
+                <button class="modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p style="margin-top:0; color:var(--text-dim);">Выбрано ошибок: <b>${issues.length}</b></p>
+
+                <div style="margin-bottom:12px;">
+                    <label style="display:block; font-size:12px; margin-bottom:4px;">Текущие теги (через запятую)</label>
+                    <input type="text" id="tags-input" list="available-tags"
+                           value="${esc(currentTags.join(', '))}"
+                           style="width:100%; padding:8px; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:6px;">
+                    <datalist id="available-tags">
+                        ${availableTags.map(t => `<option value="${esc(t)}">`).join('')}
+                    </datalist>
+                </div>
+
+                <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:20px;">
+                    <button id="tags-cancel" class="btn">Отмена</button>
+                    <button id="tags-save" class="btn btn-accent">Сохранить</button>
+                </div>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(overlay);
+
+    const close = () => overlay.remove();
+    overlay.querySelector('.modal-close').addEventListener('click', close);
+    overlay.querySelector('#tags-cancel').addEventListener('click', close);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+
+    overlay.querySelector('#tags-save').addEventListener('click', async () => {
+        const input = overlay.querySelector('#tags-input');
+        const tagsStr = input.value.trim();
+
+        const btn = overlay.querySelector('#tags-save');
+        btn.disabled = true;
+        btn.textContent = 'Сохранение...';
+
+        try {
+            const p = new URLSearchParams();
+            p.set('keys', keys.join(','));
+            p.set('tags', tagsStr);
+
+            await ctx.api('/api/set_tags?' + p, { method: 'POST' });
+            toast('Теги успешно сохранены');
+            close();
+            if (onDone) onDone();
+        } catch (e) {
+            toast('Ошибка сохранения тегов: ' + e.message, true);
+            btn.disabled = false;
+            btn.textContent = 'Сохранить';
+        }
+    });
+}
+
 // ==================== AI PROMPT ====================
 
-// Универсальная функция копирования (работает даже на HTTP)
 export function copyToClipboard(text) {
     if (navigator.clipboard && window.isSecureContext) {
         navigator.clipboard.writeText(text).catch(() => fallbackCopy(text));

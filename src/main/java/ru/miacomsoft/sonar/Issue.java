@@ -26,6 +26,14 @@ public class Issue {
         public int endOffset;
     }
 
+    public static class Comment {
+        public String key;
+        public String login;
+        public String htmlText;
+        public String markdown;
+        public String createdAt;
+    }
+
     public String key;
     public String rule;
     public String ruleName;
@@ -34,9 +42,9 @@ public class Issue {
     public String component;
     public int line;
     public String message;
-    public String status;           // OPEN / RESOLVED / CLOSED / REOPENED / CONFIRMED
-    public String resolution;       // FIXED / FALSE_POSITIVE / WONTFIX / ...
-    public String issueStatus;      // ACCEPTED / CONFIRMED / OPEN / ...
+    public String status;
+    public String resolution;
+    public String issueStatus;
     public String effort;
     public String type;
     public String author;
@@ -46,6 +54,7 @@ public class Issue {
     public List<String> tags = new ArrayList<>();
     public List<String> transitions = new ArrayList<>();
     public List<Impact> impacts = new ArrayList<>();
+    public List<Comment> comments = new ArrayList<>(); // НОВОЕ
     public TextRange textRange;
 
     public static Issue from(JSONObject o, String projectKey) {
@@ -89,6 +98,21 @@ public class Issue {
         }
         if (!i.impacts.isEmpty()) {
             i.impactSeverity = i.impacts.get(0).severity;
+        }
+
+        // Парсинг комментариев
+        JSONArray commentsArr = o.optJSONArray("comments");
+        if (commentsArr != null) {
+            for (int c = 0; c < commentsArr.length(); c++) {
+                JSONObject co = commentsArr.getJSONObject(c);
+                Comment cm = new Comment();
+                cm.key = co.optString("key");
+                cm.login = co.optString("login");
+                cm.htmlText = co.optString("htmlText");
+                cm.markdown = co.optString("markdown");
+                cm.createdAt = co.optString("createdAt");
+                i.comments.add(cm);
+            }
         }
 
         JSONArray flows = o.optJSONArray("flows");
@@ -146,6 +170,19 @@ public class Issue {
         o.put("flowsCount", flowsCount);
         o.put("tags", new JSONArray(tags));
         o.put("transitions", new JSONArray(transitions));
+
+        // Сериализация комментариев
+        JSONArray commentsArr = new JSONArray();
+        for (Comment cm : comments) {
+            JSONObject co = new JSONObject();
+            co.put("key", cm.key);
+            co.put("login", cm.login);
+            co.put("htmlText", cm.htmlText);
+            co.put("markdown", cm.markdown);
+            co.put("createdAt", cm.createdAt);
+            commentsArr.put(co);
+        }
+        o.put("comments", commentsArr);
 
         JSONArray impactsArr = new JSONArray();
         for (Impact im : impacts) {

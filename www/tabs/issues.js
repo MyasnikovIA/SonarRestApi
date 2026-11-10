@@ -1,6 +1,6 @@
 import {
     esc, toast, highlightCode, fetchAndShowPrompt,
-    detectLanguage, cleanSnippet, highlightForPrompt
+    detectLanguage, cleanSnippet, highlightForPrompt, statusBadge
 } from '../common.js';
 import {
     bindOllamaResolveButton, bindOllamaSettingsButton,
@@ -119,7 +119,7 @@ export const issues = {
                                             <td class="sev-${esc(it.impactSeverity || it.severity || '')}">${esc(it.impactSeverity || it.severity)}</td>
                                             <td>${esc(it.component)}:${it.line}</td>
                                             <td>${esc(it.rule)}</td>
-                                            <td>${isMarked ? `<span title="Статус: ${esc(it.status)}" style="color:var(--ok); font-weight:bold;">💬</span> ` : ''}${esc(it.message)}</td>
+                                            <td>${statusBadge(it.status)}${esc(it.message)}</td>
                                         </tr>
                                     `}).join('')}
                                 </tbody>

@@ -1,6 +1,6 @@
 import {
     esc, toast, highlightCode, fetchAndShowPrompt,
-    detectLanguage, cleanSnippet, highlightForPrompt
+    detectLanguage, cleanSnippet, highlightForPrompt, statusBadge
 } from '../common.js';
 import {
     bindOllamaResolveButton, bindOllamaSettingsButton,
@@ -120,7 +120,7 @@ export const details = {
                                                     <code>${esc(it.rule)}</code>
                                                 </div>
                                                 <div style="font-size:14px; margin-bottom:4px;">
-                                                    ${isMarked ? `<span class="tag" style="background:var(--ok); color:#fff; margin-right:6px;" title="Статус: ${esc(it.status)}">💬 ${esc(it.status)}</span>` : ''}
+                                                    ${statusBadge(it.status)}
                                                     ${esc(it.message)}
                                                 </div>
                                                 ${it.ruleName ? `<div style="color:var(--text-dim);font-size:12px">${esc(it.ruleName)}</div>` : ''}
@@ -1049,7 +1049,6 @@ function openAutoBulkModal(issues, ctx, reloadCb) {
                         Текущая ошибка: <b id="auto-current-key">-</b> (Файл: <span id="auto-current-file">-</span>)
                     </div>
 
-                    <!-- НОВОЕ: Блок для вывода текста ошибки (message) -->
                     <div id="auto-current-msg" style="margin-bottom: 12px; font-size: 14px; font-weight: 500; line-height: 1.4; color: var(--text);">
                         -
                     </div>

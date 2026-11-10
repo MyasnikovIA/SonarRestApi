@@ -48,6 +48,35 @@ export async function apiText(path, body, method = 'POST') {
     return data;
 }
 
+// ==================== STATUS BADGE (расшифровка 💬) ====================
+/**
+ * Возвращает HTML-бейдж для статуса issue.
+ * Для OPEN / REOPENED / пустого — возвращает пустую строку.
+ *
+ * Примеры:
+ *   statusBadge('ACCEPTED')       → <span class="status-tag" data-status="ACCEPTED">✓ принято</span>
+ *   statusBadge('CONFIRMED')      → <span class="status-tag" data-status="CONFIRMED">❗ подтверждено</span>
+ *   statusBadge('FALSE_POSITIVE') → <span class="status-tag" data-status="FALSE_POSITIVE">✕ ложно</span>
+ */
+export function statusBadge(status) {
+    if (!status) return '';
+    const s = String(status).toUpperCase();
+    if (s === 'OPEN' || s === 'REOPENED') return '';
+
+    const map = {
+        'ACCEPTED':       { icon: '✓',  text: 'принято' },
+        'CONFIRMED':      { icon: '❗', text: 'подтверждено' },
+        'FALSE_POSITIVE': { icon: '✕',  text: 'ложно' },
+        'RESOLVED':       { icon: '✔',  text: 'исправлено' },
+        'FIXED':          { icon: '✔',  text: 'исправлено' },
+        'WONTFIX':        { icon: '✗',  text: 'не исправлять' },
+        'CLOSED':         { icon: '⛔', text: 'закрыто' }
+    };
+    const m = map[s] || { icon: '💬', text: s.toLowerCase() };
+
+    return `<span class="status-tag" data-status="${esc(s)}" title="Статус: ${esc(s)}">${m.icon} ${m.text}</span>`;
+}
+
 // ==================== AI PROMPT ====================
 
 // Универсальная функция копирования (работает даже на HTTP)
@@ -80,7 +109,6 @@ function fallbackCopy(text) {
 
 export async function fetchAndShowPrompt(issue, ctx) {
     try {
-        // Запрашиваем сниппет (на случай, если его нет в объекте)
         const p = new URLSearchParams();
         if (ctx.state.project) p.set('project', ctx.state.project);
         p.set('issueKey', issue.key);
@@ -107,10 +135,7 @@ export async function fetchAndShowPrompt(issue, ctx) {
             "2. Оцени реальную серьезность проблемы в контексте данного кода.\n" +
             "3. Предложи исправленный вариант кода (с комментариями изменений).";
 
-        // 1. Сразу копируем в буфер
         copyToClipboard(promptText);
-
-        // 2. Показываем модалку
         showPromptModal(promptText);
     } catch (e) {
         toast('Не удалось загрузить данные для промпта: ' + e.message, true);
@@ -179,29 +204,19 @@ export function cleanSnippet(snippet) {
     return raw.replace(/§HL_START§|§HL_END§/g, '');
 }
 
-/**
- * Возвращает сниппет с визуальными маркерами места ошибки (>>> ... <<<).
- * Использует маркеры §HL_START§, если они есть.
- * Если их нет — выделяет строку по номеру targetLine.
- */
 export function highlightForPrompt(snippet, targetLine) {
     let lines = Array.isArray(snippet) ? snippet : (snippet || '').split('\n');
 
     return lines.map(line => {
-        // 1. Если есть маркеры SonarQube — заменяем их
         if (line.includes('§HL_START§') || line.includes('§HL_END§')) {
             return line.replace(/§HL_START§/g, '>>> ').replace(/§HL_END§/g, ' <<<');
         }
-
-        // 2. Если маркеров нет, но в начале строки есть номер (например "200 | ")
         if (targetLine) {
             const match = line.match(/^\s*(\d+)\s*\|/);
             if (match && parseInt(match[1], 10) === parseInt(targetLine, 10)) {
-                // Добавляем маркеры к этой строке
                 return line.replace(/^(\s*\d+\s*\|)/, '$1 >>> ') + ' <<<';
             }
         }
-
         return line;
     }).join('\n');
 }

@@ -1,16 +1,14 @@
 import {
     esc, toast, highlightCode, fetchAndShowPrompt,
-    detectLanguage, cleanSnippet, highlightForPrompt
+    detectLanguage, cleanSnippet, highlightForPrompt, statusBadge
 } from '../common.js';
 import {
     bindOllamaResolveButton, bindOllamaSettingsButton,
     OllamaClient, openOllamaSettingsModal
 } from '../ollama.js';
 
-// Максимально допустимый размер промпта в символах (примерно 4-6k токенов)
 const MAX_PROMPT_LENGTH = 16000;
 
-// Вспомогательная функция для маппинга статусов SonarQube в значения value
 function getMappedStatus(sonarStatus) {
     if (!sonarStatus) return 'accept';
     const s = String(sonarStatus).toUpperCase();
@@ -22,10 +20,9 @@ function getMappedStatus(sonarStatus) {
     return 'accept';
 }
 
-// Вспомогательная функция для определения правильного перехода при сбросе статуса
 function getReopenTransition(status) {
     if (status === 'CONFIRMED') return 'unconfirm';
-    return 'reopen'; // Для RESOLVED, CLOSED, FALSE_POSITIVE, WONTFIX, ACCEPTED
+    return 'reopen';
 }
 
 export const perfile = {
@@ -119,7 +116,7 @@ export const perfile = {
                                     <td class="num">${it.line}</td>
                                     <td>${esc(it.rule)}</td>
                                     <td class="sev-${esc(it.impactSeverity || it.severity || '')}">${esc(it.impactSeverity || it.severity)}</td>
-                                    <td>${isMarked ? `<span title="Статус: ${esc(it.status)}" style="color:var(--ok); font-weight:bold;">💬</span> ` : ''}${esc(it.message)}</td>
+                                    <td>${statusBadge(it.status)}${esc(it.message)}</td>
                                 </tr>
                             `}).join('')}
                         </tbody></table>` : ''}

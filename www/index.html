@@ -17,45 +17,52 @@
         <input id="project" type="text" placeholder="MEDMIS-MISmobile.doctor_api_spec">
     </div>
 
-    <!-- НОВЫЙ БЛОК: Метрики проекта (заполняется из /api/measures) -->
+    <!-- МЕТРИКИ ПРОЕКТА (заполняется из /api/measures) -->
     <div class="measures-bar hidden" id="measures-bar">
         <span class="measure-qg qg-unknown" id="measure-qg" title="Quality Gate">? QG</span>
 
         <span class="measure-item" title="Всего issues (violations)">
-            <span class="measure-label">Σ issues</span>
+            <span class="measure-icon">Σ</span>
+            <span class="measure-name">Всего</span>
             <span class="measure-value" id="measure-total">0</span>
         </span>
 
         <span class="measure-item measure-sec" title="Безопасность (Security / Vulnerabilities)">
             <span class="measure-icon">🛡</span>
+            <span class="measure-name">Безопасность</span>
             <span class="measure-value" id="measure-security-count">0</span>
             <span class="measure-rating" id="measure-security-rating">—</span>
         </span>
 
         <span class="measure-item measure-rel" title="Надежность (Reliability / Bugs)">
             <span class="measure-icon">🐞</span>
+            <span class="measure-name">Надежность</span>
             <span class="measure-value" id="measure-reliability-count">0</span>
             <span class="measure-rating" id="measure-reliability-rating">—</span>
         </span>
 
         <span class="measure-item measure-mnt" title="Сопровождаемость (Maintainability / Code Smells)">
             <span class="measure-icon">🔧</span>
+            <span class="measure-name">Сопровождаемость</span>
             <span class="measure-value" id="measure-maintainability-count">0</span>
             <span class="measure-rating" id="measure-maintainability-rating">—</span>
         </span>
 
         <span class="measure-item" title="Принятые замечания (Accepted issues)">
-            <span class="measure-label">acc</span>
+            <span class="measure-icon">✓</span>
+            <span class="measure-name">Принято</span>
             <span class="measure-value" id="measure-accepted">0</span>
         </span>
 
         <span class="measure-item" title="Покрытие (Coverage)">
-            <span class="measure-label">cov</span>
+            <span class="measure-icon">◐</span>
+            <span class="measure-name">Покрытие</span>
             <span class="measure-value" id="measure-coverage">—</span>
         </span>
 
         <span class="measure-item" title="Дубликаты (Duplicated lines density)">
-            <span class="measure-label">dup</span>
+            <span class="measure-icon">⧉</span>
+            <span class="measure-name">Дубликаты</span>
             <span class="measure-value" id="measure-dup">—</span>
         </span>
     </div>

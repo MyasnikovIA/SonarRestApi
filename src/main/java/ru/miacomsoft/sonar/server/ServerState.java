@@ -1,29 +1,24 @@
 package ru.miacomsoft.sonar.server;
 
 import ru.miacomsoft.sonar.Issue;
-import ru.miacomsoft.sonar.SessionParser;
 import ru.miacomsoft.sonar.SonarBulkApi;
 import ru.miacomsoft.sonar.SonarClient;
 import ru.miacomsoft.sonar.SonarIssuesApi;
 
 import java.io.IOException;
+import java.io.StringReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Properties;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Централизованное изменяемое состояние сервера:
- *  - сессия (Session + SonarClient)
- *  - Snapshot (текущий снимок проекта)
- *  - статус снимка (EMPTY/BUILDING/READY/FAILED) + прогресс
- *  - общие кэши (ruleName, snippet) — переживают пересоздание SonarIssuesApi
- *  - project по умолчанию (env / --project)
- *
- * Все переходы состояния защищены buildLock; снимок — volatile.
+ * Централизованное состояние сервера.
+ * Сессия хранится в session.properties (стандартный SonarQube Web API).
  */
 public class ServerState {
 
@@ -36,8 +31,8 @@ public class ServerState {
     private final boolean warmupSnippets;
     private final int warmupSnippetLimit;
 
-    private volatile SessionParser.Session session;
-    private volatile SonarClient client;
+    private volatile SessionManager session;
+    private volatile SonarClient    client;
 
     private volatile Snapshot snapshot;
     private volatile SnapshotStatus snapshotStatus = SnapshotStatus.EMPTY;
@@ -62,12 +57,14 @@ public class ServerState {
         this.warmupSnippetLimit = warmupSnippetLimit;
 
         try {
-            if (Files.exists(sessionFile)) {
-                SessionParser.Session s = SessionParser.parseFile(sessionFile.toString());
-                this.session = s;
-                this.client = new SonarClient(s);
+            if (sessionFile != null && Files.exists(sessionFile)) {
+                SessionManager sm = new SessionManager(sessionFile);
+                this.session = sm;
+                this.client = new SonarClient(sm);
                 System.out.println("[ServerState] сессия загружена из " + sessionFile
-                        + " (host=" + s.host + ")");
+                        + " (url=" + sm.getUrl()
+                        + ", auth=" + sm.getAuthType()
+                        + ", user=" + sm.getUser() + ")");
             } else {
                 System.out.println("[ServerState] " + sessionFile
                         + " отсутствует — сервер стартует без сессии. "
@@ -81,23 +78,23 @@ public class ServerState {
 
     // ================= getters =================
 
-    public Path getSessionFile()             { return sessionFile; }
-    public String getDefaultProject()        { return defaultProject; }
-    public int getBatchSize()                { return batchSize; }
-    public long getDelayMs()                 { return delayMs; }
+    public Path    getSessionFile()          { return sessionFile; }
+    public String  getDefaultProject()       { return defaultProject; }
+    public int     getBatchSize()            { return batchSize; }
+    public long    getDelayMs()              { return delayMs; }
     public boolean isWarmupSnippets()        { return warmupSnippets; }
-    public int getWarmupSnippetLimit()       { return warmupSnippetLimit; }
+    public int     getWarmupSnippetLimit()   { return warmupSnippetLimit; }
 
     public boolean isSessionReady()          { return client != null; }
-    public SessionParser.Session getSession(){ return session; }
+    public SessionManager getSession()       { return session; }
 
     public Snapshot getSnapshot()            { return snapshot; }
     public SnapshotStatus getSnapshotStatus(){ return snapshotStatus; }
-    public String getSnapshotError()         { return snapshotError; }
+    public String  getSnapshotError()        { return snapshotError; }
     public Instant getSnapshotStartedAt()    { return snapshotStartedAt; }
-    public String getSnapshotPhase()         { return snapshotPhase; }
-    public int getSnapshotProgress()         { return snapshotProgress; }
-    public int getSnapshotProgressTotal()    { return snapshotProgressTotal; }
+    public String  getSnapshotPhase()        { return snapshotPhase; }
+    public int     getSnapshotProgress()     { return snapshotProgress; }
+    public int     getSnapshotProgressTotal(){ return snapshotProgressTotal; }
 
     public boolean isSnapshotBuilding()      { return snapshotStatus == SnapshotStatus.BUILDING; }
     public boolean isSnapshotReady()         { return snapshot != null; }
@@ -106,8 +103,8 @@ public class ServerState {
         SonarClient c = client;
         if (c == null) {
             throw new SessionNotReadyException(
-                    "Сессия не инициализирована. Загрузите её через PUT /api/session " +
-                            "(сырой текст дампа в теле запроса).");
+                    "Сессия не инициализирована. Загрузите её через PUT /api/session "
+                            + "(тело — текст session.properties).");
         }
         return c;
     }
@@ -123,32 +120,63 @@ public class ServerState {
     // ================= session =================
 
     public synchronized String readRawFile() throws IOException {
-        if (!Files.exists(sessionFile)) return "";
+        if (sessionFile == null || !Files.exists(sessionFile)) return "";
         return Files.readString(sessionFile, StandardCharsets.UTF_8);
     }
 
+    /** Записывает новый текст session.properties + перезагружает сессию. */
     public synchronized void update(String raw) throws IOException {
-        SessionParser.Session parsed = SessionParser.parse(raw); // валидация
+        // Сначала валидируем через SessionManager — на диск ещё ничего не пишем
+        SessionManager sm;
+        try {
+            sm = new SessionManager(raw);
+        } catch (IllegalArgumentException e) {
+            throw e;
+        }
+
         Files.writeString(sessionFile, raw, StandardCharsets.UTF_8);
-        this.session = parsed;
-        this.client = new SonarClient(parsed);
+        this.session = sm;
+        this.client  = new SonarClient(sm);
     }
 
     public synchronized void reload() throws IOException {
-        if (!Files.exists(sessionFile)) {
+        if (sessionFile == null || !Files.exists(sessionFile)) {
             this.session = null;
             this.client = null;
             return;
         }
-        SessionParser.Session parsed;
-        try {
-            parsed = SessionParser.parseFile(sessionFile.toString());
-        } catch (Exception e) {
-            throw new IllegalArgumentException(
-                    "Ошибка парсинга сессии в " + sessionFile + ": " + e.getMessage(), e);
+        SessionManager sm = new SessionManager(sessionFile);
+        this.session = sm;
+        this.client = new SonarClient(sm);
+    }
+
+    private static void validateProperties(String raw) {
+        if (raw == null || raw.isBlank()) {
+            throw new IllegalArgumentException("Пустое тело session.properties");
         }
-        this.session = parsed;
-        this.client = new SonarClient(parsed);
+        Properties p = new Properties();
+        try (StringReader sr = new StringReader(raw)) {
+            p.load(sr);
+        } catch (IOException e) {
+            throw new IllegalArgumentException(
+                    "Ошибка парсинга session.properties: " + e.getMessage(), e);
+        }
+        String url = p.getProperty("sonar.url", "").trim();
+        if (url.isEmpty()) {
+            throw new IllegalArgumentException("В session.properties не задан sonar.url");
+        }
+        String auth = p.getProperty("sonar.auth", "bearer").trim().toLowerCase();
+        if ("cookie".equals(auth)) {
+            if (p.getProperty("sonar.cookie", "").trim().isEmpty()) {
+                throw new IllegalArgumentException(
+                        "sonar.auth=cookie, но sonar.cookie пуст");
+            }
+        } else {
+            if (p.getProperty("sonar.token", "").trim().isEmpty()) {
+                throw new IllegalArgumentException(
+                        "sonar.auth=" + auth + ", но sonar.token пуст");
+            }
+        }
     }
 
     // ================= snapshot =================
@@ -159,7 +187,6 @@ public class ServerState {
         this.snapshotProgressTotal = tot;
     }
 
-    /** Синхронный пересбор снимка. Бросает исключение, если не удалось. */
     public Snapshot buildSnapshotSync(String projectKey) throws Exception {
         if (projectKey == null || projectKey.isEmpty()) {
             throw new IllegalArgumentException("projectKey не задан");
@@ -172,15 +199,13 @@ public class ServerState {
             snapshotProgress = 0;
             snapshotProgressTotal = 0;
 
-            // полный refresh — сбрасываем кэш сниппетов (могли устареть).
-            // Кэш правил оставляем: правила почти не меняются.
             snippetCache.clear();
 
             try {
                 SonarIssuesApi api = newApi(projectKey);
+                String host = session != null ? session.getHost() : "";
                 Snapshot s = Snapshot.build(
-                        api, projectKey,
-                        session != null ? session.host : "",
+                        api, projectKey, host,
                         warmupSnippets, warmupSnippetLimit,
                         this::onProgress);
                 this.snapshot = s;
@@ -196,14 +221,11 @@ public class ServerState {
         }
     }
 
-    /** Асинхронный пересбор. Возвращает false, если уже строится. */
     public boolean buildSnapshotAsync(String projectKey) {
         if (projectKey == null || projectKey.isEmpty()) {
             throw new IllegalArgumentException("projectKey не задан");
         }
-        if (isSnapshotBuilding()) {
-            return false;
-        }
+        if (isSnapshotBuilding()) return false;
         Thread t = new Thread(() -> {
             try {
                 buildSnapshotSync(projectKey);
@@ -216,13 +238,6 @@ public class ServerState {
         return true;
     }
 
-    /**
-     * Точечное обновление одного issue.
-     * Возвращает:
-     *  - Issue — если найден и всё ещё OPEN/CONFIRMED, обновлён в снимке;
-     *  - null — если issue больше не OPEN/CONFIRMED или не найден (удалён из снимка).
-     * Метаданные о предыдущем/новом статусе — во втором аргументе через RefreshResult.
-     */
     public RefreshResult refreshIssue(String projectKey, String issueKey) throws Exception {
         if (issueKey == null || issueKey.isEmpty()) {
             throw new IllegalArgumentException("issueKey не задан");
@@ -233,7 +248,6 @@ public class ServerState {
         Issue fresh = api.fetchIssue(issueKey);
         Snapshot current = snapshot;
 
-        // Issue не найден в Sonar
         if (fresh == null) {
             if (current != null && current.projectKey.equals(projectKey)) {
                 this.snapshot = current.withoutIssue(issueKey);
@@ -245,7 +259,6 @@ public class ServerState {
         boolean stillOpen = "OPEN".equals(st) || "CONFIRMED".equals(st)
                 || "REOPENED".equals(st);
 
-        // Issue больше не OPEN → удаляем из снимка
         if (!stillOpen) {
             if (current != null && current.projectKey.equals(projectKey)) {
                 this.snapshot = current.withoutIssue(issueKey);
@@ -253,7 +266,6 @@ public class ServerState {
             return RefreshResult.removed(issueKey, "status_changed", fresh);
         }
 
-        // Обновляем: ruleName + snippet
         try { fresh.ruleName = api.fetchRuleName(fresh.rule); }
         catch (Exception ignored) { fresh.ruleName = ""; }
         List<String> snippet;
@@ -266,12 +278,11 @@ public class ServerState {
         return RefreshResult.updated(issueKey, fresh);
     }
 
-    /** Результат точечного обновления. */
     public static final class RefreshResult {
         public final String key;
         public final boolean removed;
-        public final String reason;   // для removed: not_found | status_changed | null
-        public final Issue issue;     // для removed: последний известный; для updated: актуальный
+        public final String reason;
+        public final Issue issue;
 
         private RefreshResult(String key, boolean removed, String reason, Issue issue) {
             this.key = key;

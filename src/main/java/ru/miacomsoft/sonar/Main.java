@@ -18,7 +18,7 @@ public class Main {
         int threads = 8;
         int batchSize = SonarBulkApi.DEFAULT_BATCH_SIZE;
         long delayMs = SonarBulkApi.DEFAULT_DELAY_MS;
-        String sessionFile = "session.txt";
+        String sessionFile = "session.properties";     // ← было session.txt
         String project = System.getenv().getOrDefault("SONAR_PROJECT", "");
         boolean warmup = true;
         boolean asyncWarmup = false;
@@ -27,7 +27,7 @@ public class Main {
         boolean console = true;
 
         String ollamaConfigFile  = "ollama.properties";
-        String consoleConfigFile = "console.properties";   // ← сохранённый project консоли
+        String consoleConfigFile = "console.properties";
 
         for (int i = 0; i < args.length; i++) {
             String a = args[i];
@@ -37,6 +37,7 @@ public class Main {
             else if (a.startsWith("--batch="))          batchSize = Integer.parseInt(a.substring("--batch=".length()));
             else if (a.startsWith("--delay="))          delayMs = Long.parseLong(a.substring("--delay=".length()));
             else if (a.startsWith("--session="))        sessionFile = a.substring("--session=".length());
+            else if (a.startsWith("--session-properties=")) sessionFile = a.substring("--session-properties=".length());
             else if (a.startsWith("--project="))        project = a.substring("--project=".length());
             else if (a.startsWith("--snippet-limit="))  snippetLimit = Integer.parseInt(a.substring("--snippet-limit=".length()));
             else if (a.startsWith("--ollama-config="))  ollamaConfigFile = a.substring("--ollama-config=".length());
@@ -49,7 +50,7 @@ public class Main {
             else if (i == 1)                            project = a;
         }
 
-        // ---------- BOOTSTRAP: создать недостающие файлы ----------
+        // ---------- BOOTSTRAP ----------
         Path sessionPath = Path.of(sessionFile);
         Path promptsDir  = BootstrapFiles.resolvePromptsDir();
         BootstrapFiles.ensureAll(sessionPath, promptsDir);
@@ -64,8 +65,6 @@ public class Main {
                 + ", model=" + ollamaConfig.getModel() + ")");
 
         if (console) {
-            // Передаём путь к файлу состояния консоли: последний project запоминается
-            // и восстанавливается при следующем запуске (если не задан --project=).
             new Console(state, ollamaConfig, Path.of(consoleConfigFile)).start();
             System.out.println("[main] Console state: " + consoleConfigFile);
         } else {

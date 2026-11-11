@@ -17,16 +17,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
 
-/**
- * Интерактивная консоль. Дублирует REST-эндпоинты.
- *
- * Управление auto-обработкой:
- *   auto [SEV] [QUAL] --yes  — запускает обработку в фоновом потоке.
- *   stop                     — graceful-остановка.
- *
- * Последний выбранный в консоли project запоминается в console.properties
- * и восстанавливается при следующем запуске (если не задан --project=).
- */
 public class Console {
 
     private static final Set<String> KNOWN_TRANSITIONS = Set.of(
@@ -35,7 +25,7 @@ public class Console {
     private final ServerState    state;
     private final OllamaConfig   ollamaConfig;
     private final PromptTemplate template;
-    private final Path           consoleStateFile;   // ← файл с сохранённым project
+    private final Path           consoleStateFile;
 
     private volatile String    project;
     private volatile boolean   running = true;
@@ -46,17 +36,12 @@ public class Console {
     private final Object consoleLock = new Object();
     private final Thread thread;
 
-    /** Полный конструктор: путь к файлу состояния консоли передаётся извне. */
     public Console(ServerState state, OllamaConfig ollamaConfig, Path consoleStateFile) {
         this.state            = state;
         this.ollamaConfig     = ollamaConfig;
         this.consoleStateFile = consoleStateFile;
         this.template         = new PromptTemplate(BootstrapFiles.resolvePromptsDir());
 
-        // Приоритет:
-        //   1) --project= / SONAR_PROJECT  (явно заданный при запуске)
-        //   2) сохранённый в console.properties (последний выбор в консоли)
-        //   3) пусто
         String cliProject = state.getDefaultProject();
         String saved      = loadSavedProject();
         if (cliProject != null && !cliProject.isEmpty()) {
@@ -72,7 +57,6 @@ public class Console {
         this.thread.setDaemon(true);
     }
 
-    /** Обратная совместимость: путь по умолчанию — ./console.properties. */
     public Console(ServerState state, OllamaConfig ollamaConfig) {
         this(state, ollamaConfig, Path.of("console.properties"));
     }
@@ -100,10 +84,8 @@ public class Console {
         try {
             Properties p = new Properties();
             p.setProperty("project", value == null ? "" : value);
-
             Path parent = consoleStateFile.toAbsolutePath().getParent();
             if (parent != null) Files.createDirectories(parent);
-
             try (OutputStream out = Files.newOutputStream(consoleStateFile)) {
                 p.store(out, "Console state (last selected project)");
             }
@@ -197,12 +179,13 @@ public class Console {
         System.out.println("session:");
         System.out.println("  ready    = " + state.isSessionReady());
         System.out.println("  path     = " + state.getSessionFile());
-        if (state.isSessionReady()) {
-            System.out.println("  host     = " + state.getSession().host);
-            System.out.println("  hasCookie= " + (state.getSession().cookie != null
-                    && !state.getSession().cookie.isEmpty()));
-            System.out.println("  hasXsrf  = " + (state.getSession().xsrf != null
-                    && !state.getSession().xsrf.isEmpty()));
+        SessionManager sm = state.getSession();
+        if (sm != null) {
+            System.out.println("  url      = " + sm.getUrl());
+            System.out.println("  user     = " + sm.getUser());
+            System.out.println("  authType = " + sm.getAuthType());
+            System.out.println("  hasToken = " + sm.hasToken());
+            System.out.println("  hasCookie= " + sm.hasCookie());
         }
         System.out.println("snapshot:");
         System.out.println("  status   = " + state.getSnapshotStatus());
@@ -271,10 +254,12 @@ public class Console {
                     System.out.println(raw);
                     System.out.println("-----------");
                 }
-                if (state.isSessionReady()) {
-                    System.out.println("host    = " + state.getSession().host);
-                    System.out.println("hasXsrf = " + (state.getSession().xsrf != null
-                            && !state.getSession().xsrf.isEmpty()));
+                SessionManager sm = state.getSession();
+                if (sm != null) {
+                    System.out.println("url     = " + sm.getUrl());
+                    System.out.println("user    = " + sm.getUser());
+                    System.out.println("auth    = " + sm.getAuthType());
+                    System.out.println("hasToken= " + sm.hasToken());
                 }
             }
             case "set" -> {
@@ -282,7 +267,10 @@ public class Console {
                 String raw = Files.readString(Path.of(a[1]), StandardCharsets.UTF_8);
                 state.update(raw);
                 System.out.println("[console] session updated from " + a[1]);
-                System.out.println("          host = " + state.getSession().host);
+                if (state.getSession() != null) {
+                    System.out.println("          url  = " + state.getSession().getUrl());
+                    System.out.println("          auth = " + state.getSession().getAuthType());
+                }
                 if (requireProject()) {
                     state.buildSnapshotAsync(project);
                     System.out.println("[console] snapshot rebuild started in background");
@@ -291,7 +279,10 @@ public class Console {
             case "reload" -> {
                 state.reload();
                 System.out.println("[console] reloaded from " + state.getSessionFile());
-                if (state.isSessionReady()) System.out.println("          host = " + state.getSession().host);
+                if (state.getSession() != null) {
+                    System.out.println("          url  = " + state.getSession().getUrl());
+                    System.out.println("          auth = " + state.getSession().getAuthType());
+                }
             }
             case "save" -> {
                 if (a.length < 2) { System.out.println("usage: session save <path>"); return; }
@@ -305,10 +296,10 @@ public class Console {
 
     private void sessionHelp() {
         System.out.println("session sub-commands:");
-        System.out.println("  session show              — прочитать session.txt");
-        System.out.println("  session set <path>        — заменить session.txt + reload + auto build");
-        System.out.println("  session reload            — перечитать session.txt с диска");
-        System.out.println("  session save <path>       — сохранить текущий raw в файл");
+        System.out.println("  session show              — прочитать session.properties");
+        System.out.println("  session set <path>        — заменить session.properties + reload + auto build");
+        System.out.println("  session reload            — перечитать session.properties с диска");
+        System.out.println("  session save <path>       — сохранить текущий текст в файл");
     }
 
     // ==================== refresh ====================
@@ -599,8 +590,7 @@ public class Console {
         System.out.println("Доступные шаблоны в " + template.getPromptsDir() + ":");
         List<String> names = template.listAvailable();
         if (names.isEmpty()) {
-            System.out.println("  <пусто> — создайте prompts/auto-resolve.txt, status-comment.txt,");
-            System.out.println("            bulk-status-comment.txt, analyze-issue.txt");
+            System.out.println("  <пусто> — создайте prompts/*.txt");
         } else {
             for (String n : names) System.out.println("  " + n);
         }
@@ -611,12 +601,6 @@ public class Console {
         System.out.println("  prompt <name> keys=A,B,C [status=...]");
         System.out.println("  prompt <name> sev=ALL qual=ALL [status=...]");
         System.out.println("  prompt <name> ... save=<path>                  — сохранить в файл");
-        System.out.println();
-        System.out.println("Примеры:");
-        System.out.println("  prompt status-comment 30637c2f-... status=accept");
-        System.out.println("  prompt bulk-status-comment keys=30637c2f-...,abc123 status=accept");
-        System.out.println("  prompt analyze-issue 30637c2f-...");
-        System.out.println("  prompt auto-resolve 30637c2f-... save=/tmp/prompt.txt");
     }
 
     // ==================== mark ====================
@@ -935,8 +919,6 @@ public class Console {
     }
 
     private void startAutoBulk(String sev, String qual, int totalIssues) {
-        // Синхронный режим: не запускаем фоновый поток — пользователь видит
-        // результат обработки каждой ошибки в консоли в реальном времени.
         if (autoRunning) {
             System.out.println("[auto] уже выполняется.");
             return;
@@ -1004,19 +986,18 @@ public class Console {
             if (stats.sessionExpired) {
                 System.out.println();
                 System.out.println("##################################################");
-                System.out.println("#  ⚠  СЕССИЯ SONARQUBE ИСТЕКЛА (HTTP 401)        #");
+                System.out.println("#  ⚠  ТОКЕН / СЕССИЯ SONARQUBE НЕДЕЙСТВИТЕЛЬНЫ   #");
                 System.out.println("##################################################");
                 System.out.println("Обработано " + stats.success + " из " + stats.total
                         + " issues, дальше — стоп.");
                 System.out.println();
                 System.out.println("Что делать:");
-                System.out.println("  1. Откройте SonarQube в браузере ("
-                        + (state.isSessionReady() ? state.getSession().host : "?") + ")");
-                System.out.println("  2. DevTools → Network → любой API-запрос");
-                System.out.println("  3. Скопируйте заголовки Cookie и X-XSRF-TOKEN в session.txt");
-                System.out.println("  4. session reload");
-                System.out.println("  5. auto " + sev + " " + qual + " --yes"
-                        + "   — продолжит с того же места");
+                System.out.println("  1. Сгенерируйте новый токен: "
+                        + (state.getSession() != null ? state.getSession().getUrl() : "?")
+                        + "/account/security");
+                System.out.println("  2. Обновите session.properties (sonar.token=...)");
+                System.out.println("  3. session reload");
+                System.out.println("  4. auto " + sev + " " + qual + " --yes");
                 System.out.println();
             }
 
@@ -1042,7 +1023,6 @@ public class Console {
         }
     }
 
-    /** Null-safe описание throwable: имя класса + message (если есть). */
     private static String describeThrowable(Throwable e) {
         if (e == null) return "unknown";
         String msg = e.getMessage();
@@ -1238,10 +1218,10 @@ public class Console {
                                      и восстанавливается при следующем запуске,
                                      если не задан --project=)
 
-        Сессия:
-          session show            — прочитать session.txt
-          session set <path>      — заменить session.txt из файла + reload + auto build
-          session reload          — перечитать session.txt с диска
+        Сессия (session.properties — стандартный SonarQube Web API):
+          session show            — прочитать session.properties
+          session set <path>      — заменить session.properties из файла + reload + auto build
+          session reload          — перечитать session.properties с диска
           session save <path>     — сохранить текущий raw в файл
 
         Снимок:
@@ -1336,7 +1316,7 @@ public class Console {
             * итоговая статистика печатается в stdout;
             * если не было 401/сетевых ошибок — снимок пересобирается в фоне
               (status — прогресс).
-              
+
           Допустимые SEV:   HIGH | MEDIUM | LOW | INFO | ALL
           Допустимые QUAL:  MAINTAINABILITY | RELIABILITY | SECURITY | ALL
 

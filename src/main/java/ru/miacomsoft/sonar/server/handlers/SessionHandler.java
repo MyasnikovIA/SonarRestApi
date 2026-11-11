@@ -2,19 +2,21 @@ package ru.miacomsoft.sonar.server.handlers;
 
 import com.sun.net.httpserver.HttpExchange;
 import org.json.JSONObject;
-import ru.miacomsoft.sonar.SessionParser;
 import ru.miacomsoft.sonar.server.BaseHandler;
 import ru.miacomsoft.sonar.server.ServerState;
+import ru.miacomsoft.sonar.server.SessionManager;
 
+import java.io.StringReader;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
+import java.util.Properties;
 
 /**
- * GET /api/session  — прочитать текущий session.txt.
- * PUT /api/session  — перезаписать session.txt + перезагрузить сессию,
+ * GET /api/session  — прочитать session.properties.
+ * PUT /api/session  — перезаписать session.properties + перезагрузить,
  *                     затем (по умолчанию) запустить async-пересбор снимка.
- *                     Отключается через ?build=false.
- *                     ?project=KEY задаёт проект для пересбора (иначе defaultProject).
+ *
+ * Тело PUT — полный текст session.properties.
  */
 public class SessionHandler extends BaseHandler {
 
@@ -38,34 +40,40 @@ public class SessionHandler extends BaseHandler {
 
     private void readSession(HttpExchange ex) throws Exception {
         String raw;
-        try { raw = state.readRawFile(); }
-        catch (Exception e) {
+        try {
+            raw = state.readRawFile();
+        } catch (Exception e) {
             sendError(ex, 500, "Не удалось прочитать " + state.getSessionFile()
                     + ": " + e.getMessage());
             return;
         }
 
         JSONObject o = new JSONObject();
-        o.put("path", state.getSessionFile().toString());
+        o.put("path", state.getSessionFile() == null
+                ? "" : state.getSessionFile().toString());
         o.put("exists", !raw.isEmpty());
-        o.put("raw", raw);
 
         if (!raw.isEmpty()) {
             try {
-                SessionParser.Session s = SessionParser.parse(raw);
-                o.put("host", s.host);
-                o.put("xsrf", s.xsrf == null ? "" : s.xsrf);
-                o.put("hasCookie", s.cookie != null && !s.cookie.isEmpty());
+                Properties p = new Properties();
+                try (StringReader sr = new StringReader(raw)) { p.load(sr); }
+
+                o.put("url",       p.getProperty("sonar.url", ""));
+                o.put("user",      p.getProperty("sonar.user", ""));
+                o.put("authType",  p.getProperty("sonar.auth", "bearer"));
+                o.put("hasToken",  !p.getProperty("sonar.token", "").isBlank());
+                o.put("hasCookie", !p.getProperty("sonar.cookie", "").isBlank());
+
+                // raw отдаём, но с замаскированными секретами
+                String redacted = raw
+                        .replaceAll("(?m)^(\\s*sonar\\.token\\s*=).*$", "$1***REDACTED***")
+                        .replaceAll("(?m)^(\\s*sonar\\.cookie\\s*=).*$", "$1***REDACTED***");
+                o.put("raw", redacted);
             } catch (Exception e) {
                 o.put("parseError", e.getMessage());
-                o.put("host", "");
-                o.put("xsrf", "");
-                o.put("hasCookie", false);
             }
         } else {
-            o.put("host", "");
-            o.put("xsrf", "");
-            o.put("hasCookie", false);
+            o.put("raw", "");
         }
         sendJson(ex, 200, o);
     }
@@ -78,13 +86,14 @@ public class SessionHandler extends BaseHandler {
         byte[] bodyBytes = ex.getRequestBody().readAllBytes();
         String raw = new String(bodyBytes, StandardCharsets.UTF_8);
         if (raw == null || raw.isBlank()) {
-            sendError(ex, 400, "Пустое тело запроса. Передайте сырой текст session.txt");
+            sendError(ex, 400, "Пустое тело запроса. Передайте текст session.properties");
             return;
         }
 
-        try { state.update(raw); }
-        catch (IllegalArgumentException | IllegalStateException e) {
-            sendError(ex, 400, "Невалидный формат сессии: " + e.getMessage());
+        try {
+            state.update(raw);
+        } catch (IllegalArgumentException | IllegalStateException e) {
+            sendError(ex, 400, "Невалидный session.properties: " + e.getMessage());
             return;
         } catch (Exception e) {
             sendError(ex, 500, "Не удалось записать " + state.getSessionFile()
@@ -93,8 +102,7 @@ public class SessionHandler extends BaseHandler {
         }
 
         String targetProject = (project != null && !project.isEmpty())
-                ? project
-                : state.getDefaultProject();
+                ? project : state.getDefaultProject();
         boolean buildStarted = false;
         if (build && targetProject != null && !targetProject.isEmpty()) {
             try { buildStarted = state.buildSnapshotAsync(targetProject); }
@@ -103,13 +111,17 @@ public class SessionHandler extends BaseHandler {
             }
         }
 
+        SessionManager sm = state.getSession();
         JSONObject o = new JSONObject();
         o.put("saved", true);
         o.put("path", state.getSessionFile().toString());
-        o.put("host", state.getSession().host);
-        o.put("xsrf", state.getSession().xsrf == null ? "" : state.getSession().xsrf);
-        o.put("hasCookie", state.getSession().cookie != null
-                && !state.getSession().cookie.isEmpty());
+        if (sm != null) {
+            o.put("url",      sm.getUrl());
+            o.put("user",     sm.getUser());
+            o.put("authType", sm.getAuthType());
+            o.put("hasToken", sm.hasToken());
+            o.put("hasCookie", sm.hasCookie());
+        }
         o.put("buildStarted", buildStarted);
         if (buildStarted) {
             o.put("buildProject", targetProject);

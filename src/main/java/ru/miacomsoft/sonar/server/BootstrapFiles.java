@@ -5,44 +5,69 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 
 /**
- * При старте приложения проверяет наличие файлов, без которых сервер
- * работает в «пустом» режиме, и создаёт недостающие:
- *   - session.txt
+ * При старте проверяет наличие файлов, без которых сервер работает
+ * в «пустом» режиме, и создаёт недостающие:
+ *   - session.properties       (в корне проекта / cwd)
  *   - prompts/auto-resolve.txt
  *   - prompts/status-comment.txt
  *   - prompts/bulk-status-comment.txt
  *   - prompts/analyze-issue.txt
  *
- * Существующие файлы НИКОГДА не перезаписываются — если пользователь
- * правил промпт, изменения сохранятся.
- *
- * Все ошибки (нет прав, нет диска) логируются, но не валят старт:
- * ServerState и ApiServer уже умеют работать без session.txt / prompts/.
+ * Существующие файлы НИКОГДА не перезаписываются.
  */
 public final class BootstrapFiles {
 
     private BootstrapFiles() {}
 
-    /** Создать недостающие файлы. Ничего не перезаписывает. */
     public static void ensureAll(Path sessionFile, Path promptsDir) {
         ensureSession(sessionFile);
         ensurePrompts(promptsDir);
     }
 
+    // ============================================================
+    // session.properties
+    // ============================================================
+
     public static void ensureSession(Path sessionFile) {
         if (sessionFile == null) return;
         try {
-            if (Files.exists(sessionFile)) return;
+            if (Files.exists(sessionFile)) {
+                System.out.println("[Bootstrap] session file found: "
+                        + sessionFile.toAbsolutePath());
+                return;
+            }
+
             Path parent = sessionFile.toAbsolutePath().getParent();
             if (parent != null) Files.createDirectories(parent);
-            Files.writeString(sessionFile, Defaults.SESSION_TEMPLATE, StandardCharsets.UTF_8);
-            System.out.println("[Bootstrap] created " + sessionFile.toAbsolutePath()
-                    + "  (заполните заголовками из DevTools браузера)");
+
+            Files.writeString(sessionFile,
+                    Defaults.SESSION_PROPERTIES_TEMPLATE,
+                    StandardCharsets.UTF_8);
+
+            System.out.println();
+            System.out.println("==========================================================");
+            System.out.println("[Bootstrap] Создан файл конфигурации:");
+            System.out.println("            " + sessionFile.toAbsolutePath());
+            System.out.println();
+            System.out.println("            Заполните поля sonar.url и sonar.token,");
+            System.out.println("            затем перезапустите сервер или выполните:");
+            System.out.println("              PUT /api/session   (тело — текст файла)");
+            System.out.println();
+            System.out.println("            Сейчас сервер стартует БЕЗ сессии —");
+            System.out.println("            запросы к SonarQube вернут 503,");
+            System.out.println("            пока конфиг не будет заполнен.");
+            System.out.println("==========================================================");
+            System.out.println();
+
         } catch (Exception e) {
             System.err.println("[Bootstrap] не удалось создать " + sessionFile
                     + ": " + e.getMessage());
         }
     }
+
+    // ============================================================
+    // prompts/
+    // ============================================================
 
     public static void ensurePrompts(Path promptsDir) {
         if (promptsDir == null) return;
@@ -70,14 +95,7 @@ public final class BootstrapFiles {
                     + e.getMessage());
         }
     }
-    
-    /**
-     * Порядок поиска каталога prompts (с созданием при необходимости):
-     *   1) -Dsonar.prompts=<abs path>
-     *   2) <jar-dir>/prompts
-     *   3) <jar-parent>/prompts
-     *   4) ./prompts (cwd)
-     */
+
     public static Path resolvePromptsDir() {
         String sys = System.getProperty("sonar.prompts");
         if (sys != null && !sys.isBlank()) {

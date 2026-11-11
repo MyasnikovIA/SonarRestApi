@@ -1,6 +1,6 @@
 # Работа с программой в интерактивной консоли
 
-Помимо REST API, приложение имеет **встроенную интерактивную консоль** — она запускается автоматически вместе с сервером и позволяет выполнять те же операции без HTTP. Каждая команда дублирует соответствующий REST-эндпоинт, но результат печатается в человекочитаемом виде.
+Помимо REST API, приложение имеет **встроенную интерактивную консоль** — она запускается автоматически вместе с сервером и позволяет выполнять те же операции без HTTP. Каждая команда дублирует соответствующий REST-эндпоинт, но результат печатается в человекочитаемом виде. **AI-обработка через Ollama** и **рендер промптов из `prompts/*.txt`** — доступны только в консоли и web-интерфейсе (отдельного REST-эндпоинта для них нет).
 
 ## Запуск
 
@@ -27,6 +27,7 @@ java -jar SonarRestApi.jar --no-console
 ```
 ===================================================
  Console ready. Type 'help' for commands.
+ Prompts dir: prompts/
 ===================================================
 [ServerState] сессия загружена из session.txt (host=sonar.example.com)
 [Warmup] sync: собираю снимок для MEDMIS-MISmobile.doctor_api_spec ...
@@ -37,11 +38,17 @@ java -jar SonarRestApi.jar --no-console
 ===================================================
  Sonar REST API server started
  Bind:        0.0.0.0:6060
- ...
+ Prompts dir: prompts/
+ Prompts:     analyze-issue, auto-resolve, bulk-status-comment, status-comment
+ Endpoints:
+   GET  /api/prompt/build?name=<n>&project=<p>&issueKey=<k>
+   GET  /api/prompt/list
 ===================================================
 
 sonar:MEDMIS-MISmobile.doctor_api_spec>
 ```
+
+Строка `Prompts dir:` показывает, откуда будут браться шаблоны промптов. Порядок поиска каталога: `-Dsonar.prompts=...` → `<jar-dir>/prompts` → `<jar-parent>/prompts` → `./prompts`.
 
 Приглашение показывает текущий «консольный» project. Он **независим** от `defaultProject` HTTP-сервера — можно смотреть один проект в консоли, а REST-клиенты пусть работают с другим.
 
@@ -55,9 +62,18 @@ sonar:MEDMIS-MISmobile.doctor_api_spec>
 sonar:MEDMIS-MISmobile.doctor_api_spec> help
 ```
 
-Выведет полный список команд с описанием (см. ниже разделы 2–10).
+Выведет полный список команд, сгруппированных по разделам:
 
-### `status` — состояние сессии, снимка, прогресс
+- Основное (`help`, `status`, `health`, `project`, `quit`)
+- Сессия (`session show/set/reload/save`)
+- Снимок (`refresh`, `refresh wait`, `refresh issue <KEY>`)
+- Отчёты (`summary`, `matrix`, `perfile`, `details`, `issues`, `keys`, `snippet`)
+- Пометки (`mark`, `cancel`, `cancelall`)
+- Промпты (`prompt list`, `prompt <name> ...`)
+- Ollama (`ollama show/set/test/reload`)
+- Авто-обработка (`auto`, `auto key`, `stop`)
+
+### `status` — состояние сессии, снимка, auto-обработки
 
 ```
 sonar:MEDMIS-MISmobile.doctor_api_spec> status
@@ -81,6 +97,8 @@ snapshot:
   host     = sonar.example.com
 defaultProject = MEDMIS-MISmobile.doctor_api_spec
 consoleProject = MEDMIS-MISmobile.doctor_api_spec
+autoRunning    = false
+promptsDir     = /opt/sonar-rest-api/prompts
 ```
 
 Если снимок ещё строится — увидите:
@@ -90,6 +108,8 @@ snapshot:
   phase    = resolving_rules (150/342)
   ...
 ```
+
+Если идёт AI-обработка — `autoRunning = true`.
 
 ### `health` — краткая проверка
 
@@ -573,7 +593,322 @@ reopen [2/87] 1a2b3c4d-...: OK
 
 ---
 
-## 12. Завершение работы
+## 12. Рендер промптов из файлов (`prompt`)
+
+Шаблоны промптов лежат в `prompts/*.txt`. Правки в этих файлах **вступают в силу сразу** — файл читается при каждом вызове `prompt` (и при каждом обращении к `/api/prompt/build`).
+
+### 12.1 Что умеет команда
+
+| Действие | Синтаксис |
+|---|---|
+| Список доступных шаблонов | `prompt list` |
+| Один issue по ключу | `prompt <name> <KEY> [status=...] [statusLabel=...]` |
+| Группа issues по ключам | `prompt <name> keys=A,B,C [status=...]` |
+| Все issues по фильтру | `prompt <name> sev=ALL qual=ALL [status=...]` |
+| Сохранить в файл | `prompt <name> ... save=<path>` |
+
+### 12.2 Доступные имена шаблонов
+
+| `<name>` | Файл | Назначение |
+|---|---|---|
+| `status-comment` | `prompts/status-comment.txt` | Разбор одного issue с заданным статусом |
+| `bulk-status-comment` | `prompts/bulk-status-comment.txt` | Разбор группы issues |
+| `analyze-issue` | `prompts/analyze-issue.txt` | Общий анализ (без фиксации статуса) |
+| `auto-resolve` | `prompts/auto-resolve.txt` | LLM сам выбирает статус (используется в `auto`) |
+
+### 12.3 Параметры
+
+- `status=accept|falsepositive|confirm|resolve|wontfix` — статус для `status-comment` / `bulk-status-comment` (по умолчанию `accept`).
+- `statusLabel="..."` — человекочитаемое описание статуса (по умолчанию — из встроенного маппинга).
+- `keys=A,B,C` — группа issue по ключам (для `bulk-status-comment`).
+- `sev=ALL`, `qual=ALL` — фильтр по issues (для `bulk-status-comment`).
+- `save=<path>` — записать результат в файл вместо stdout.
+
+### 12.4 Примеры
+
+#### `prompt list`
+
+```
+sonar:MEDMIS-MISmobile.doctor_api_spec> prompt list
+Доступные шаблоны в /opt/sonar/prompts:
+  analyze-issue
+  auto-resolve
+  bulk-status-comment
+  status-comment
+```
+
+Если каталог пуст — консоль покажет, какие файлы ожидаются, и откуда они будут созданы при старте (через `BootstrapFiles`).
+
+#### Промпт для одного issue (статус = accept)
+
+```
+sonar:MEDMIS-MISmobile.doctor_api_spec> prompt status-comment 9ede9b09-5875-4fbf-8a21-200346c8e415 status=accept
+===================================================
+ Prompt: status-comment  (12480 chars)
+===================================================
+Ты — опытный разработчик и эксперт по статическому анализу кода (SonarQube).
+...
+(полный текст из prompts/status-comment.txt с подставленными [TAG])
+===================================================
+```
+
+#### Промпт для группы issues
+
+```
+sonar:MEDMIS-MISmobile.doctor_api_spec> prompt bulk-status-comment keys=9ede9b09-...,1a2b3c4d-... status=accept
+===================================================
+ Prompt: bulk-status-comment  (8932 chars)
+===================================================
+...
+```
+
+#### Промпт по фильтру
+
+```
+sonar:MEDMIS-MISmobile.doctor_api_spec> prompt bulk-status-comment sev=HIGH qual=RELIABILITY status=accept
+```
+
+#### Промпт для одного issue с сохранением в файл
+
+```
+sonar:MEDMIS-MISmobile.doctor_api_spec> prompt auto-resolve 9ede9b09-... save=/tmp/auto.txt
+[prompt] сохранено в /tmp/auto.txt (8493 chars)
+```
+
+Файл можно отдать в `curl`/`jq`/Ollama — весь текст промпта уже собран.
+
+#### Промпт для анализа (без статуса)
+
+```
+sonar:MEDMIS-MISmobile.doctor_api_spec> prompt analyze-issue 9ede9b09-...
+```
+
+### 12.5 Поведение при отсутствии шаблона
+
+- Если `prompts/<name>.txt` **не существует** — консоль выведет сообщение «шаблон не найден» и список доступных.
+- Если файл существует, но **пустой** — консоль сообщит «промпт пуст».
+- Если файл повреждён/содержит невалидные `[TAG]` — `PromptTemplate` подставит пустые строки для неизвестных тегов; результат может быть бессмысленным, но команда не упадёт.
+
+---
+
+## 13. Ollama: настройка LLM и массовая AI-обработка (`auto`)
+
+Автоматическая обработка — это **последовательный цикл**: для каждого issue берётся промпт из `prompts/auto-resolve.txt`, отправляется в Ollama, ответ парсится, статус+комментарий+теги применяются через `bulk_change`. Эта же логика работает и в web (кнопка «Добавить автоматически комментарий»).
+
+### 13.1 Настройка Ollama (`ollama`)
+
+| Команда | Назначение |
+|---|---|
+| `ollama show` | Показать текущие настройки |
+| `ollama set url <URL>` | Адрес Ollama (например `http://localhost:11434`) |
+| `ollama set model <MODEL>` | Модель (`llama3`, `qwen2.5-coder:14b`, …) |
+| `ollama set timeout <SECONDS>` | Таймаут запроса (по умолчанию `300`) |
+| `ollama set temperature <FLOAT>` | Температура (по умолчанию `0.2`) |
+| `ollama test` | Проверить соединение и список доступных моделей |
+| `ollama reload` | Перечитать `ollama.properties` с диска |
+
+Настройки персистентны — хранятся в `ollama.properties` рядом с JAR (или в `--ollama-config=<path>`).
+
+#### Пример полной настройки
+
+```
+sonar:MEDMIS-MISmobile.doctor_api_spec> ollama set url http://smwrap.ru:3397
+[ollama] saved
+
+sonar:MEDMIS-MISmobile.doctor_api_spec> ollama set model qwen2.5-coder:14b
+[ollama] saved
+
+sonar:MEDMIS-MISmobile.doctor_api_spec> ollama test
+Доступные модели:
+  - qwen2.5-coder:14b
+  - llama3:8b
+[ollama] OK: http://smwrap.ru:3397
+```
+
+Если `ollama test` падает — это **сетевая проблема**, обработка через `auto` не будет работать. Настройте URL и убедитесь, что Ollama запущена с `OLLAMA_HOST=0.0.0.0 OLLAMA_ORIGINS='*'`.
+
+### 13.2 Запуск массовой обработки (`auto`)
+
+#### Синтаксис
+
+```
+auto [SEV] [QUAL]           # dry-run: показать, что будет обработано
+auto [SEV] [QUAL] --yes     # запустить обработку в фоне
+auto key <KEY>              # dry-run по одному issue
+auto key <KEY> --yes        # обработать один issue
+stop                        # graceful-остановка фоновой обработки
+```
+
+#### Допустимые SEV/QUAL
+
+- `SEV` = `HIGH | MEDIUM | LOW | INFO | ALL`
+- `QUAL` = `MAINTAINABILITY | RELIABILITY | SECURITY | ALL`
+
+#### Примеры комбинаций
+
+```
+auto ALL ALL                        → dry-run всех OPEN/REOPENED
+auto ALL ALL --yes                  → обработать ВСЁ
+auto HIGH ALL --yes                 → только HIGH (любое качество)
+auto HIGH SECURITY --yes            → только HIGH + SECURITY
+auto MEDIUM ALL --yes               → только MEDIUM
+auto MEDIUM MAINTAINABILITY --yes   → только MEDIUM + MAINTAINABILITY
+auto LOW ALL --yes                  → только LOW
+auto INFO ALL --yes                 → только INFO
+auto ALL SECURITY --yes             → любые SEV, но только SECURITY
+auto ALL MAINTAINABILITY --yes      → любые SEV, только MAINTAINABILITY
+auto ALL RELIABILITY --yes          → любые SEV, только RELIABILITY
+auto key MYPROJ-1234                → dry-run одного issue
+auto key MYPROJ-1234 --yes          → обработать один issue
+```
+
+### 13.3 Dry-run — посмотреть, что будет обработано
+
+```
+sonar:MEDMIS-MISmobile.doctor_api_spec> auto HIGH SECURITY
+
+project    = MEDMIS-MISmobile.doctor_api_spec
+severity   = HIGH
+quality    = SECURITY
+issues     = 17  (OPEN / REOPENED)
+ollama     = http://smwrap.ru:3397  (model: qwen2.5-coder:14b)
+prompt     = /opt/sonar/prompts/auto-resolve.txt
+
+DRY RUN — ничего не изменено.
+Первые 5 issues:
+  9ede9b09-...  HIGH  "NullPointerException" will be thrown when invoking method "get()".
+  1a2b3c4d-...  HIGH  Boolean expressions should not be gratuitous.
+  ...
+  ... и ещё 12
+
+Чтобы запустить обработку: auto HIGH SECURITY --yes
+```
+
+### 13.4 Боевой запуск
+
+```
+sonar:MEDMIS-MISmobile.doctor_api_spec> auto HIGH SECURITY --yes
+
+=== Запуск массовой обработки через Ollama ===
+
+[auto] промпт: /opt/sonar/prompts/auto-resolve.txt
+[auto] запущено в фоне. Для остановки введите 'stop'.
+```
+
+После запуска приглашение меняется:
+
+```
+sonar[auto]:MEDMIS-MISmobile.doctor_api_spec>
+```
+
+Маркер `[auto]` показывает, что обработка идёт. В это время **все** команды (кроме `quit` — он заблокирован) доступны.
+
+### 13.5 Прогресс (stderr)
+
+Прогресс выводится в stderr, по одной строке на этап:
+
+```
+[1/17] 9ede9b09-... — подготовка...
+[1/17] 9ede9b09-... — Ollama (qwen2.5-coder:14b)...
+[1/17] 9ede9b09-... — применяю accept...
+[1/17] 9ede9b09-... → accept [require-fix,error-handling]  OK  (12.4s)
+[2/17] 1a2b3c4d-... — подготовка...
+...
+```
+
+- `OK` — зелёный (`\u001B[32m`).
+- `FAIL` — красный (`\u001B[31m`).
+- В stderr — не конфликтует с stdin-эхом пользователя в stdout.
+
+### 13.6 Остановка (`stop`)
+
+```
+sonar[auto]:MEDMIS-MISmobile.doctor_api_spec> stop
+[auto] запрошена остановка (текущий issue будет доработан, затем цикл завершится).
+```
+
+`stop` — **graceful**: текущий issue дорабатывается до конца (или падает по ошибке), после чего цикл завершается. Уже обработанные issues остаются обработанными.
+
+Пока `auto` активна, команда `quit` **отклоняется** — сначала нужно выполнить `stop`.
+
+### 13.7 Итоговая статистика
+
+После завершения (или `stop`) печатается блок:
+
+```
+=== Результат ===
+Всего:         17
+Успешно:       15
+Ошибок:        2
+Остановлено:   да (по команде 'stop')
+Время:         184.3 сек
+По статусам:   {accept=12, falsepositive=3}
+По фикс-тегам: {require-fix=14, not-require-fix=1}
+Failed keys (первые 2 из 2):
+  1a2b3c4d-...
+  abcdef01-...
+Полный список: auto-failed-MEDMIS-MISmobile.doctor_api_spec-1736998800000.txt
+[auto] Обновляю снимок в фоне (status — прогресс)
+```
+
+### 13.8 Что происходит при сбоях
+
+| Ситуация | Поведение |
+|---|---|
+| HTTP 401 от SonarQube (сессия истекла) | Немедленный стоп всего прогона. Печатается блок «СЕССИЯ ИСТЕКЛА» с инструкцией обновить `session.txt`. |
+| 3 подряд сетевые ошибки (Ollama/сеть) | Аварийный стоп. Печатается блок «OLLAMA/СЕТЬ НЕДОСТУПНЫ». |
+| Одиночная ошибка (не сеть, не 401) | `failed++`, переход к следующему issue. |
+| LLM вернул ответ без строки `Статус:` | `failed++`, лог в stderr, переход к следующему. |
+
+Failed keys сохраняются в файл `auto-failed-<PROJECT>-<timestamp>.txt` рядом с JAR:
+
+```
+# Auto processing failed keys
+# project:    MEDMIS-MISmobile.doctor_api_spec
+# finished:   2025-11-07T14:02:33Z
+# total:      17
+# success:    15
+# failed:     2
+# ---
+1a2b3c4d-...
+abcdef01-...
+```
+
+Этот файл можно использовать для точечной повторной обработки (`auto key <KEY> --yes`).
+
+### 13.9 Что сохраняется после `auto`
+
+После **успешного** завершения (не прерванного `stop`/401/сетью):
+
+- Снимок автоматически пересобирается в фоне (`status` — прогресс).
+- Теги **сохраняются**: существующие у issue + предложенные LLM (`require-fix` ↔ `not-require-fix` заменяют друг друга).
+- Статус применяется через `bulk_change` (один issue за запрос, батчами).
+
+После остановки по 401 / сети — снимок **не** пересобирается (в нём могут быть неактуальные статусы).
+
+### 13.10 Обработка одного issue (`auto key <KEY>`)
+
+Синхронная, полезная для тестирования:
+
+```
+sonar:MEDMIS-MISmobile.doctor_api_spec> auto key 9ede9b09-5875-4fbf-8a21-200346c8e415
+
+key        = 9ede9b09-...
+status     = OPEN
+component  = src/main/java/ru/miacomsoft/KafkaConsumer.java:42
+rule       = java:S2259
+message    = "NullPointerException" will be thrown ...
+ollama     = http://smwrap.ru:3397  (model: qwen2.5-coder:14b)
+prompt     = /opt/sonar/prompts/auto-resolve.txt
+
+DRY RUN — добавьте --yes, чтобы применить.
+```
+
+С `--yes` — отправляет промпт в Ollama, парсит ответ, применяет статус/теги, обновляет `refresh issue`.
+
+---
+
+## 14. Завершение работы
 
 ### `quit` / `exit` / `q` — остановить консоль
 
@@ -586,14 +921,16 @@ sonar:MEDMIS-MISmobile.doctor_api_spec> quit
 > Если консоль работала вместе с REST — REST также остановится (сервер завершает JVM).
 > Если вы запускали с `--no-console`, для остановки — `Ctrl+C` или `kill` процесса (по SIGTERM сработает shutdown hook, REST закроется корректно).
 
+> Если `auto` в этот момент активна, `quit` будет отклонён — сначала `stop`.
+
 ---
 
 ## Полный справочник команд
 
-| Команда | Аналог в REST | Описание |
+| Команда | Аналог в REST / Web | Описание |
 |---|---|---|
 | `help`, `?`, `h` | — | справка |
-| `status` | `/api/status` | состояние сессии и снимка |
+| `status` | `/api/status` | состояние сессии, снимка, auto |
 | `health` | `/api/health` | краткая проверка |
 | `project [KEY\|clear]` | — | консольный project (не влияет на REST) |
 | `session show` | `GET /api/session` | прочитать `session.txt` |
@@ -614,12 +951,29 @@ sonar:MEDMIS-MISmobile.doctor_api_spec> quit
 | `mark <transition> [SEV] [QUAL] [--yes]` | `POST /api/mark?sev=&qual=...` | пометить массово |
 | `cancel <KEY>` | `POST /api/cancel?key=...` | снять с одного |
 | `cancelall [SEV] [QUAL] [--yes]` | `POST /api/cancel?sev=&qual=...` | снять массово |
+| `prompt list` | `GET /api/prompt/list` | список шаблонов |
+| `prompt <name> <KEY> [params]` | `GET /api/prompt/build?...` | промпт для одного issue |
+| `prompt <name> keys=A,B,C [params]` | `GET /api/prompt/build?...` | промпт для группы |
+| `prompt <name> sev=&qual= [params]` | `GET /api/prompt/build?...` | промпт по фильтру |
+| `prompt <name> ... save=<path>` | — | сохранить промпт в файл |
+| `ollama show` | — | текущие настройки LLM |
+| `ollama set url <URL>` | — | адрес Ollama |
+| `ollama set model <MODEL>` | — | модель LLM |
+| `ollama set timeout <SECONDS>` | — | таймаут запроса |
+| `ollama set temperature <F>` | — | температура |
+| `ollama test` | — | проверить соединение |
+| `ollama reload` | — | перечитать `ollama.properties` |
+| `auto [SEV] [QUAL]` | Web: «Добавить автоматически комментарий» | dry-run AI-обработки |
+| `auto [SEV] [QUAL] --yes` | Web: то же, запуск | массовая AI-обработка |
+| `auto key <KEY> [--yes]` | — | AI по одному issue |
+| `stop` | Web: кнопка «Остановить» | graceful-остановка `auto` |
 | `quit`, `exit`, `q` | — | выход |
 
 **Значения:**
 - `SEV` = `MEDIUM` \| `HIGH` \| `LOW` \| `INFO` \| `ALL`
 - `QUAL` = `MAINTAINABILITY` \| `RELIABILITY` \| `SECURITY` \| `ALL`
 - `transition` = `accept` \| `falsepositive` \| `confirm` \| `resolve` \| `wontfix` \| `reopen`
+- `<name>` = `status-comment` \| `bulk-status-comment` \| `analyze-issue` \| `auto-resolve`
 
 ---
 
@@ -630,6 +984,7 @@ $ SONAR_PROJECT=MEDMIS-MISmobile.doctor_api_spec java -jar SonarRestApi.jar
 ...
 ===================================================
  Console ready. Type 'help' for commands.
+ Prompts dir: prompts/
 ===================================================
 [Warmup] sync: собираю снимок для MEDMIS-MISmobile.doctor_api_spec ...
 [Snapshot] fetched 342 issues
@@ -647,6 +1002,8 @@ snapshot:
   status   = READY
   issues   = 342
   ...
+autoRunning    = false
+promptsDir     = /opt/sonar/prompts
 
 sonar:MEDMIS-MISmobile.doctor_api_spec> summary HIGH RELIABILITY
 Всего HIGH/RELIABILITY: 17
@@ -665,38 +1022,89 @@ sonar:MEDMIS-MISmobile.doctor_api_spec> snippet 9ede9b09-5875-4fbf-8a21-200346c8
 ...
 ================================================================================
 
+# (1) Посмотреть готовый промпт для одного issue
+sonar:MEDMIS-MISmobile.doctor_api_spec> prompt status-comment 9ede9b09-... status=accept
+===================================================
+ Prompt: status-comment  (12480 chars)
+===================================================
+Ты — опытный разработчик ...
+===================================================
+
+# (2) Настроить Ollama
+sonar:MEDMIS-MISmobile.doctor_api_spec> ollama set url http://smwrap.ru:3397
+[ollama] saved
+sonar:MEDMIS-MISmobile.doctor_api_spec> ollama set model qwen2.5-coder:14b
+[ollama] saved
+sonar:MEDMIS-MISmobile.doctor_api_spec> ollama test
+[ollama] OK: http://smwrap.ru:3397
+
+# (3) Ручная пометка одного issue
 sonar:MEDMIS-MISmobile.doctor_api_spec> mark 9ede9b09-5875-4fbf-8a21-200346c8e415 accept "Проверено, ложное срабатывание"
 [mark] 9ede9b09-... -> accept (comment: Проверено, ложное срабатывание) ...
 Батч 1/1 (1): OK
 [mark] OK
 
+# (4) Массовая пометка по фильтру
 sonar:MEDMIS-MISmobile.doctor_api_spec> mark accept MEDIUM MAINTAINABILITY --yes
 Применяю переход...
 [console] applied to 87 issues in 1 batches
 [console] snapshot rebuild started in background ('status' to monitor)
 
+# (5) Dry-run AI-обработки, затем боевой запуск
+sonar:MEDMIS-MISmobile.doctor_api_spec> auto HIGH SECURITY
+...
+DRY RUN — ничего не изменено.
+Чтобы запустить обработку: auto HIGH SECURITY --yes
+
+sonar:MEDMIS-MISmobile.doctor_api_spec> auto HIGH SECURITY --yes
+=== Запуск массовой обработки через Ollama ===
+[auto] запущено в фоне. Для остановки введите 'stop'.
+sonar[auto]:MEDMIS-MISmobile.doctor_api_spec>
+
+# (6) Остановка auto (если передумали)
+sonar[auto]:MEDMIS-MISmobile.doctor_api_spec> stop
+[auto] запрошена остановка (текущий issue будет доработан, затем цикл завершится).
+...
+=== Результат ===
+Всего:         17
+Успешно:       15
+Ошибок:        2
+Остановлено:   да (по команде 'stop')
+...
+
+# (7) Точечный refresh после ручных правок
 sonar:MEDMIS-MISmobile.doctor_api_spec> refresh issue 1a2b3c4d-5e6f-7890-abcd-ef1234567890
 [console] refreshing issue 1a2b3c4d-... ...
   removed = true
   reason  = status_changed
   snapshot issues = 341
 
-sonar:MEDMIS-MISmobile.doctor_api_spec> cancelall MEDIUM MAINTAINABILITY --yes
-...
-[console] reopened 86 / 86 (failed: 0)
-
 sonar:MEDMIS-MISmobile.doctor_api_spec> quit
 [console] stopped
 [main] shutdown complete
 ```
 
-## Ключевые отличия консоли от REST
+---
 
-| | REST API | Console |
-|---|---|---|
-| Формат вывода | JSON | человекочитаемый |
-| `project` по умолчанию | `defaultProject` из env/CLI | `project <KEY>` (своя переменная) |
-| Dry-run | `?dryRun=true` (по умолчанию) | без `--yes` (по умолчанию) |
-| Доступ | по сети | только локально (stdin процесса) |
-| Авторизация | Bearer (если включён) | не нужна |
-| Подтверждение массовых операций | нет | `--yes` или интерактивно |
+## Ключевые отличия консоли от REST / Web
+
+| | REST API | Console | Web UI |
+|---|---|---|---|
+| Формат вывода | JSON | человекочитаемый | интерактивные вкладки |
+| `project` по умолчанию | `defaultProject` из env/CLI | `project <KEY>` (своя переменная) | поле `project` в шапке |
+| Dry-run | `?dryRun=true` (по умолчанию) | без `--yes` (по умолчанию) | модалка с кнопкой «Применить» |
+| Доступ | по сети | только локально (stdin процесса) | через браузер |
+| Авторизация | Bearer (если включён) | не нужна | не нужна |
+| Подтверждение массовых операций | нет | `--yes` или интерактивно | диалог/чекбокс |
+| Промпты | `GET /api/prompt/build`, `/api/prompt/list` | `prompt list`, `prompt <name> ...` | кнопка «Сгенерировать промпт» |
+| AI-обработка | ❌ нет отдельного эндпоинта | `auto [SEV] [QUAL] [--yes]` | «Добавить автоматически комментарий» |
+| Остановка AI | — | `stop` | кнопка «Остановить» |
+| Настройка Ollama | — | `ollama set ...` | ⚙ Ollama |
+| Экспорт в MD | — | — | 📥 Экспорт MD (вкладка Accepted) |
+
+### Важно про `auto`
+
+- **Промпт** для `auto` берётся из `prompts/auto-resolve.txt` — тот же файл, что и в web. Правки в файле применяются в консоли и в web одинаково.
+- **Fallback**: если файла нет / файл пуст / render упал — `auto` использует встроенный промпт `PromptBuilder.buildAutoResolvePrompt`. Это гарантирует, что обработка не остановится из-за отсутствия файла.
+- **Остановка**: `stop` — единственный способ корректно завершить auto, если она запущена. Kill процесса оставит SonarQube в промежуточном состоянии (какие-то issues обработаны, какие-то нет).
+- **Итоговый файл `auto-failed-*.txt`** создаётся всегда, если были ошибки — можно использовать для повторной обработки.

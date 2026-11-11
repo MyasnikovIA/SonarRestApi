@@ -26,7 +26,8 @@ public class Main {
         int snippetLimit = 0;
         boolean console = true;
 
-        String ollamaConfigFile = "ollama.properties";
+        String ollamaConfigFile  = "ollama.properties";
+        String consoleConfigFile = "console.properties";   // ← сохранённый project консоли
 
         for (int i = 0; i < args.length; i++) {
             String a = args[i];
@@ -39,6 +40,7 @@ public class Main {
             else if (a.startsWith("--project="))        project = a.substring("--project=".length());
             else if (a.startsWith("--snippet-limit="))  snippetLimit = Integer.parseInt(a.substring("--snippet-limit=".length()));
             else if (a.startsWith("--ollama-config="))  ollamaConfigFile = a.substring("--ollama-config=".length());
+            else if (a.startsWith("--console-config=")) consoleConfigFile = a.substring("--console-config=".length());
             else if ("--no-warmup".equals(a))           warmup = false;
             else if ("--async-warmup".equals(a))        asyncWarmup = true;
             else if ("--no-snippets".equals(a))         warmupSnippets = false;
@@ -62,7 +64,10 @@ public class Main {
                 + ", model=" + ollamaConfig.getModel() + ")");
 
         if (console) {
-            new Console(state, ollamaConfig).start();
+            // Передаём путь к файлу состояния консоли: последний project запоминается
+            // и восстанавливается при следующем запуске (если не задан --project=).
+            new Console(state, ollamaConfig, Path.of(consoleConfigFile)).start();
+            System.out.println("[main] Console state: " + consoleConfigFile);
         } else {
             System.out.println("[main] Console disabled (--no-console)");
         }

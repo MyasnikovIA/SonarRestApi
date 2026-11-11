@@ -8,20 +8,34 @@ import ru.miacomsoft.sonar.server.ollama.OllamaClient;
 import ru.miacomsoft.sonar.server.ollama.OllamaResponse;
 
 import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
 
+/**
+ * Интерактивная консоль. Дублирует REST-эндпоинты.
+ *
+ * Управление auto-обработкой:
+ *   auto [SEV] [QUAL] --yes  — запускает обработку в фоновом потоке.
+ *   stop                     — graceful-остановка.
+ *
+ * Последний выбранный в консоли project запоминается в console.properties
+ * и восстанавливается при следующем запуске (если не задан --project=).
+ */
 public class Console {
 
     private static final Set<String> KNOWN_TRANSITIONS = Set.of(
             "accept", "falsepositive", "confirm", "resolve", "wontfix", "reopen");
 
-    private final ServerState   state;
-    private final OllamaConfig  ollamaConfig;
+    private final ServerState    state;
+    private final OllamaConfig   ollamaConfig;
     private final PromptTemplate template;
+    private final Path           consoleStateFile;   // ← файл с сохранённым project
 
     private volatile String    project;
     private volatile boolean   running = true;
@@ -32,17 +46,74 @@ public class Console {
     private final Object consoleLock = new Object();
     private final Thread thread;
 
-    public Console(ServerState state, OllamaConfig ollamaConfig) {
-        this.state        = state;
-        this.ollamaConfig = ollamaConfig;
-        this.project      = state.getDefaultProject() != null ? state.getDefaultProject() : "";
-        this.template     = new PromptTemplate(BootstrapFiles.resolvePromptsDir());
-        this.thread       = new Thread(this::loop, "console");
+    /** Полный конструктор: путь к файлу состояния консоли передаётся извне. */
+    public Console(ServerState state, OllamaConfig ollamaConfig, Path consoleStateFile) {
+        this.state            = state;
+        this.ollamaConfig     = ollamaConfig;
+        this.consoleStateFile = consoleStateFile;
+        this.template         = new PromptTemplate(BootstrapFiles.resolvePromptsDir());
+
+        // Приоритет:
+        //   1) --project= / SONAR_PROJECT  (явно заданный при запуске)
+        //   2) сохранённый в console.properties (последний выбор в консоли)
+        //   3) пусто
+        String cliProject = state.getDefaultProject();
+        String saved      = loadSavedProject();
+        if (cliProject != null && !cliProject.isEmpty()) {
+            this.project = cliProject;
+        } else if (saved != null && !saved.isEmpty()) {
+            this.project = saved;
+            System.out.println("[console] восстановлен project из " + consoleStateFile + ": " + saved);
+        } else {
+            this.project = "";
+        }
+
+        this.thread = new Thread(this::loop, "console");
         this.thread.setDaemon(true);
+    }
+
+    /** Обратная совместимость: путь по умолчанию — ./console.properties. */
+    public Console(ServerState state, OllamaConfig ollamaConfig) {
+        this(state, ollamaConfig, Path.of("console.properties"));
     }
 
     public void start() { thread.start(); }
     public void stop()  { running = false; }
+
+    // ==================== сохранение состояния ====================
+
+    private String loadSavedProject() {
+        if (consoleStateFile == null || !Files.exists(consoleStateFile)) return "";
+        try (InputStream in = Files.newInputStream(consoleStateFile)) {
+            Properties p = new Properties();
+            p.load(in);
+            return p.getProperty("project", "").trim();
+        } catch (IOException e) {
+            System.err.println("[console] не удалось прочитать " + consoleStateFile
+                    + ": " + e.getMessage());
+            return "";
+        }
+    }
+
+    private void saveProject(String value) {
+        if (consoleStateFile == null) return;
+        try {
+            Properties p = new Properties();
+            p.setProperty("project", value == null ? "" : value);
+
+            Path parent = consoleStateFile.toAbsolutePath().getParent();
+            if (parent != null) Files.createDirectories(parent);
+
+            try (OutputStream out = Files.newOutputStream(consoleStateFile)) {
+                p.store(out, "Console state (last selected project)");
+            }
+        } catch (IOException e) {
+            System.err.println("[console] не удалось сохранить " + consoleStateFile
+                    + ": " + e.getMessage());
+        }
+    }
+
+    // ==================== main loop ====================
 
     private void loop() {
         BufferedReader r = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8));
@@ -50,6 +121,7 @@ public class Console {
         System.out.println("===================================================");
         System.out.println(" Console ready. Type 'help' for commands.");
         System.out.println(" Prompts dir: " + template.getPromptsDir());
+        System.out.println(" Console state: " + consoleStateFile);
         System.out.println("===================================================");
         try {
             while (running) {
@@ -79,6 +151,8 @@ public class Console {
         String mode = autoRunning ? "[auto]" : "";
         return "sonar" + mode + ":" + p + "> ";
     }
+
+    // ==================== dispatch ====================
 
     private void dispatch(String line) throws Exception {
         String[] tokens = line.split("\\s+");
@@ -151,6 +225,7 @@ public class Console {
                 + (state.getDefaultProject().isEmpty() ? "<not set>" : state.getDefaultProject()));
         System.out.println("consoleProject = "
                 + (project == null || project.isEmpty() ? "<not set>" : project));
+        System.out.println("consoleState   = " + consoleStateFile);
         System.out.println("autoRunning    = " + autoRunning);
         System.out.println("promptsDir     = " + template.getPromptsDir());
     }
@@ -168,16 +243,21 @@ public class Console {
                     + (project == null || project.isEmpty() ? "<not set>" : project));
             System.out.println("defaultProject  = "
                     + (state.getDefaultProject().isEmpty() ? "<not set>" : state.getDefaultProject()));
+            System.out.println("consoleState    = " + consoleStateFile);
             return;
         }
         if ("clear".equalsIgnoreCase(a[0])) {
             project = "";
-            System.out.println("[console] project cleared");
+            saveProject("");
+            System.out.println("[console] project cleared (state saved)");
             return;
         }
         project = a[0];
-        System.out.println("[console] console project = " + project);
+        saveProject(project);
+        System.out.println("[console] console project = " + project + " (state saved)");
     }
+
+    // ==================== session ====================
 
     private void cmdSession(String[] a) throws Exception {
         if (a.length == 0) { sessionHelp(); return; }
@@ -231,6 +311,8 @@ public class Console {
         System.out.println("  session save <path>       — сохранить текущий raw в файл");
     }
 
+    // ==================== refresh ====================
+
     private void cmdRefresh(String[] a) throws Exception {
         if (a.length > 0 && "issue".equalsIgnoreCase(a[0])) {
             if (a.length < 2) { System.out.println("usage: refresh issue <KEY>"); return; }
@@ -271,6 +353,8 @@ public class Console {
         System.out.println("[console] refresh " + (started ? "started" : "not started")
                 + " for " + project + ". Use 'status' to monitor.");
     }
+
+    // ==================== reports ====================
 
     private void cmdSummary(String[] a) throws Exception {
         if (!requireProject()) return;
@@ -423,7 +507,6 @@ public class Console {
 
         switch (name) {
             case "status-comment", "auto-resolve", "analyze-issue" -> {
-                // Одиночный issue
                 Issue it = null;
                 if (issueKey != null) {
                     it = api.fetchIssue(issueKey);
@@ -1060,6 +1143,8 @@ public class Console {
         }
     }
 
+    // ==================== progress ====================
+
     private void printProgress(AutoProcessor.Progress p) {
         if (p == null || p.total == 0) return;
         String line;
@@ -1079,6 +1164,8 @@ public class Console {
         }
         System.err.println(color + line + "\u001B[0m");
     }
+
+    // ==================== helpers ====================
 
     private boolean requireProject() {
         if (project == null || project.isEmpty()) {
@@ -1138,6 +1225,9 @@ public class Console {
           status                  — состояние сессии, снимка и auto-обработки
           health                  — краткая проверка
           project [KEY | clear]   — показать/задать консольный project
+                                    (последний выбор запоминается в console.properties
+                                     и восстанавливается при следующем запуске,
+                                     если не задан --project=)
 
         Сессия:
           session show            — прочитать session.txt

@@ -41,3 +41,5 @@ build/
 
 
 session.txt
+console.properties
+ollama.properties

@@ -1,6 +1,7 @@
 package ru.miacomsoft.sonar;
 
 import ru.miacomsoft.sonar.server.ApiServer;
+import ru.miacomsoft.sonar.server.BootstrapFiles;
 import ru.miacomsoft.sonar.server.Console;
 import ru.miacomsoft.sonar.server.OllamaConfig;
 import ru.miacomsoft.sonar.server.ServerState;
@@ -25,7 +26,6 @@ public class Main {
         int snippetLimit = 0;
         boolean console = true;
 
-        // NEW: путь к конфигу Ollama
         String ollamaConfigFile = "ollama.properties";
 
         for (int i = 0; i < args.length; i++) {
@@ -38,7 +38,7 @@ public class Main {
             else if (a.startsWith("--session="))        sessionFile = a.substring("--session=".length());
             else if (a.startsWith("--project="))        project = a.substring("--project=".length());
             else if (a.startsWith("--snippet-limit="))  snippetLimit = Integer.parseInt(a.substring("--snippet-limit=".length()));
-            else if (a.startsWith("--ollama-config="))  ollamaConfigFile = a.substring("--ollama-config=".length()); // NEW
+            else if (a.startsWith("--ollama-config="))  ollamaConfigFile = a.substring("--ollama-config=".length());
             else if ("--no-warmup".equals(a))           warmup = false;
             else if ("--async-warmup".equals(a))        asyncWarmup = true;
             else if ("--no-snippets".equals(a))         warmupSnippets = false;
@@ -47,23 +47,26 @@ public class Main {
             else if (i == 1)                            project = a;
         }
 
+        // ---------- BOOTSTRAP: создать недостающие файлы ----------
+        Path sessionPath = Path.of(sessionFile);
+        Path promptsDir  = BootstrapFiles.resolvePromptsDir();
+        BootstrapFiles.ensureAll(sessionPath, promptsDir);
+
         ServerState state = new ServerState(
-                Path.of(sessionFile), project, batchSize, delayMs,
+                sessionPath, project, batchSize, delayMs,
                 warmupSnippets, snippetLimit);
 
-        // NEW: конфиг Ollama — создаётся всегда (читает файл, если есть)
         OllamaConfig ollamaConfig = new OllamaConfig(Path.of(ollamaConfigFile));
         System.out.println("[main] Ollama config: " + ollamaConfig.getConfigFile()
                 + " (url=" + ollamaConfig.getUrl()
                 + ", model=" + ollamaConfig.getModel() + ")");
 
         if (console) {
-            new Console(state, ollamaConfig).start();          // ← передаём конфиг
+            new Console(state, ollamaConfig).start();
         } else {
             System.out.println("[main] Console disabled (--no-console)");
         }
 
-        // ... остальной код (warmup, ApiServer.start) без изменений ...
         if (warmup) {
             if (!state.isSessionReady()) {
                 System.out.println("[Warmup] SKIP: сессия не загружена");

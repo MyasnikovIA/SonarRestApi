@@ -256,7 +256,7 @@ public class AutoProcessor {
         if (onProgress != null) onProgress.update(done);
 
         long totalSec = (System.currentTimeMillis() - runT0) / 1000;
-        System.err.printf("[auto] завершено за %dm %ds%n", totalSec / 60, totalSec % 60);
+        System.out.printf("[auto] завершено за %dm %ds%n", totalSec / 60, totalSec % 60);
 
         return stats;
     }
@@ -283,5 +283,18 @@ public class AutoProcessor {
     private static String sanitize(String s) {
         if (s == null) return "project";
         return s.replaceAll("[^A-Za-z0-9._-]", "_");
+    }
+    /**
+     * Null-safe описание исключения: имя класса + message.
+     * Windows-сокеты бросают ConnectException без message — тогда
+     * возвращается полное имя класса, чтобы сообщение не было "null".
+     */
+    private static String describeException(Throwable e) {
+        if (e == null) return "unknown";
+        String msg = e.getMessage();
+        if (msg == null || msg.isEmpty()) {
+            return e.getClass().getName();
+        }
+        return e.getClass().getSimpleName() + ": " + msg;
     }
 }

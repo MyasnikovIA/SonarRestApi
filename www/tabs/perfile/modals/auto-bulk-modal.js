@@ -7,14 +7,14 @@ import {
     fetchAvailableTags,
     buildOrderedTags,
     renderTagCheckboxes,
-    setIssueTags
+    setIssueTags,
+    applyParsedTags
 } from '../tags.js';
 
 export function openAutoBulkModal(issues, ctx, reloadCb) {
     if (!issues.length) { toast('Нет доступных issues для изменения', true); return; }
 
     (async () => {
-        // Доступные теги + дополняем текущими тегами всех issues
         const availableTags = await fetchAvailableTags(ctx);
         for (const it of issues) {
             (it.tags || []).forEach(t => {
@@ -68,7 +68,6 @@ export function openAutoBulkModal(issues, ctx, reloadCb) {
 
                         <div id="auto-ai-tags-hint" style="display:none; margin-bottom:12px; padding:8px; background:var(--bg3); border:1px solid var(--accent); border-radius:6px; font-size:12px;"></div>
 
-                        <!-- NEW: inline-выбор тегов -->
                         <div style="margin-bottom:12px;">
                             <label style="display:block; font-size:12px; margin-bottom:4px;">Теги</label>
                             <input type="text" id="auto-tags-filter" placeholder="Фильтр по тегам..."
@@ -124,11 +123,9 @@ export function openAutoBulkModal(issues, ctx, reloadCb) {
         let isProcessing = false;
         let hasGenerated = false;
         let abortController = null;
-        let currentSuggestedTags = [];   // только для отображения в hint
-        let selectedTags = new Set();    // источник истины для apply
+        let currentSuggestedTags = [];
+        let selectedTags = new Set();
         let tagsQuery = '';
-
-        // ---------- Inline-теги ----------
 
         function renderAutoTagList() {
             const it = issues[currentIndex];
@@ -159,10 +156,7 @@ export function openAutoBulkModal(issues, ctx, reloadCb) {
             }
         });
 
-        // Начальная загрузка
         loadCurrentTags();
-
-        // ---------- Закрытие ----------
 
         const close = () => {
             if (isProcessing || hasGenerated) {
@@ -176,13 +170,10 @@ export function openAutoBulkModal(issues, ctx, reloadCb) {
         overlay.querySelector('.modal-close').addEventListener('click', close);
         overlay.querySelector('#auto-btn-cancel').addEventListener('click', close);
 
-        // ---------- Кнопка "🏷️ Изменить теги" (fallback) ----------
-
         ui.btnTags.addEventListener('click', () => {
             if (currentIndex >= issues.length) return;
             const it = issues[currentIndex];
             showTagEditor([it], ctx, async () => {
-                // Перечитываем it.tags с сервера и синхронизируем inline-список
                 try {
                     const p = new URLSearchParams();
                     if (ctx.state.project) p.set('project', ctx.state.project);
@@ -200,8 +191,6 @@ export function openAutoBulkModal(issues, ctx, reloadCb) {
                 loadCurrentTags();
             });
         });
-
-        // ---------- UI ----------
 
         function updateUI() {
             if (currentIndex >= issues.length) {
@@ -238,8 +227,6 @@ export function openAutoBulkModal(issues, ctx, reloadCb) {
             }
         }
 
-        // ---------- Обработка ----------
-
         async function processNext() {
             if (isProcessing || currentIndex >= issues.length) return;
             isProcessing = true;
@@ -251,16 +238,8 @@ export function openAutoBulkModal(issues, ctx, reloadCb) {
             ui.log.textContent = 'Подготовка данных...';
 
             try {
-                if (!it.snippet || !it.snippet.length) {
-                    const p = new URLSearchParams();
-                    if (ctx.state.project) p.set('project', ctx.state.project);
-                    p.set('issueKey', it.key);
-                    const d = await ctx.api('/api/snippet?' + p);
-                    it.snippet = d.snippet || [];
-                    it.ruleName = d.ruleName || it.rule;
-                }
+                const prompt = await buildAutoResolvePromptAsync(ctx, it.key);
 
-                const prompt = buildAutoResolvePromptAsync(it, ctx, availableTags);
                 const settings = OllamaClient.getSettings();
                 if (!settings.url || !settings.model) throw new Error("Ollama не настроена. Нажмите ⚙ Ollama.");
 
@@ -293,18 +272,20 @@ export function openAutoBulkModal(issues, ctx, reloadCb) {
                 ui.statusSel.value = parsed.status;
                 ui.commentTa.value = parsed.comment;
 
-                // AI-теги → в selectedTags + в availableTags + рендер
                 currentSuggestedTags = parsed.tags || [];
                 if (currentSuggestedTags.length > 0) {
-                    currentSuggestedTags.forEach(tag => {
-                        if (!availableTags.includes(tag)) availableTags.push(tag);
-                        selectedTags.add(tag);
-                    });
+                    // ИСПРАВЛЕНО: взаимоисключающие теги снимаются автоматически
+                    const { removed } = applyParsedTags(selectedTags, currentSuggestedTags, availableTags);
+                    renderAutoTagList();
+
                     ui.aiTagsHint.style.display = 'block';
-                    ui.aiTagsHint.innerHTML = `🤖 AI предлагает теги: <b>${esc(currentSuggestedTags.join(', '))}</b>
-                        <span style="color:var(--text-dim);"> (отмечены в списке ниже — поправьте при необходимости)</span>`;
+                    let msg = `🤖 AI предлагает теги: <b>${esc(currentSuggestedTags.join(', '))}</b>`;
+                    if (removed.length > 0) {
+                        msg += `<br><span style="color:var(--warn);">Снято (взаимоисключающие): ${esc(removed.join(', '))}</span>`;
+                    }
+                    msg += `<br><span style="color:var(--text-dim);"> (отмечены в списке ниже — поправьте при необходимости)</span>`;
+                    ui.aiTagsHint.innerHTML = msg;
                 }
-                renderAutoTagList();
 
                 hasGenerated = true;
                 ui.progress.textContent = 'Готово к применению';
@@ -362,7 +343,6 @@ export function openAutoBulkModal(issues, ctx, reloadCb) {
                 const res = await ctx.api('/api/mark?' + p, { method: 'POST' });
                 if (res.success === false) throw new Error(res.error || 'Ошибка применения');
 
-                // Применяем ровно то, что пользователь отметил в inline-списке
                 const tagsStr = [...selectedTags].join(',');
                 const tagsChanged = tagsStr !== (it.tags || []).join(',');
                 if (tagsChanged) {
@@ -378,7 +358,7 @@ export function openAutoBulkModal(issues, ctx, reloadCb) {
                 }
 
                 it.status = status;
-                it.tags = [...selectedTags];   // фиксируем локально
+                it.tags = [...selectedTags];
 
                 currentIndex++;
                 hasGenerated = false;
@@ -387,7 +367,7 @@ export function openAutoBulkModal(issues, ctx, reloadCb) {
                 ui.log.textContent = 'Успешно применено. Переход к следующей...';
 
                 isProcessing = false;
-                loadCurrentTags();             // NEW: обновить inline-теги под новую issue
+                loadCurrentTags();
                 updateUI();
 
                 if (currentIndex < issues.length) {
@@ -409,14 +389,12 @@ export function openAutoBulkModal(issues, ctx, reloadCb) {
             currentSuggestedTags = [];
             ui.commentTa.value = '';
             ui.log.textContent = 'Пропущено пользователем.';
-            loadCurrentTags();                 // NEW: обновить inline-теги под новую issue
+            loadCurrentTags();
             updateUI();
             if (currentIndex < issues.length) {
                 processNext();
             }
         }
-
-        // ---------- Кнопки ----------
 
         ui.btnStart.addEventListener('click', () => {
             if (currentIndex >= issues.length) return;

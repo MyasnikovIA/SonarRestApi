@@ -3,12 +3,14 @@ import { bindOllamaResolveButton, bindOllamaSettingsButton } from '../../../olla
 import { getMappedStatus, getReopenTransition } from '../status.js';
 import { parseOllamaResponse } from '../parse-response.js';
 import { buildStatusCommentPrompt } from '../prompts.js';
+import { bindStatusPromptButton } from '../helpers.js';
 import {
     PRIORITY_TAGS,
     fetchAvailableTags,
     buildOrderedTags,
     renderTagCheckboxes,
-    setIssueTags
+    setIssueTags,
+    applyParsedTags
 } from '../tags.js';
 
 export async function openIssueModal(issue, ctx, reloadCb) {
@@ -151,31 +153,12 @@ export async function openIssueModal(issue, ctx, reloadCb) {
             }
         });
 
-        overlay.querySelector('#modal-btn-gen-prompt').addEventListener('click', async () => {
-            const sel = overlay.querySelector('#modal-status');
-            const status = sel.value;
-            const statusLabel = sel.selectedOptions[0].textContent.trim();
-            const prompt = buildStatusCommentPrompt(it, d.ruleName, d.snippet, status, statusLabel, availableTags);
-
-            console.groupCollapsed('[Prompt] generated');
-            console.log(prompt);
-            console.groupEnd();
-
-            try {
-                await navigator.clipboard.writeText(prompt);
-                toast('Промпт скопирован в буфер обмена');
-            } catch (e) {
-                const ta = overlay.querySelector('#modal-comment');
-                ta.value = prompt;
-                ta.focus(); ta.select();
-                toast('Промпт вставлен в поле комментария', true);
-            }
-        });
+        bindStatusPromptButton(overlay, it, d.ruleName, d.snippet, ctx);
 
         bindOllamaResolveButton(overlay, {
             ctx,
             buildPrompt: (status, statusLabel) =>
-                buildStatusCommentPrompt(it, d.ruleName, d.snippet, status, statusLabel, availableTags),
+                buildStatusCommentPrompt(ctx, it.key, status, statusLabel),
             commentSelector: '#modal-comment',
             onComplete: (fullResponse) => {
                 const parsed = parseOllamaResponse(fullResponse);
@@ -187,16 +170,18 @@ export async function openIssueModal(issue, ctx, reloadCb) {
                 if (commentTa) commentTa.value = parsed.comment;
 
                 if (parsed.tags && parsed.tags.length > 0) {
-                    parsed.tags.forEach(tag => {
-                        if (!availableTags.includes(tag)) availableTags.push(tag);
-                        selectedTags.add(tag);
-                    });
+                    // ИСПРАВЛЕНО: взаимоисключающие теги снимаются автоматически
+                    const { removed } = applyParsedTags(selectedTags, parsed.tags, availableTags);
                     renderModalTagList();
 
                     const hint = overlay.querySelector('#modal-ai-tags-hint');
                     hint.style.display = 'block';
-                    hint.innerHTML = `🤖 AI предлагает теги: <b>${esc(parsed.tags.join(', '))}</b>
-                        <span style="color:var(--text-dim);"> (отмечены в списке выше)</span>`;
+                    let msg = `🤖 AI предлагает теги: <b>${esc(parsed.tags.join(', '))}</b>`;
+                    if (removed.length > 0) {
+                        msg += `<br><span style="color:var(--warn);">Снято (взаимоисключающие): ${esc(removed.join(', '))}</span>`;
+                    }
+                    msg += `<br><span style="color:var(--text-dim);"> (отмечены в списке выше)</span>`;
+                    hint.innerHTML = msg;
                 }
             }
         });

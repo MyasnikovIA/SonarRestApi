@@ -1,27 +1,46 @@
 /**
  * Парсер ответа Ollama: { status, comment, tags, fixDecision }.
  * Гарантирует наличие ровно одного фикс-тега: require-fix | not-require-fix.
+ *
+ * Теги в ответе LLM могут быть разделены:
+ *   - запятыми           "require-fix, code-smell"
+ *   - точками с запятой  "require-fix; code-smell"
+ *   - пробелами          "require-fix code-smell generated-code"
+ *   - любой их смесью    "require-fix, code-smell;generated-code"
+ *
+ * Каждый тег приводится к нижнему регистру и проверяется regexp'ом
+ * SonarQube ^[a-z0-9\+#\-\.]+$ — невалидные теги отбрасываются
+ * (например "require-fix code-smell generated-code" как один токен
+ * после нормального split уже не получится, но если LLM вернёт
+ * что-то с кириллицей или подчёркиванием — оно будет отброшено).
  */
 export function parseOllamaResponse(raw) {
     const text = String(raw || '');
+
     let status = '';
     let comment = '';
     let tags = [];
 
+    // ---------- Статус ----------
     const statusMatch = text.match(/Статус:\s*(accept|falsepositive|confirm|resolve|wontfix)/i);
     if (statusMatch) status = statusMatch[1].toLowerCase();
 
+    // ---------- Теги ----------
     const tagsMatch = text.match(/Теги:\s*([^\n]+)/i);
     if (tagsMatch) {
         tags = tagsMatch[1]
-            .split(/[,;]/)
-            .map(t => t.replace(/[*_`]/g, '').trim().toLowerCase())
-            .filter(t => t.length > 0);
+            .replace(/[*_`]/g, '')                  // снять markdown: **tag**, `tag`, _tag_
+            .toLowerCase()
+            .split(/[,;\s]+/)                       // разделители: , ; пробел \t
+            .map(t => t.trim())
+            .filter(t => /^[a-z0-9\+\#\-\.]+$/.test(t));  // SonarQube regexp
     }
 
+    // ---------- Взаимоисключающие фикс-теги ----------
     const hasRequire    = tags.includes('require-fix');
     const hasNotRequire = tags.includes('not-require-fix');
 
+    // Убираем оба из общего списка, чтобы вставить обратно только выбранный
     tags = tags.filter(t => t !== 'require-fix' && t !== 'not-require-fix');
 
     let fixDecision;
@@ -32,6 +51,7 @@ export function parseOllamaResponse(raw) {
     tags.unshift(fixDecision);
     tags = tags.slice(0, 3);
 
+    // ---------- Комментарий ----------
     const lines = text.split(/\r?\n/);
     const commentLines = [];
     let inComment = false;
@@ -47,6 +67,9 @@ export function parseOllamaResponse(raw) {
         if (inComment) commentLines.push(line);
     }
     comment = commentLines.join('\n').trim();
+
+    // Fallback: если «Критичность:» не встретилась — берём всё,
+    // кроме служебных строк «Статус:» и «Теги:»
     if (!comment) {
         comment = lines
             .filter(l => !/^Статус:/i.test(l.trim()) && !/^Теги:/i.test(l.trim()))

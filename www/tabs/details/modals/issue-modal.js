@@ -1,10 +1,15 @@
-import { esc, highlightCode, toast } from '../../../common.js';
-import { showTagEditor } from '../../../common.js';
+import { esc, toast, highlightCode } from '../../../common.js';
 import { bindOllamaResolveButton, bindOllamaSettingsButton } from '../../../ollama.js';
 import { getMappedStatus, getReopenTransition } from '../status.js';
 import { parseOllamaResponse } from '../parse-response.js';
 import { buildStatusCommentPrompt } from '../prompts.js';
-import { bindStatusPromptButton } from '../helpers.js';
+import {
+    PRIORITY_TAGS,
+    fetchAvailableTags,
+    buildOrderedTags,
+    renderTagCheckboxes,
+    setIssueTags
+} from '../tags.js';
 
 export async function openIssueModal(issue, ctx, reloadCb) {
     const overlay = document.createElement('div');
@@ -33,8 +38,22 @@ export async function openIssueModal(issue, ctx, reloadCb) {
         const d = await ctx.api('/api/snippet?' + p);
         const it = d.issue || issue;
 
+        const availableTags = await fetchAvailableTags(ctx);
+
         const currentStatusValue = getMappedStatus(it.status);
         const canReopen = it.status && it.status !== 'OPEN' && it.status !== 'REOPENED';
+
+        const currentTags = it.tags || [];
+        currentTags.forEach(t => { if (!availableTags.includes(t)) availableTags.push(t); });
+
+        const initialTags = [...currentTags];
+        const selectedTags = new Set(initialTags);
+        let tagsQuery = '';
+
+        function renderModalTagList() {
+            const ordered = buildOrderedTags(availableTags, initialTags, PRIORITY_TAGS, tagsQuery);
+            renderTagCheckboxes(overlay.querySelector('#modal-tags-list'), ordered, selectedTags);
+        }
 
         const comments = it.comments || d.comments || [];
         const commentsHtml = comments.length > 0 ? `
@@ -71,6 +90,23 @@ export async function openIssueModal(issue, ctx, reloadCb) {
 
             ${commentsHtml}
 
+            <div style="margin-top:16px;">
+                <label style="display:block; font-size:12px; margin-bottom:4px;">Теги</label>
+                <input type="text" id="modal-tags-filter" placeholder="Фильтр по тегам..."
+                       style="width:100%; box-sizing:border-box; padding:6px 10px; margin-bottom:8px;
+                              border-radius:6px; border:1px solid var(--border);
+                              background:var(--bg); color:var(--text);">
+                <div id="modal-tags-list"
+                     style="max-height:200px; overflow-y:auto; display:flex; flex-wrap:wrap;
+                            gap:6px; padding:8px; background:var(--bg3);
+                            border:1px solid var(--border); border-radius:6px;"></div>
+            </div>
+
+            <div id="modal-ai-tags-hint"
+                 style="display:none; margin-top:12px; padding:8px;
+                        background:var(--bg3); border:1px solid var(--accent);
+                        border-radius:6px; font-size:12px;"></div>
+
             <div style="margin-top:20px; padding-top:16px; border-top:1px solid var(--border);">
                 <div style="margin-bottom:12px;">
                     <label style="display:block; font-size:12px; margin-bottom:4px;">Статус перехода</label>
@@ -84,13 +120,12 @@ export async function openIssueModal(issue, ctx, reloadCb) {
                 </div>
                 <div>
                     <label style="display:block; font-size:12px; margin-bottom:4px;">Новый комментарий (старые сохраняются в истории SonarQube)</label>
-                    <textarea id="modal-comment" rows="4" style="width:100%; padding:8px; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:6px; resize:vertical;" placeholder="Введите новый комментарий для изменения/дополнения..."></textarea>
+                    <textarea id="modal-comment" rows="4" style="width:100%; padding:8px; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:6px; resize:vertical;" placeholder="Введите новый комментарий..."></textarea>
                 </div>
                 <div style="margin-top:16px; display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;">
                     <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
                         <button id="modal-btn-gen-prompt" type="button" class="btn" title="Сформировать промпт для LLM">Сгенерировать промпт</button>
-                        <button id="modal-btn-ai-resolve" type="button" class="btn" title="Отправить промпт в Ollama и вставить ответ в поле «Комментарий»">Получить резолюцию ИИ</button>
-                        <button id="modal-btn-tags" type="button" class="btn">🏷️ Изменить теги</button>
+                        <button id="modal-btn-ai-resolve" type="button" class="btn" title="Отправить промпт в Ollama">Получить резолюцию ИИ</button>
                         ${canReopen ? `<button id="modal-btn-reopen" class="btn btn-danger">Отменить комментарий (Reopen)</button>` : ''}
                     </div>
                     <div style="display:flex; gap:8px; align-items:center;">
@@ -102,44 +137,60 @@ export async function openIssueModal(issue, ctx, reloadCb) {
             </div>
         `;
 
+        renderModalTagList();
+
+        overlay.querySelector('#modal-tags-filter').addEventListener('input', (e) => {
+            tagsQuery = e.target.value;
+            renderModalTagList();
+        });
+
+        overlay.querySelector('#modal-tags-list').addEventListener('change', (e) => {
+            if (e.target.classList.contains('tag-cb')) {
+                if (e.target.checked) selectedTags.add(e.target.value);
+                else                  selectedTags.delete(e.target.value);
+            }
+        });
+
+        // Кнопка "Сгенерировать промпт" — из helpers, теперь вызывает API
+        // (ruleName и snippet больше не передаём — сервер достаёт сам)
         bindStatusPromptButton(overlay, it, d.ruleName, d.snippet, ctx);
 
         bindOllamaResolveButton(overlay, {
             ctx,
             buildPrompt: (status, statusLabel) =>
-                buildStatusCommentPrompt(it, d.ruleName, d.snippet, status, statusLabel),
+                buildStatusCommentPrompt(ctx, it.key, status, statusLabel),
             commentSelector: '#modal-comment',
             onComplete: (fullResponse) => {
                 const parsed = parseOllamaResponse(fullResponse);
 
-                console.log("=== PARSED RESULT ===");
-                console.log("Status:", parsed.status);
-                console.log("Comment:", parsed.comment);
-                console.log("=====================");
-
                 const statusSelect = overlay.querySelector('#modal-status');
-                if (statusSelect && parsed.status) {
-                    statusSelect.value = parsed.status;
-                }
+                if (statusSelect && parsed.status) statusSelect.value = parsed.status;
 
                 const commentTa = overlay.querySelector('#modal-comment');
-                if (commentTa) {
-                    commentTa.value = parsed.comment;
+                if (commentTa) commentTa.value = parsed.comment;
+
+                if (parsed.tags && parsed.tags.length > 0) {
+                    parsed.tags.forEach(tag => {
+                        if (!availableTags.includes(tag)) availableTags.push(tag);
+                        selectedTags.add(tag);
+                    });
+                    renderModalTagList();
+
+                    const hint = overlay.querySelector('#modal-ai-tags-hint');
+                    hint.style.display = 'block';
+                    hint.innerHTML = `🤖 AI предлагает теги: <b>${esc(parsed.tags.join(', '))}</b>
+                        <span style="color:var(--text-dim);"> (отмечены в списке выше)</span>`;
                 }
             }
         });
         bindOllamaSettingsButton(overlay, ctx);
 
-        overlay.querySelector('#modal-btn-tags').addEventListener('click', () => {
-            showTagEditor([it], ctx, () => {
-                close();
-                reloadCb();
-            });
-        });
-
         overlay.querySelector('#modal-btn-apply').addEventListener('click', async () => {
             const status = overlay.querySelector('#modal-status').value;
             const comment = overlay.querySelector('#modal-comment').value;
+            const tagsStr = [...selectedTags].join(',');
+            const tagsChanged = tagsStr !== (it.tags || []).join(',');
+
             try {
                 const p = new URLSearchParams(ctx.qs());
                 p.set('key', it.key);
@@ -148,6 +199,19 @@ export async function openIssueModal(issue, ctx, reloadCb) {
                 p.set('dryRun', 'false');
                 const res = await ctx.api('/api/mark?' + p, { method: 'POST' });
                 if (res.success === false) throw new Error(res.error || 'Ошибка применения');
+
+                if (tagsChanged) {
+                    try {
+                        const result = await setIssueTags(ctx, it.key, [...selectedTags]);
+                        if (result.errors && result.errors.length > 0) {
+                            ctx.toast('Теги не установлены: ' + result.errors[0].message, true);
+                        }
+                    } catch (e) {
+                        console.warn('Не удалось применить теги:', e);
+                        ctx.toast('Статус применён, но теги не установлены: ' + e.message, true);
+                    }
+                }
+
                 ctx.toast('Успешно применено');
                 close();
                 ctx.refreshStatus?.();

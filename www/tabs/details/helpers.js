@@ -34,6 +34,11 @@ export function flashButton(btn, text, ms) {
     }, ms || 1500);
 }
 
+/**
+ * Привязывает кнопку "Сгенерировать промпт" к модалке.
+ * ruleName и snippet больше не нужны — сервер достаёт их сам
+ * (сигнатура сохранена для обратной совместимости с вызывающими).
+ */
 export function bindStatusPromptButton(overlay, issue, ruleName, snippet, ctx) {
     const btn = overlay.querySelector('#modal-btn-gen-prompt');
     if (!btn) return;
@@ -45,7 +50,14 @@ export function bindStatusPromptButton(overlay, issue, ruleName, snippet, ctx) {
             ? sel.selectedOptions[0].textContent.trim()
             : status;
 
-        const prompt = buildStatusCommentPrompt(issue, ruleName, snippet, status, statusLabel);
+        let prompt;
+        try {
+            prompt = await buildStatusCommentPrompt(ctx, issue.key, status, statusLabel);
+        } catch (e) {
+            toast('Не удалось построить промпт: ' + e.message, true);
+            return;
+        }
+
         const ok = await copyToClipboard(prompt);
 
         if (ok) {

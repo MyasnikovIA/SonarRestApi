@@ -2,6 +2,19 @@ import { esc } from '../../common.js';
 
 export const PRIORITY_TAGS = ['CWE', 'not-require-fix', 'require-fix'];
 
+/**
+ * Взаимоисключающие (противоположные) теги.
+ * Если в ответе LLM приходит тег из ключа — все теги из массива значений
+ * снимаются с selectedTags ПЕРЕД добавлением нового.
+ *
+ * Расширяйте по мере необходимости. Текущие пары:
+ *   require-fix     ⟷ not-require-fix
+ */
+export const OPPOSITE_TAGS = {
+    'require-fix':     ['not-require-fix'],
+    'not-require-fix': ['require-fix'],
+};
+
 export async function fetchAvailableTags(ctx) {
     try {
         const d = await ctx.api('/api/tags');
@@ -42,6 +55,52 @@ export function renderTagCheckboxes(container, orderedTags, selectedTags) {
             ${esc(t)}
         </label>
     `).join('');
+}
+
+/**
+ * Применяет теги из ответа LLM к selectedTags:
+ *   1. Сначала снимает взаимоисключающие (противоположные) теги.
+ *   2. Затем добавляет новые теги (и пополняет availableTags).
+ *   3. Гарантирует: в selectedTags остаётся ровно ОДИН фикс-тег
+ *      (require-fix ИЛИ not-require-fix, но не оба сразу).
+ *
+ * @param {Set<string>}  selectedTags  — текущее состояние чекбоксов (мутируется)
+ * @param {string[]}     parsedTags    — теги из parseOllamaResponse().tags
+ * @param {string[]}     availableTags — список доступных тегов (мутируется)
+ * @returns {{ removed: string[], added: string[] }}
+ */
+export function applyParsedTags(selectedTags, parsedTags, availableTags) {
+    const removed = [];
+    const added = [];
+
+    if (!parsedTags || parsedTags.length === 0) {
+        return { removed, added };
+    }
+
+    // 1. Снимаем противоположные теги (для каждой новой пары)
+    for (const newTag of parsedTags) {
+        const opposites = OPPOSITE_TAGS[newTag] || [];
+        for (const opp of opposites) {
+            if (selectedTags.has(opp)) {
+                selectedTags.delete(opp);
+                removed.push(opp);
+            }
+        }
+    }
+
+    // 2. Добавляем новые теги (и пополняем availableTags)
+    for (const tag of parsedTags) {
+        if (!tag || tag.trim() === '') continue;
+        if (!availableTags.includes(tag)) {
+            availableTags.push(tag);
+        }
+        if (!selectedTags.has(tag)) {
+            selectedTags.add(tag);
+            added.push(tag);
+        }
+    }
+
+    return { removed, added };
 }
 
 /**

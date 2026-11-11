@@ -60,25 +60,15 @@ export function statusBadge(status) {
         'FIXED':          { icon: '✔',  text: 'исправлено' },
         'WONTFIX':        { icon: '✗',  text: 'не исправлять' },
         'CLOSED':         { icon: '⛔', text: 'закрыто' },
-        // Security Hotspots
         'TO_REVIEW':      { icon: '⚠',  text: 'к проверке' },
         'REVIEWED':       { icon: '✔',  text: 'проверено' }
     };
     const m = map[s] || { icon: '💬', text: s.toLowerCase() };
-
     return `<span class="status-tag" data-status="${esc(s)}" title="Статус: ${esc(s)}">${m.icon} ${m.text}</span>`;
 }
 
 // ==================== TAGS EDITOR ====================
 
-// ==================== TAGS EDITOR ====================
-
-/**
- * Открывает модальное окно для редактирования тегов группы issues.
- * @param {Array} issues - список issue (должен содержать .key и .tags)
- * @param {Object} ctx - контекст приложения
- * @param {Function} onDone - коллбэк после успешного сохранения
- */
 export async function showTagEditor(issues, ctx, onDone) {
     if (!issues.length) return;
 
@@ -95,31 +85,24 @@ export async function showTagEditor(issues, ctx, onDone) {
         console.warn('Не удалось загрузить доступные теги', e);
     }
 
-    // Добавляем текущие теги, если их нет в доступных (кастомные/устаревшие)
     initialTags.forEach(t => {
         if (!availableTags.includes(t)) availableTags.push(t);
     });
 
-    // Приоритетные теги (после «уже добавленных»)
     const PRIORITY_TAGS = ['CWE', 'not-require-fix', 'require-fix'];
     const initialSet = new Set(initialTags);
-    const selectedTags = new Set(initialTags); // состояние чекбоксов
+    const selectedTags = new Set(initialTags);
 
-    // Порядок: уже добавленные → CWE → not-require-fix → require-fix → остальные (alphabet)
     function getOrderedTags(query) {
         const q = String(query || '').trim().toLowerCase();
         const matches = (t) => !q || t.toLowerCase().includes(q);
-
         const already = initialTags.filter(matches);
-
         const priority = PRIORITY_TAGS.filter(
             t => availableTags.includes(t) && !initialSet.has(t) && matches(t)
         );
-
         const rest = availableTags
             .filter(t => !initialSet.has(t) && !PRIORITY_TAGS.includes(t) && matches(t))
             .sort((a, b) => a.localeCompare(b));
-
         return [...already, ...priority, ...rest];
     }
 
@@ -133,7 +116,6 @@ export async function showTagEditor(issues, ctx, onDone) {
             </div>
             <div class="modal-body">
                 <p style="margin-top:0; color:var(--text-dim);">Выбрано ошибок: <b>${issues.length}</b></p>
-
                 <div style="margin-bottom:12px;">
                     <label style="display:block; font-size:12px; margin-bottom:4px;">Доступные теги</label>
                     <input type="text" id="tags-filter" placeholder="Фильтр по тегам..."
@@ -145,7 +127,6 @@ export async function showTagEditor(issues, ctx, onDone) {
                                 gap: 8px; padding: 8px; background: var(--bg3);
                                 border: 1px solid var(--border); border-radius: 6px;"></div>
                 </div>
-
                 <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:20px;">
                     <button id="tags-cancel" class="btn">Отмена</button>
                     <button id="tags-save" class="btn btn-accent">Сохранить</button>
@@ -179,7 +160,6 @@ export async function showTagEditor(issues, ctx, onDone) {
 
     renderList();
 
-    // Делегирование: работает и после перерисовки списка при фильтрации
     filterEl.addEventListener('input', renderList);
     listEl.addEventListener('change', (e) => {
         if (e.target.classList.contains('tag-cb')) {
@@ -205,7 +185,6 @@ export async function showTagEditor(issues, ctx, onDone) {
             const p = new URLSearchParams();
             p.set('keys', keys.join(','));
             p.set('tags', tagsStr);
-
             await ctx.api('/api/set_tags?' + p, { method: 'POST' });
             toast('Теги успешно сохранены');
             close();
@@ -218,7 +197,24 @@ export async function showTagEditor(issues, ctx, onDone) {
     });
 }
 
-// ==================== AI PROMPT ====================
+// ==================== AI PROMPT (server-side build) ====================
+
+/**
+ * Запрашивает у сервера готовый промпт по имени файла.
+ *
+ * @param {object} ctx     — контекст приложения (ctx.api, ctx.state.project)
+ * @param {object} params  — параметры (name обязательно; остальные опциональны)
+ * @returns {Promise<string>} — готовый текст промпта
+ */
+export async function buildPromptFromApi(ctx, params) {
+    const p = new URLSearchParams();
+    if (ctx.state.project) p.set('project', ctx.state.project);
+    for (const [k, v] of Object.entries(params)) {
+        if (v != null && v !== '') p.set(k, v);
+    }
+    const d = await ctx.api('/api/prompt/build?' + p.toString());
+    return d.prompt;
+}
 
 export function copyToClipboard(text) {
     if (navigator.clipboard && window.isSecureContext) {
@@ -249,36 +245,14 @@ function fallbackCopy(text) {
 
 export async function fetchAndShowPrompt(issue, ctx) {
     try {
-        const p = new URLSearchParams();
-        if (ctx.state.project) p.set('project', ctx.state.project);
-        p.set('issueKey', issue.key);
-        const d = await ctx.api('/api/snippet?' + p);
-
-        const it = d.issue || issue;
-        const snippetLines = d.snippet || [];
-        const codeText = snippetLines.join('\n');
-        const ruleName = d.ruleName || it.ruleName || '';
-
-        const promptText = "Пожалуйста, проанализируй следующую проблему, найденную статическим анализатором SonarQube.\n\n" +
-            "### Детали ошибки:\n" +
-            "- **Правило:** " + it.rule + " (" + ruleName + ")\n" +
-            "- **Сообщение:** " + it.message + "\n" +
-            "- **Критичность (Severity):** " + (it.impactSeverity || it.severity) + "\n" +
-            "- **Файл:** " + it.component + "\n" +
-            "- **Строка:** " + it.line + "\n\n" +
-            "### Фрагмент кода:\n" +
-            "```\n" +
-            codeText + "\n" +
-            "```\n\n" +
-            "### Задание:\n" +
-            "1. Объясни, почему данная конструкция считается ошибочной или опасной (в чем суть проблемы).\n" +
-            "2. Оцени реальную серьезность проблемы в контексте данного кода.\n" +
-            "3. Предложи исправленный вариант кода (с комментариями изменений).";
-
+        const promptText = await buildPromptFromApi(ctx, {
+            name: 'analyze-issue',
+            issueKey: issue.key
+        });
         copyToClipboard(promptText);
         showPromptModal(promptText);
     } catch (e) {
-        toast('Не удалось загрузить данные для промпта: ' + e.message, true);
+        toast('Не удалось построить промпт: ' + e.message, true);
     }
 }
 
@@ -346,7 +320,6 @@ export function cleanSnippet(snippet) {
 
 export function highlightForPrompt(snippet, targetLine) {
     let lines = Array.isArray(snippet) ? snippet : (snippet || '').split('\n');
-
     return lines.map(line => {
         if (line.includes('§HL_START§') || line.includes('§HL_END§')) {
             return line.replace(/§HL_START§/g, '>>> ').replace(/§HL_END§/g, ' <<<');

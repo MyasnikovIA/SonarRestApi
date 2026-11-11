@@ -7,7 +7,8 @@ import {
     fetchAvailableTags,
     buildOrderedTags,
     renderTagCheckboxes,
-    setIssueTags
+    setIssueTags,
+    applyParsedTags
 } from '../tags.js';
 
 export function openBulkModal(issues, ctx, reloadCb) {
@@ -102,11 +103,14 @@ export function openBulkModal(issues, ctx, reloadCb) {
         overlay.querySelector('#bulk-btn-gen-prompt').addEventListener('click', async () => {
             const status = overlay.querySelector('#bulk-status').value;
             const statusLabel = overlay.querySelector('#bulk-status').selectedOptions[0].textContent.trim();
-            const prompt = await buildBulkStatusCommentPrompt(issues, status, statusLabel, ctx, availableTags);
 
-            console.groupCollapsed('[Prompt] bulk generated');
-            console.log(prompt);
-            console.groupEnd();
+            let prompt;
+            try {
+                prompt = await buildBulkStatusCommentPrompt(ctx, issues, status, statusLabel);
+            } catch (e) {
+                toast('Не удалось построить промпт: ' + e.message, true);
+                return;
+            }
 
             try {
                 await navigator.clipboard.writeText(prompt);
@@ -120,7 +124,8 @@ export function openBulkModal(issues, ctx, reloadCb) {
 
         bindOllamaResolveButton(overlay, {
             ctx,
-            buildPrompt: (status, statusLabel) => buildBulkStatusCommentPrompt(issues, status, statusLabel, ctx, availableTags),
+            buildPrompt: (status, statusLabel) =>
+                buildBulkStatusCommentPrompt(ctx, issues, status, statusLabel),
             commentSelector: '#bulk-comment',
             btnSelector: '#bulk-btn-ai-resolve',
             onComplete: (fullResponse) => {
@@ -133,16 +138,18 @@ export function openBulkModal(issues, ctx, reloadCb) {
                 if (commentTa) commentTa.value = parsed.comment;
 
                 if (parsed.tags && parsed.tags.length > 0) {
-                    parsed.tags.forEach(tag => {
-                        if (!availableTags.includes(tag)) availableTags.push(tag);
-                        selectedTags.add(tag);
-                    });
+                    // ИСПРАВЛЕНО: взаимоисключающие теги снимаются автоматически
+                    const { removed } = applyParsedTags(selectedTags, parsed.tags, availableTags);
                     renderBulkTagList();
 
                     const hint = overlay.querySelector('#bulk-ai-tags-hint');
                     hint.style.display = 'block';
-                    hint.innerHTML = `🤖 AI предлагает теги: <b>${esc(parsed.tags.join(', '))}</b>
-                        <span style="color:var(--text-dim);"> (отмечены в списке выше)</span>`;
+                    let msg = `🤖 AI предлагает теги: <b>${esc(parsed.tags.join(', '))}</b>`;
+                    if (removed.length > 0) {
+                        msg += `<br><span style="color:var(--warn);">Снято (взаимоисключающие): ${esc(removed.join(', '))}</span>`;
+                    }
+                    msg += `<br><span style="color:var(--text-dim);"> (отмечены в списке выше)</span>`;
+                    hint.innerHTML = msg;
                 }
             }
         });

@@ -2,6 +2,7 @@ import { esc, toast } from '../../../common.js';
 import { bindOllamaResolveButton, bindOllamaSettingsButton } from '../../../ollama.js';
 import { parseOllamaResponse } from '../parse-response.js';
 import { buildBulkStatusCommentPrompt } from '../prompts.js';
+import { runBulkWithProgress } from '../../shared/bulk-progress.js';
 import {
     PRIORITY_TAGS,
     fetchAvailableTags,
@@ -100,7 +101,7 @@ export function openBulkModal(issues, ctx, reloadCb) {
             }
         });
 
-        // ---- Кнопка «Сгенерировать промпт» ----
+        // ---- Сгенерировать промпт ----
         overlay.querySelector('#bulk-btn-gen-prompt').addEventListener('click', async () => {
             const status = overlay.querySelector('#bulk-status').value;
             const statusLabel = overlay.querySelector('#bulk-status').selectedOptions[0].textContent.trim();
@@ -123,7 +124,7 @@ export function openBulkModal(issues, ctx, reloadCb) {
             }
         });
 
-        // ---- Кнопка «Получить резолюцию ИИ» ----
+        // ---- Получить резолюцию ИИ ----
         bindOllamaResolveButton(overlay, {
             ctx,
             buildPrompt: (status, statusLabel) =>
@@ -154,55 +155,68 @@ export function openBulkModal(issues, ctx, reloadCb) {
                 }
             }
         });
-
-        // ---- Кнопка «⚙ Ollama» ----
         bindOllamaSettingsButton(overlay, ctx, '#bulk-btn-ollama-settings');
 
-        // ---- Применить ----
+        // ---- Применить (через защищённый прогресс-бар) ----
         overlay.querySelector('#bulk-apply').addEventListener('click', async () => {
             const status = overlay.querySelector('#bulk-status').value;
             const comment = overlay.querySelector('#bulk-comment').value;
             const tagsStr = [...selectedTags].join(',');
             const tagsChanged = tagsStr !== (issues[0].tags || []).join(',');
 
-            const btn = overlay.querySelector('#bulk-apply');
-            btn.disabled = true;
-            btn.textContent = 'Применение...';
+            // Закрываем bulk-modal СРАЗУ — весь прогресс теперь в отдельном
+            // защищённом окне, которое нельзя случайно закрыть.
+            close();
 
-            let success = 0;
-            for (const it of issues) {
-                try {
+            const result = await runBulkWithProgress({
+                title: 'Массовое применение статуса',
+                issues,
+                perItemAction: async (it, _i, signal) => {
                     const p = new URLSearchParams(ctx.qs());
                     p.set('key', it.key);
                     p.set('transition', status);
                     p.set('comment', comment);
                     p.set('dryRun', 'false');
-                    const res = await ctx.api('/api/mark?' + p, { method: 'POST' });
+                    const res = await ctx.api('/api/mark?' + p, { method: 'POST', signal });
                     if (res.success === false) throw new Error(res.error || 'Ошибка');
-                    success++;
-                } catch (e) {
-                    console.error('Failed for ' + it.key, e);
                 }
-                btn.textContent = `Применение ${success}/${issues.length}...`;
-            }
+            });
 
-            if (tagsChanged) {
-                try {
-                    const keys = issues.map(it => it.key);
-                    const result = await setIssueTags(ctx, keys, [...selectedTags]);
-                    if (result.errors && result.errors.length > 0) {
-                        const failed = result.errors.length;
-                        const ok = result.success;
-                        ctx.toast(`Теги: ${ok}/${result.total} успешно, ${failed} с ошибкой`, true);
+            // ---- Теги для успешно применённых issues ----
+            if (tagsChanged && result.success > 0) {
+                const failedKeys = new Set(result.failed.map(f => f.key));
+                const okKeys = issues
+                    .map(it => it.key)
+                    .filter(k => !failedKeys.has(k));
+
+                if (okKeys.length > 0) {
+                    try {
+                        const tagResult = await setIssueTags(ctx, okKeys, [...selectedTags]);
+                        if (tagResult.errors && tagResult.errors.length > 0) {
+                            ctx.toast(
+                                `Теги: ${tagResult.success}/${tagResult.total} успешно, ${tagResult.errors.length} с ошибкой`,
+                                true
+                            );
+                        }
+                    } catch (e) {
+                        console.error('Ошибка применения тегов', e);
+                        ctx.toast('Статусы применены, но теги не обновились: ' + e.message, true);
                     }
-                } catch (e) {
-                    console.error('Ошибка применения тегов', e);
-                    ctx.toast('Статусы применены, но теги не обновились: ' + e.message, true);
                 }
             }
 
-            ctx.toast(`Применено к ${success} из ${issues.length}`);
-            close();
+            // ---- Итоговый toast ----
+            if (result.cancelled) {
+                ctx.toast(`Остановлено. Применено ${result.success} из ${issues.length}`, true);
+            } else if (result.failed.length > 0) {
+                ctx.toast(
+                    `Применено ${result.success} из ${issues.length}, ошибок: ${result.failed.length}`,
+                    true
+                );
+            } else {
+                ctx.toast(`Применено к ${result.success} из ${issues.length}`);
+            }
+
             ctx.refreshStatus?.();
             if (reloadCb) reloadCb();
         });

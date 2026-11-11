@@ -1,28 +1,43 @@
 import { esc } from '../../common.js';
 
+// ============================================================
+// ВАЖНО про PRIORITY_TAGS:
+// SonarQube НЕ хранит «библиотеку тегов» — тег создаётся
+// автоматически при первом вызове /api/issues/set_tags.
+// Поэтому /api/issues/tags (fetchAvailableTags) НЕ вернёт
+// require-fix / not-require-fix, пока их кто-то не установит.
+//
+// Итог: если фильтровать приоритетные теги по availableTags,
+// пользователь НЕ УВИДИТ их в чекбоксах и не сможет выбрать.
+// Поэтому в buildOrderedTags приоритетные теги показываются
+// ВСЕГДА, а в fetchAvailableTags они добавляются в список
+// принудительно — чтобы последующий set_tags их не потерял.
+// ============================================================
 export const PRIORITY_TAGS = ['CWE', 'not-require-fix', 'require-fix'];
 
-/**
- * Взаимоисключающие (противоположные) теги.
- * Если в ответе LLM приходит тег из ключа — все теги из массива значений
- * снимаются с selectedTags ПЕРЕД добавлением нового.
- *
- * Расширяйте по мере необходимости. Текущие пары:
- *   require-fix     ⟷ not-require-fix
- */
 export const OPPOSITE_TAGS = {
     'require-fix':     ['not-require-fix'],
     'not-require-fix': ['require-fix'],
 };
 
+export function isValidTag(tag) {
+    return typeof tag === 'string' && /^[a-z0-9\+\#\-\.]+$/.test(tag);
+}
+
 export async function fetchAvailableTags(ctx) {
+    let tags = [];
     try {
         const d = await ctx.api('/api/tags');
-        return d.tags || [];
+        tags = d.tags || [];
     } catch (e) {
         console.warn('Не удалось загрузить доступные теги', e);
-        return [];
     }
+    // Приоритетные теги всегда должны быть доступны в UI —
+    // SonarQube создаст их при первом set_tags.
+    PRIORITY_TAGS.forEach(t => {
+        if (!tags.includes(t)) tags.push(t);
+    });
+    return tags;
 }
 
 export function buildOrderedTags(availableTags, initialTags, priorityTags, query) {
@@ -30,10 +45,17 @@ export function buildOrderedTags(availableTags, initialTags, priorityTags, query
     const matches = (t) => !q || t.toLowerCase().includes(q);
     const initialSet = new Set(initialTags);
 
+    // 1) Теги, уже стоящие на issue
     const already = initialTags.filter(matches);
+
+    // 2) Приоритетные теги — показываем ВСЕГДА (см. комментарий сверху).
+    //    Условие `availableTags.includes(t)` убрано намеренно: без него
+    //    require-fix / not-require-fix прячутся, пока их нет в SonarQube.
     const priority = priorityTags.filter(
-        t => availableTags.includes(t) && !initialSet.has(t) && matches(t)
+        t => !initialSet.has(t) && matches(t)
     );
+
+    // 3) Остальные — из SonarQube, исключая приоритетные (без дублей)
     const rest = availableTags
         .filter(t => !initialSet.has(t) && !priorityTags.includes(t) && matches(t))
         .sort((a, b) => a.localeCompare(b));
@@ -57,28 +79,25 @@ export function renderTagCheckboxes(container, orderedTags, selectedTags) {
     `).join('');
 }
 
-/**
- * Применяет теги из ответа LLM к selectedTags:
- *   1. Сначала снимает взаимоисключающие (противоположные) теги.
- *   2. Затем добавляет новые теги (и пополняет availableTags).
- *   3. Гарантирует: в selectedTags остаётся ровно ОДИН фикс-тег
- *      (require-fix ИЛИ not-require-fix, но не оба сразу).
- *
- * @param {Set<string>}  selectedTags  — текущее состояние чекбоксов (мутируется)
- * @param {string[]}     parsedTags    — теги из parseOllamaResponse().tags
- * @param {string[]}     availableTags — список доступных тегов (мутируется)
- * @returns {{ removed: string[], added: string[] }}
- */
 export function applyParsedTags(selectedTags, parsedTags, availableTags) {
     const removed = [];
-    const added = [];
+    const added   = [];
+    const skipped = [];
 
     if (!parsedTags || parsedTags.length === 0) {
-        return { removed, added };
+        return { removed, added, skipped };
     }
 
-    // 1. Снимаем противоположные теги (для каждой новой пары)
-    for (const newTag of parsedTags) {
+    const valid = [];
+    for (const t of parsedTags) {
+        if (isValidTag(t)) valid.push(t);
+        else {
+            skipped.push(t);
+            console.warn('[tags] invalid tag skipped:', JSON.stringify(t));
+        }
+    }
+
+    for (const newTag of valid) {
         const opposites = OPPOSITE_TAGS[newTag] || [];
         for (const opp of opposites) {
             if (selectedTags.has(opp)) {
@@ -88,39 +107,28 @@ export function applyParsedTags(selectedTags, parsedTags, availableTags) {
         }
     }
 
-    // 2. Добавляем новые теги (и пополняем availableTags)
-    for (const tag of parsedTags) {
-        if (!tag || tag.trim() === '') continue;
-        if (!availableTags.includes(tag)) {
-            availableTags.push(tag);
-        }
+    for (const tag of valid) {
+        if (!availableTags.includes(tag)) availableTags.push(tag);
         if (!selectedTags.has(tag)) {
             selectedTags.add(tag);
             added.push(tag);
         }
     }
 
-    return { removed, added };
+    return { removed, added, skipped };
 }
 
-/**
- * Устанавливает теги для одной или нескольких issues.
- *
- * Прокси на 6060:
- *   - требует query-параметр `keys` (иначе 400)
- *   - форвардит параметры в SonarQube `/api/issues/set_tags` как есть
- *   - SonarQube принимает только `issue` (единственное число)
- *
- * Поэтому отправляем ОБА параметра одновременно: keys=KEY (для прокси)
- * и issue=KEY (для SonarQube). Для нескольких issues — последовательные
- * запросы, т.к. SonarQube API принимает только одну issue за вызов.
- *
- * @returns {Promise<{success:number, total:number, errors:Array<{key,message}>}>}
- * @throws  {Error} если ни один запрос не удался
- */
 export async function setIssueTags(ctx, keysOrKey, tagsArray) {
     const keys = Array.isArray(keysOrKey) ? keysOrKey : [String(keysOrKey)];
-    const tagsStr = Array.isArray(tagsArray) ? tagsArray.join(',') : String(tagsArray);
+    const rawArr = Array.isArray(tagsArray) ? tagsArray : [String(tagsArray)];
+    const validArr = rawArr.filter(isValidTag);
+
+    if (validArr.length !== rawArr.length) {
+        console.warn('[tags] filtered out invalid tags:',
+            rawArr.filter(t => !isValidTag(t)));
+    }
+
+    const tagsStr = validArr.join(',');
 
     let success = 0;
     const errors = [];
@@ -129,8 +137,8 @@ export async function setIssueTags(ctx, keysOrKey, tagsArray) {
         try {
             const p = new URLSearchParams();
             if (ctx.state.project) p.set('project', ctx.state.project);
-            p.set('keys',  key);   // для валидации прокси
-            p.set('issue', key);   // для SonarQube /api/issues/set_tags
+            p.set('keys',  key);
+            p.set('issue', key);
             p.set('tags',  tagsStr);
             await ctx.api('/api/set_tags?' + p.toString(), { method: 'POST' });
             success++;

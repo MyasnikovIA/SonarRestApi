@@ -22,24 +22,30 @@ export const perfile = {
             let selectedKeys = new Set();
 
             // ========== Список правил для фильтра ==========
-            const ruleCounts = new Map();
-            rawData.files.forEach(f => {
-                (f.issues || []).forEach(it => {
-                    if (it.rule) {
-                        ruleCounts.set(it.rule, (ruleCounts.get(it.rule) || 0) + 1);
-                    }
+            let allRules = [];
+            let totalRules = 0;
+
+            const collectRules = () => {
+                const ruleCounts = new Map();
+                rawData.files.forEach(f => {
+                    (f.issues || []).forEach(it => {
+                        if (it.rule) {
+                            ruleCounts.set(it.rule, (ruleCounts.get(it.rule) || 0) + 1);
+                        }
+                    });
                 });
-            });
-            const allRules = [...ruleCounts.entries()]
-                .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
-            const totalRules = allRules.length;
+                allRules = [...ruleCounts.entries()]
+                    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+                totalRules = allRules.length;
+            };
+            collectRules();
 
             el.innerHTML = `
                 <div class="pf-header-sticky">
                     <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
                         <div style="display:flex; align-items:center; gap:12px;">
                             <input type="checkbox" id="pf-master-checkbox" title="Выделить всё" style="width:18px; height:18px; cursor:pointer;">
-                            <h3 style="margin:0;">${esc(d.project)} · ${esc(d.severity)}/${esc(d.quality)} · ${d.issuesCount} issues · ${d.filesCount} файлов · ${totalRules} правил</h3>
+                            <h3 id="pf-header-title" style="margin:0;">${esc(d.project)} · ${esc(d.severity)}/${esc(d.quality)} · ${d.issuesCount} issues · ${d.filesCount} файлов · ${totalRules} правил</h3>
                         </div>
                         <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
                             <label style="display:flex; align-items:center; gap:6px; font-size:12px;">
@@ -70,6 +76,7 @@ export const perfile = {
             const bulkBtn = el.querySelector('#pf-bulk-btn');
             const masterCb = el.querySelector('#pf-master-checkbox');
             const ruleSelect = el.querySelector('#pf-rule-filter');
+            const headerTitle = el.querySelector('#pf-header-title');
 
             // Заполняем select уникальными правилами
             allRules.forEach(([rule, count]) => {
@@ -78,6 +85,36 @@ export const perfile = {
                 opt.textContent = `${rule} (${count})`;
                 ruleSelect.appendChild(opt);
             });
+
+            const rebuildRulesSelect = () => {
+                const prev = ruleFilter;
+                collectRules();
+
+                ruleSelect.innerHTML = '';
+                const allOpt = document.createElement('option');
+                allOpt.value = '';
+                allOpt.textContent = `— все правила (${totalRules}) —`;
+                ruleSelect.appendChild(allOpt);
+
+                allRules.forEach(([rule, count]) => {
+                    const opt = document.createElement('option');
+                    opt.value = rule;
+                    opt.textContent = `${rule} (${count})`;
+                    ruleSelect.appendChild(opt);
+                });
+
+                if (prev && allRules.some(([r]) => r === prev)) {
+                    ruleSelect.value = prev;
+                } else {
+                    ruleFilter = '';
+                    ruleSelect.value = '';
+                }
+
+                const totalIssues = rawData.files.reduce((s, f) => s + f.issues.length, 0);
+                const totalFiles = rawData.files.filter(f => f.issues.length > 0).length;
+                headerTitle.textContent =
+                    `${d.project} · ${d.severity}/${d.quality} · ${totalIssues} issues · ${totalFiles} файлов · ${totalRules} правил`;
+            };
 
             // ========== Фильтры ==========
             const applyFilters = () => {
@@ -99,13 +136,23 @@ export const perfile = {
                         return true;
                     });
                     return { ...f, issues: matchedIssues };
-                }).filter(f => f.issues.length > 0);   // ← ФИКС: скрываем пустые файлы
+                }).filter(f => f.issues.length > 0);
+            };
+
+            const updateBulkBtn = () => {
+                bulkBtn.style.display = selectedKeys.size > 0 ? 'inline-block' : 'none';
+                bulkBtn.textContent = `Действия с выбранными (${selectedKeys.size})`;
+                const visibleIssues = applyFilters().flatMap(f => f.issues);
+                const allVisibleChecked = visibleIssues.length > 0 && visibleIssues.every(it => selectedKeys.has(it.key));
+                masterCb.checked = allVisibleChecked;
             };
 
             const renderList = () => {
                 const filtered = applyFilters();
                 if (filtered.length === 0) {
                     listEl.innerHTML = '<div class="empty">Ничего не найдено по фильтру</div>';
+                    syncCheckboxes(filtered);
+                    updateBulkBtn(); // <-- ОБЯЗАТЕЛЬНО обновляем кнопку
                     return;
                 }
 
@@ -141,7 +188,7 @@ export const perfile = {
                 listEl.querySelectorAll('.pf-issue-checkbox').forEach(cb => {
                     cb.addEventListener('change', (e) => {
                         if (e.target.checked) selectedKeys.add(e.target.dataset.key);
-                        else selectedKeys.delete(e.target.dataset.key);
+                        else                  selectedKeys.delete(e.target.dataset.key);
                         updateBulkBtn();
                         syncFileCheckbox(cb.closest('.pf-file-card').dataset.file, filtered);
                     });
@@ -154,7 +201,7 @@ export const perfile = {
                         const isChecked = e.target.checked;
                         fileIssues.forEach(it => {
                             if (isChecked) selectedKeys.add(it.key);
-                            else selectedKeys.delete(it.key);
+                            else           selectedKeys.delete(it.key);
                         });
                         const rows = cb.closest('.pf-file-card').querySelectorAll('.pf-issue-checkbox');
                         rows.forEach(rowCb => rowCb.checked = isChecked);
@@ -198,6 +245,8 @@ export const perfile = {
                         });
                     });
                 });
+
+                updateBulkBtn(); // <-- ОБЯЗАТЕЛЬНО обновляем кнопку
             };
 
             const syncCheckboxes = (filtered) => {
@@ -222,7 +271,7 @@ export const perfile = {
                 }
             };
 
-            const syncFileCheckbox = (fileName, filtered) => {
+            const syncFileCheckbox = (fileName) => {
                 const fileCard = listEl.querySelector(`.pf-file-card[data-file="${fileName}"]`);
                 if (!fileCard) return;
                 const fileCb = fileCard.querySelector('.pf-file-checkbox');
@@ -236,27 +285,24 @@ export const perfile = {
                 fileCb.indeterminate = someChecked && !allChecked;
             };
 
-            const updateBulkBtn = () => {
-                bulkBtn.style.display = selectedKeys.size > 0 ? 'inline-block' : 'none';
-                bulkBtn.textContent = `Действия с выбранными (${selectedKeys.size})`;
-                const visibleIssues = applyFilters().flatMap(f => f.issues);
-                const allVisibleChecked = visibleIssues.length > 0 && visibleIssues.every(it => selectedKeys.has(it.key));
-                masterCb.checked = allVisibleChecked;
-            };
-
             // ========== Обработчики ==========
+
+            // При смене любого фильтра очищаем выделение, чтобы избежать "невидимых" выбранных issues
             filterInput.addEventListener('input', (e) => {
                 filterText = e.target.value;
+                selectedKeys.clear(); // <-- очищаем
                 renderList();
             });
 
             hideProcessedCb.addEventListener('change', (e) => {
                 hideProcessed = e.target.checked;
+                selectedKeys.clear(); // <-- очищаем
                 renderList();
             });
 
             ruleSelect.addEventListener('change', (e) => {
                 ruleFilter = e.target.value;
+                selectedKeys.clear(); // <-- очищаем
                 renderList();
             });
 
@@ -277,7 +323,8 @@ export const perfile = {
                 openBulkModal(issues, ctx, () => {
                     selectedKeys.clear();
                     updateBulkBtn();
-                    document.querySelector('.tab[data-tab="perfile"]').click();
+                    rebuildRulesSelect();
+                    renderList();
                 });
             });
 

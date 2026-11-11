@@ -2,6 +2,7 @@ import { esc, toast } from '../../../common.js';
 import { bindOllamaResolveButton, bindOllamaSettingsButton } from '../../../ollama.js';
 import { parseOllamaResponse } from '../parse-response.js';
 import { buildBulkStatusCommentPrompt } from '../prompts.js';
+import { runBulkWithProgress } from '../../shared/bulk-progress.js';
 import {
     PRIORITY_TAGS,
     fetchAvailableTags,
@@ -13,16 +14,19 @@ import {
 
 // ============================================================
 // AI не может обработать тысячи issue за раз:
-//   1) URL-сервер отклоняет keys=... длиннее ~8 KB (1520 ключей = 60 KB)
-//   2) сервер делает 1 запрос SonarQube на каждый ключ (1520 × ~200 мс = 5 мин)
-//   3) Ollama не умеет работать с промптом 200+ KB (контекст 4–8k токенов)
+//   1) URL-сервер отклоняет keys=... длиннее ~8 KB
+//   2) сервер делает 1 запрос SonarQube на каждый ключ
+//   3) Ollama не умеет работать с промптом 200+ KB
 //
-// Поэтому при issues.length > MAX_AI_ISSUES строим компактный промпт
-// локально: группируем по rule и передаём в LLM сводку по правилам.
+// При issues.length > MAX_AI_ISSUES строим промпт локально:
+//   - первые SAMPLE_SIZE issues — с полным кодом (через /api/snippet)
+//   - остальные — только сводка по правилам и файлам
+//   - в промпте явно говорим LLM, что группа больше выборки
 // ============================================================
-const MAX_AI_ISSUES = 50;
-const COMPACT_TOP_RULES = 20;    // сколько правил показывать в сводке
-const COMPACT_SAMPLES_PER_RULE = 2;
+const MAX_AI_ISSUES  = 50;    // порог: выше — переключаемся на «выборку»
+const SAMPLE_SIZE    = 15;    // сколько issues с кодом попадает в промпт
+const MAX_FILE_LIST  = 20;    // сколько файлов показывать в сводке
+const MAX_LINES_PER_SNIPPET = 40;   // обрезаем очень длинные сниппеты
 
 export function openBulkModal(issues, ctx, reloadCb) {
     if (!issues.length) { toast('Нет доступных issues для изменения', true); return; }
@@ -55,9 +59,10 @@ export function openBulkModal(issues, ctx, reloadCb) {
                                     background:var(--bg3); border:1px solid var(--accent);
                                     border-radius:6px; font-size:12px; color:var(--text-dim);">
                             ℹ️ <b>${issues.length} issues</b> — больше лимита AI (${MAX_AI_ISSUES}).
-                            При нажатии «Получить резолюцию ИИ» будет отправлена <b>сводка по правилам</b>
-                            (топ-${COMPACT_TOP_RULES} + примеры), а не каждое замечание по отдельности.
-                            Статус и теги из ответа применятся ко всей группе.
+                            В Ollama будет отправлена <b>выборка из ${SAMPLE_SIZE} issues с кодом</b>
+                            и сводка по остальным <b>${issues.length - SAMPLE_SIZE}</b>.
+                            В промпте явно указано, что группа больше — модель учтёт это
+                            и применит решение ко всей группе.
                         </div>
                     ` : ''}
 
@@ -127,20 +132,31 @@ export function openBulkModal(issues, ctx, reloadCb) {
             }
         });
 
-        // ============ Сгенерировать промпт (без AI) ============
-
+        // ---- Сгенерировать промпт ----
         overlay.querySelector('#bulk-btn-gen-prompt').addEventListener('click', async () => {
             const status = overlay.querySelector('#bulk-status').value;
             const statusLabel = overlay.querySelector('#bulk-status').selectedOptions[0].textContent.trim();
 
+            const btn = overlay.querySelector('#bulk-btn-gen-prompt');
+            const orig = btn.textContent;
+            btn.disabled = true;
+            btn.textContent = aiWillBeCompact
+                ? `⏳ Собираю ${SAMPLE_SIZE} сниппетов…`
+                : '⏳ Готовлю промпт…';
+
             let prompt;
             try {
                 prompt = aiWillBeCompact
-                    ? buildCompactPrompt(issues, status, statusLabel, availableTags)
+                    ? await buildSampledPrompt(ctx, issues, status, statusLabel, availableTags)
                     : await buildBulkStatusCommentPrompt(ctx, issues, status, statusLabel);
             } catch (e) {
                 toast('Не удалось построить промпт: ' + e.message, true);
+                btn.disabled = false;
+                btn.textContent = orig;
                 return;
+            } finally {
+                btn.disabled = false;
+                btn.textContent = orig;
             }
 
             try {
@@ -153,16 +169,13 @@ export function openBulkModal(issues, ctx, reloadCb) {
             }
         });
 
-        // ============ Получить резолюцию ИИ ============
-
+        // ---- Получить резолюцию ИИ ----
         bindOllamaResolveButton(overlay, {
             ctx,
             buildPrompt: async (status, statusLabel) => {
                 if (aiWillBeCompact) {
-                    // Большая партия → компактный промпт по правилам
-                    return buildCompactPrompt(issues, status, statusLabel, availableTags);
+                    return await buildSampledPrompt(ctx, issues, status, statusLabel, availableTags);
                 }
-                // Маленькая партия → обычный путь через сервер
                 return buildBulkStatusCommentPrompt(ctx, issues, status, statusLabel);
             },
             commentSelector: '#bulk-comment',
@@ -193,52 +206,65 @@ export function openBulkModal(issues, ctx, reloadCb) {
         });
         bindOllamaSettingsButton(overlay, ctx, '#bulk-btn-ollama-settings');
 
-        // ============ Применить ============
-
+        // ---- Применить ----
         overlay.querySelector('#bulk-apply').addEventListener('click', async () => {
             const status = overlay.querySelector('#bulk-status').value;
             const comment = overlay.querySelector('#bulk-comment').value;
             const tagsStr = [...selectedTags].join(',');
             const tagsChanged = tagsStr !== (issues[0].tags || []).join(',');
 
-            const btn = overlay.querySelector('#bulk-apply');
-            btn.disabled = true;
-            btn.textContent = 'Применение...';
+            close();
 
-            let success = 0;
-            for (const it of issues) {
-                try {
+            const result = await runBulkWithProgress({
+                title: 'Массовое применение статуса',
+                issues,
+                perItemAction: async (it, _i, signal) => {
                     const p = new URLSearchParams(ctx.qs());
                     p.set('key', it.key);
                     p.set('transition', status);
                     p.set('comment', comment);
                     p.set('dryRun', 'false');
-                    const res = await ctx.api('/api/mark?' + p, { method: 'POST' });
+                    const res = await ctx.api('/api/mark?' + p, { method: 'POST', signal });
                     if (res.success === false) throw new Error(res.error || 'Ошибка');
-                    success++;
-                } catch (e) {
-                    console.error('Failed for ' + it.key, e);
                 }
-                btn.textContent = `Применение ${success}/${issues.length}...`;
-            }
+            });
 
-            if (tagsChanged) {
-                try {
-                    const keys = issues.map(it => it.key);
-                    const result = await setIssueTags(ctx, keys, [...selectedTags]);
-                    if (result.errors && result.errors.length > 0) {
-                        const failed = result.errors.length;
-                        const ok = result.success;
-                        ctx.toast(`Теги: ${ok}/${result.total} успешно, ${failed} с ошибкой`, true);
+            // Локально обновляем статус/теги у успешных — rawData.files
+            // родительской вкладки perfile получит свежие данные.
+            if (result.success > 0) {
+                const failedKeys = new Set(result.failed.map(f => f.key));
+                issues.forEach(it => {
+                    if (!failedKeys.has(it.key)) {
+                        it.status = status;
+                        if (tagsChanged) it.tags = [...selectedTags];
                     }
-                } catch (e) {
-                    console.error('Ошибка применения тегов', e);
-                    ctx.toast('Статусы применены, но теги не обновились: ' + e.message, true);
+                });
+            }
+
+            if (tagsChanged && result.success > 0) {
+                const failedKeys = new Set(result.failed.map(f => f.key));
+                const okKeys = issues.map(it => it.key).filter(k => !failedKeys.has(k));
+                if (okKeys.length > 0) {
+                    try {
+                        const tagResult = await setIssueTags(ctx, okKeys, [...selectedTags]);
+                        if (tagResult.errors && tagResult.errors.length > 0) {
+                            ctx.toast(`Теги: ${tagResult.success}/${tagResult.total} успешно, ${tagResult.errors.length} с ошибкой`, true);
+                        }
+                    } catch (e) {
+                        console.error('Ошибка применения тегов', e);
+                        ctx.toast('Статусы применены, но теги не обновились: ' + e.message, true);
+                    }
                 }
             }
 
-            ctx.toast(`Применено к ${success} из ${issues.length}`);
-            close();
+            if (result.cancelled) {
+                ctx.toast(`Остановлено. Применено ${result.success} из ${issues.length}`, true);
+            } else if (result.failed.length > 0) {
+                ctx.toast(`Применено ${result.success} из ${issues.length}, ошибок: ${result.failed.length}`, true);
+            } else {
+                ctx.toast(`Применено к ${result.success} из ${issues.length}`);
+            }
+
             ctx.refreshStatus?.();
             if (reloadCb) reloadCb();
         });
@@ -246,39 +272,52 @@ export function openBulkModal(issues, ctx, reloadCb) {
 }
 
 // ============================================================
-// Компактный промпт для больших партий (issues.length > MAX_AI_ISSUES)
+// Промпт с выборкой: первые SAMPLE_SIZE issues с кодом + сводка остальных.
+// Асинхронно тянет /api/snippet для SAMPLE_SIZE issues параллельно.
 // ============================================================
-function buildCompactPrompt(issues, status, statusLabel, availableTags) {
-    // Группируем по правилу
-    const byRule = new Map();
-    issues.forEach(it => {
+async function buildSampledPrompt(ctx, issues, status, statusLabel, availableTags) {
+    const total        = issues.length;
+    const sampleIssues = issues.slice(0, SAMPLE_SIZE);
+    const restIssues   = issues.slice(SAMPLE_SIZE);
+
+    // --- 1. Параллельно получаем код для sample ---
+    const sampleData = await Promise.all(sampleIssues.map(async (it) => {
+        const p = new URLSearchParams();
+        if (ctx.state.project) p.set('project', ctx.state.project);
+        p.set('issueKey', it.key);
+
+        try {
+            const d = await ctx.api('/api/snippet?' + p);
+            return {
+                issue:    d.issue || it,
+                snippet:  d.snippet || [],
+                ruleName: d.ruleName || it.ruleName || ''
+            };
+        } catch (e) {
+            return { issue: it, snippet: [], ruleName: it.ruleName || '' };
+        }
+    }));
+
+    // --- 2. Сводка по остальным ---
+    const restByRule = new Map();
+    restIssues.forEach(it => {
         const r = it.rule || '(unknown)';
-        if (!byRule.has(r)) byRule.set(r, []);
-        byRule.get(r).push(it);
+        if (!restByRule.has(r)) restByRule.set(r, []);
+        restByRule.get(r).push(it);
     });
 
-    const rulesSorted = [...byRule.entries()]
-        .sort((a, b) => b[1].length - a[1].length);
-    const totalRules = rulesSorted.length;
-    const shownRules = rulesSorted.slice(0, COMPACT_TOP_RULES);
+    const restFilesSet = new Set();
+    restIssues.forEach(it => { if (it.component) restFilesSet.add(it.component); });
+    const restFiles       = [...restFilesSet].sort();
+    const shownFiles      = restFiles.slice(0, MAX_FILE_LIST);
+    const hiddenFilesCnt  = Math.max(0, restFiles.length - MAX_FILE_LIST);
 
-    const statusLabels = {
-        accept:        'Принять (Это ошибка, но исправлена будет позднее)',
-        falsepositive: 'Ложно (Анализ содержит ошибки)',
-        confirm:       'Подтвердить',
-        resolve:       'Исправлено',
-        wontfix:       'Не исправлять'
-    };
-    const finalStatusLabel = statusLabel || statusLabels[status] || status;
-
-    const tagsLine = (availableTags && availableTags.length)
-        ? availableTags.join(', ')
-        : 'любые релевантные';
-
+    // --- 3. Собираем промпт ---
     const lines = [];
-    lines.push('Ты — опытный разработчик и эксперт по статическому анализу кода (SonarQube).');
+
+    lines.push('Ты — опытный разработчик и эксперт по SonarQube.');
     lines.push('');
-    lines.push(`ЗАДАЧА: обработать ГРУППУ из ${issues.length} замечаний (одинаковый статус для всех).`);
+    lines.push(`ЗАДАЧА: обработать ГРУППУ из ${total} замечаний SonarQube (одинаковый статус для всех).`);
     lines.push('');
     lines.push('ОПРЕДЕЛЕНИЯ СТАТУСОВ:');
     lines.push('- falsepositive: SonarQube ошибся.');
@@ -301,36 +340,88 @@ function buildCompactPrompt(issues, status, statusLabel, availableTags) {
     lines.push('- status=falsepositive → not-require-fix');
     lines.push('- status=accept        → require-fix (реальный баг) или not-require-fix (стилистика)');
     lines.push('');
-    lines.push('ДОСТУПНЫЕ ТЕГИ (используй ТОЛЬКО из списка): ' + tagsLine);
+    lines.push(`ДОСТУПНЫЕ ТЕГИ (используй ТОЛЬКО из списка): ${(availableTags || []).join(', ') || 'любые релевантные'}`);
     lines.push('В поле "Теги:" верни СНАЧАЛА require-fix или not-require-fix,');
     lines.push('затем 1–2 тега СТРОГО из списка выше.');
     lines.push('');
-    lines.push(`Пользователь выбрал статус: "${status}" — ${finalStatusLabel}`);
-    lines.push(`Подтверди этот статус для всей группы или скорректируй, если он явно неверный.`);
+    lines.push(`Пользователь выбрал статус: "${status}" — ${statusLabel || status}`);
+    lines.push('Подтверди этот статус для всей группы или скорректируй, если он явно неверный.');
     lines.push('');
-    lines.push(`=== СОДЕРЖИМОЕ ГРУППЫ ===`);
-    lines.push(`Всего замечаний: ${issues.length}`);
-    lines.push(`Уникальных правил: ${totalRules}`);
-    if (totalRules > COMPACT_TOP_RULES) {
-        lines.push(`Показаны ${COMPACT_TOP_RULES} самых частых правил (с примерами).`);
-        lines.push(`Остальные ${totalRules - COMPACT_TOP_RULES} правил с малым количеством замечаний опущены для краткости.`);
+
+    // ---- Явное предупреждение, что группа больше выборки ----
+    lines.push('=== ВАЖНО: ПАРТИЯ ПРЕВЫШАЕТ ЛИМИТ КОНТЕКСТА ===');
+    lines.push(`Всего замечаний в группе: ${total}.`);
+    lines.push(`В промпт включена ВЫБОРКА из ${sampleIssues.length} замечаний с кодом.`);
+    if (restIssues.length > 0) {
+        lines.push(`Остальные ${restIssues.length} замечаний — без кода, но относятся к тем же правилам/файлам.`);
+        lines.push('При выработке решения считай, что вся группа СИСТЕМАТИЧЕСКИ одинакова по характеру:');
+        lines.push('  • если выборка показывает стилистику/false positive → not-require-fix для ВСЕЙ группы;');
+        lines.push('  • если выборка показывает реальный баг → require-fix для ВСЕЙ группы.');
+        lines.push('Твой ответ применится ко всем ' + total + ' замечаниям, а не только к выборке.');
     }
     lines.push('');
-    lines.push('Замечания по правилам:');
+
+    // ---- Выборка с кодом ----
+    lines.push(`=== ВЫБОРКА С КОДОМ (${sampleIssues.length} из ${total}) ===`);
     lines.push('');
-    shownRules.forEach(([rule, list], idx) => {
-        lines.push(`${idx + 1}. ${rule}  — ${list.length} замечаний`);
-        const samples = list.slice(0, COMPACT_SAMPLES_PER_RULE);
-        samples.forEach(s => {
-            const loc = (s.component || '?') + (s.line > 0 ? ':' + s.line : '');
-            const msg = (s.message || '').slice(0, 140);
-            lines.push(`     • ${loc} — ${msg}`);
-        });
-        if (list.length > COMPACT_SAMPLES_PER_RULE) {
-            lines.push(`     … и ещё ${list.length - COMPACT_SAMPLES_PER_RULE} в этом правиле`);
+
+    for (let i = 0; i < sampleData.length; i++) {
+        const { issue, snippet, ruleName } = sampleData[i];
+        const loc = (issue.component || '?') + (issue.line > 0 ? ':' + issue.line : '');
+        const sev = issue.impactSeverity || issue.severity || '';
+
+        lines.push(`--- Issue ${i + 1}/${sampleIssues.length} ---`);
+        lines.push(`Правило: ${issue.rule || '?'}${ruleName ? ' — ' + ruleName : ''}`);
+        lines.push(`Файл: ${loc}`);
+        if (sev) lines.push(`Severity: ${sev}`);
+        lines.push(`Сообщение: ${(issue.message || '').slice(0, 300)}`);
+
+        if (snippet && snippet.length > 0) {
+            lines.push('Код:');
+            lines.push('```');
+            snippet.slice(0, MAX_LINES_PER_SNIPPET).forEach(line => lines.push(line));
+            if (snippet.length > MAX_LINES_PER_SNIPPET) {
+                lines.push(`... (ещё ${snippet.length - MAX_LINES_PER_SNIPPET} строк)`);
+            }
+            lines.push('```');
+        } else {
+            lines.push('(код недоступен)');
         }
         lines.push('');
-    });
+    }
+
+    // ---- Сводка по остальным ----
+    if (restIssues.length > 0) {
+        lines.push(`=== ОСТАЛЬНЫЕ ${restIssues.length} ISSUES (код не передан) ===`);
+        lines.push('Эти замечания относятся к тем же правилам/файлам, что и выборка:');
+        lines.push('');
+
+        const rulesSorted = [...restByRule.entries()]
+            .sort((a, b) => b[1].length - a[1].length);
+        rulesSorted.forEach(([rule, list]) => {
+            const filesCnt = new Set(list.map(x => x.component).filter(Boolean)).size;
+            lines.push(`- ${rule} — ${list.length} замечаний в ${filesCnt} файлах`);
+        });
+        lines.push('');
+
+        if (restFiles.length > 0) {
+            lines.push(`Файлы с этими замечаниями (${restFiles.length}):`);
+            shownFiles.forEach(f => lines.push(`  • ${f}`));
+            if (hiddenFilesCnt > 0) {
+                lines.push(`  … и ещё ${hiddenFilesCnt} файлов`);
+            }
+            lines.push('');
+        }
+
+        lines.push('=== КАК УЧЕСТЬ ОСТАЛЬНЫЕ ===');
+        lines.push(`Твоё решение применится ко всем ${total} замечаниям сразу.`);
+        lines.push(`Выборка из ${sampleIssues.length} issues выше показывает характер ошибок.`);
+        lines.push('Если она репрезентативна — распространи вывод на всю группу.');
+        lines.push('Если выборка смешанная — выбери статус/тег, который лучше всего');
+        lines.push(`описывает большинство из ${total} замечаний.`);
+        lines.push('');
+    }
+
     lines.push('ФОРМАТ ОТВЕТА (СТРОГО):');
     lines.push('1. Строка 1: "Статус: <accept|falsepositive|confirm|resolve|wontfix>"');
     lines.push('2. Строка 2: "Критичность: <подтверждаю|завышена|занижена> — <обоснование>"');

@@ -1,4 +1,10 @@
-import { esc, statusBadge } from '../../common.js';
+import { statusBadge } from '../../common.js';
+
+// runBulkWithProgress теперь живёт в общем модуле и используется
+// всеми вкладками (accepted, perfile, issues, details).
+// Реэкспорт — чтобы существующие импорты `from './helpers.js'`
+// продолжали работать без изменений.
+export { runBulkWithProgress } from '../shared/bulk-progress.js';
 
 export function getReopenTransition(status) {
     if (status === 'CONFIRMED') return 'unconfirm';
@@ -17,111 +23,4 @@ export function acceptedBadge(it) {
         return '<span class="status-tag" data-status="FIXED" title="RESOLVED / FIXED">✔ исправлено</span>';
     }
     return statusBadge(it.issueStatus || it.status);
-}
-
-/**
- * Показывает прогресс-модалку и последовательно вызывает perItemAction для каждой issue.
- * Возвращает { success, failed, cancelled }.
- *
- * perItemAction(it, index, signal) — должен бросать Error при ошибке.
- * При нажатии «Остановить» вызывается abortController.abort(); при AbortError цикл прерывается.
- */
-export async function runBulkWithProgress({ title, issues, perItemAction }) {
-    const total = issues.length;
-    if (total === 0) return { success: 0, failed: [], cancelled: false };
-
-    const overlay = document.createElement('div');
-    overlay.className = 'modal-overlay';
-    overlay.innerHTML = `
-        <div class="modal-content" style="max-width: 520px;">
-            <div class="modal-header">
-                <h3 style="margin:0;">${esc(title)}</h3>
-            </div>
-            <div class="modal-body">
-                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; font-size:12px;">
-                    <span>Прогресс: <b id="bulk-prog-counter">0 / ${total}</b></span>
-                    <span id="bulk-prog-status" style="color:var(--text-dim);">выполняется…</span>
-                </div>
-                <div style="height:8px; background:var(--bg3); border-radius:4px; overflow:hidden; border:1px solid var(--border);">
-                    <div id="bulk-prog-fill" style="height:100%; width:0%; background:var(--accent); transition: width 0.15s;"></div>
-                </div>
-                <div id="bulk-prog-current"
-                     style="margin-top:10px; font-size:12px; color:var(--text-dim);
-                            white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">—</div>
-                <div id="bulk-prog-errors"
-                     style="margin-top:8px; font-size:12px; color:var(--sev-HIGH);
-                            max-height:120px; overflow-y:auto;"></div>
-                <div style="margin-top:16px; display:flex; justify-content:flex-end; gap:8px;">
-                    <button id="bulk-prog-cancel" class="btn btn-danger">Остановить</button>
-                </div>
-            </div>
-        </div>
-    `;
-    document.body.appendChild(overlay);
-
-    const fill      = overlay.querySelector('#bulk-prog-fill');
-    const counter   = overlay.querySelector('#bulk-prog-counter');
-    const statusEl  = overlay.querySelector('#bulk-prog-status');
-    const currentEl = overlay.querySelector('#bulk-prog-current');
-    const errorsEl  = overlay.querySelector('#bulk-prog-errors');
-    const cancelBtn = overlay.querySelector('#bulk-prog-cancel');
-
-    let cancelled = false;
-    let success   = 0;
-    let lastDone  = 0;
-    const failed  = [];
-    const abortController = new AbortController();
-
-    const updateProgress = (done) => {
-        const pct = total ? Math.round((done / total) * 100) : 0;
-        fill.style.width = pct + '%';
-        counter.textContent = `${done} / ${total}`;
-    };
-
-    const onCancel = () => {
-        cancelled = true;
-        statusEl.textContent = 'Остановка…';
-        cancelBtn.disabled = true;
-        abortController.abort();
-    };
-    cancelBtn.addEventListener('click', onCancel);
-
-    for (let i = 0; i < total; i++) {
-        if (cancelled) break;
-        const it = issues[i];
-        currentEl.textContent = it.key + (it.component ? ' — ' + it.component : '');
-
-        try {
-            await perItemAction(it, i, abortController.signal);
-            success++;
-        } catch (e) {
-            if (e && e.name === 'AbortError') {
-                cancelled = true;
-                break;
-            }
-            failed.push({ key: it.key, message: e.message });
-            const div = document.createElement('div');
-            div.textContent = `✗ ${it.key}: ${e.message}`;
-            errorsEl.appendChild(div);
-        }
-
-        lastDone = i + 1;
-        updateProgress(lastDone);
-    }
-
-    const finalDone = cancelled ? lastDone : total;
-    updateProgress(finalDone);
-    statusEl.textContent = cancelled
-        ? `Остановлено: ${success} / ${total}`
-        : `Готово: ${success} / ${total}`;
-    currentEl.textContent = '—';
-
-    cancelBtn.disabled = false;
-    cancelBtn.classList.remove('btn-danger');
-    cancelBtn.classList.add('btn-accent');
-    cancelBtn.textContent = 'Закрыть';
-    cancelBtn.removeEventListener('click', onCancel);
-    cancelBtn.addEventListener('click', () => overlay.remove(), { once: true });
-
-    return { success, failed, cancelled };
 }

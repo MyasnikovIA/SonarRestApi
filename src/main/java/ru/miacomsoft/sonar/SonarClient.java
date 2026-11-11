@@ -12,10 +12,18 @@ import java.util.Map;
 /**
  * Тонкий HTTP-клиент над SonarQube.
  * Работает по сессионной cookie + X-XSRF-TOKEN (как браузер).
+ *
+ * На HTTP 401 выбрасывает SessionExpiredException — чтобы вызывающий
+ * код мог отличить «сессия протухла» от обычной 4xx/5xx и остановиться.
  */
 public class SonarClient {
 
     private static final Duration TIMEOUT = Duration.ofSeconds(60);
+
+    /** Сессия SonarQube истекла или невалидна (HTTP 401). */
+    public static class SessionExpiredException extends RuntimeException {
+        public SessionExpiredException(String message) { super(message); }
+    }
 
     private final SessionParser.Session session;
     private final HttpClient http;
@@ -42,6 +50,10 @@ public class SonarClient {
         HttpResponse<String> r = http.send(b.GET().build(),
                 HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
 
+        if (r.statusCode() == 401) {
+            throw new SessionExpiredException("GET " + pathAndQuery
+                    + " -> HTTP 401 (сессия истекла или невалидна)");
+        }
         if (r.statusCode() < 200 || r.statusCode() >= 300) {
             throw new RuntimeException("GET " + pathAndQuery
                     + " -> HTTP " + r.statusCode() + ": " + r.body());
@@ -73,6 +85,10 @@ public class SonarClient {
         HttpResponse<String> r = http.send(req,
                 HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
 
+        if (r.statusCode() == 401) {
+            throw new SessionExpiredException("POST " + path
+                    + " -> HTTP 401 (сессия истекла или невалидна)");
+        }
         if (r.statusCode() < 200 || r.statusCode() >= 300) {
             throw new RuntimeException("POST " + path
                     + " -> HTTP " + r.statusCode() + ": " + r.body());

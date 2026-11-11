@@ -395,9 +395,7 @@ public class SonarIssuesApi {
         } catch (RuntimeException e) {
             String msg = e.getMessage();
             if (msg != null && (msg.contains("REOPENED") || msg.contains("issueStatuses"))) {
-                System.err.println("[SonarIssuesApi] REOPENED not supported by this SonarQube, "
-                        + "retrying with OPEN only");
-                return fetchAllByStatuses("OPEN", impactSeverity, quality);
+                return fetchAllByStatuses("OPEN", impactSeverity, quality);   // тихо
             }
             throw e;
         }

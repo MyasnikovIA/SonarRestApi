@@ -152,7 +152,7 @@ public final class PromptBuilder {
         sb.append("- resolve: уже исправлено в коде.\n");
         sb.append("- wontfix: реальная проблема, но не будем исправлять.\n\n");
 
-        sb.append("=== КРИТИЧЕСКИ ВАЖНО: СГЕНЕРИРОВАННЫЙ КОД ===\n");
+        sb.append("=== ПРИЗНАКИ СГЕНЕРИРОВАННОГО КОДА ===\n");
         sb.append("Файл считается СГЕНЕРИРОВАННЫМ, если ЛЮБОЙ из признаков верен:\n");
         sb.append("- путь содержит \"/Api/\" и имя файла заканчивается на \"Api.php\" (OpenAPI/Swagger client),\n");
         sb.append("- путь содержит \"/Model/\" (сгенерированные модели),\n");
@@ -160,32 +160,72 @@ public final class PromptBuilder {
         sb.append("  \"$this->config\", \"$this->headerSelector\", \"buildQuery\", \"ObjectSerializer::deserialize\",\n");
         sb.append("- расширения: .pb.go, .pb.php, .pb.cc, .g.cs, *_generated.*, *_pb2.py, *-openapi.*, *.g.dart.\n\n");
 
-        sb.append("Для СГЕНЕРИРОВАННОГО кода:\n");
-        sb.append("- статус = accept ИЛИ wontfix (никогда confirm/resolve/falsepositive),\n");
-        sb.append("- фикс-тег = ВСЕГДА \"not-require-fix\",\n");
-        sb.append("- НЕ предлагай рефакторинг, объединение веток, добавление default в switch,\n");
-        sb.append("  удаление дублирования — это нормальная особенность генератора,\n");
-        sb.append("  правки затрутся при следующей регенерации,\n");
-        sb.append("- ПРИМЕР: дублирование case 401 и case 422 в *Api.php — типичный сгенерированный\n");
-        sb.append("  switch, править НЕ нужно, ставить not-require-fix.\n\n");
+        sb.append("ВАЖНО: сгенерированность файла — это КОНТЕКСТ, а не приговор.\n");
+        sb.append("Решение о фиксе определяется ХАРАКТЕРОМ ДЕФЕКТА, а не происхождением файла.\n\n");
 
-        sb.append("=== КРИТИЧЕСКИ ВАЖНО: ЯЗЫКОВЫЕ СИГНАЛЫ ===\n");
-        sb.append("Если ты пишешь \"функционально работает корректно\", \"не влияет на работу\",\n");
-        sb.append("\"нарушает читаемость но не ломает\", \"косметическая проблема\" — это ЯВНЫЙ СИГНАЛ\n");
-        sb.append("поставить фикс-тег \"not-require-fix\", а не \"require-fix\".\n\n");
+        sb.append("=== ПРИОРИТЕТ ПРАВИЛ (сверху вниз) ===\n");
+        sb.append("1) РЕАЛЬНАЯ ЛОГИЧЕСКАЯ ОШИБКА — приоритет выше, чем \"код сгенерирован\".\n");
+        sb.append("   Признаки (примеры, не исчерпывающе):\n");
+        sb.append("   - сравнение с заведомо невозможным значением: count($x) < 0,\n");
+        sb.append("     strlen($x) < 0, size() < 0, index < 0 для неотрицательного индекса;\n");
+        sb.append("     как следствие — недостижимая ветка throw/return/break (dead-code);\n");
+        sb.append("   - разыменование null без проверки, где по контракту null недопустим;\n");
+        sb.append("   - перепутаны == и =, инвертировано условие, неверный знак сравнения\n");
+        sb.append("     (< вместо >, <= вместо <) в валидации входных данных;\n");
+        sb.append("   - off-by-one в индексах/срезах, потеря или перезапись данных без сохранения;\n");
+        sb.append("   - утечка ресурса, небезопасный парсинг пользовательского ввода;\n");
+        sb.append("   - неверный тип поля в публичном контракте относительно OpenAPI-спеки.\n");
+        sb.append("   Для таких дефектов: статус = accept или confirm, фикс-тег = \"require-fix\".\n");
+        sb.append("   Исправлять нужно в коде, либо в спеке/генераторе — но дефект реален.\n");
+        sb.append("2) СТИЛИСТИКА / СТРУКТУРА — статус = accept или wontfix,\n");
+        sb.append("   фикс-тег = \"not-require-fix\". Сюда относится:\n");
+        sb.append("   - дублирование (в т.ч. одинаковые case в switch),\n");
+        sb.append("   - отсутствие default в switch,\n");
+        sb.append("   - длина методов, вложенность, naming, отсутствие Javadoc,\n");
+        sb.append("   - неиспользуемые импорты, магические числа,\n");
+        sb.append("   - любые замечания, которые исчезнут при следующей регенерации\n");
+        sb.append("     и НЕ влияют на поведение кода.\n\n");
+
+        sb.append("=== ЯЗЫКОВЫЕ СИГНАЛЫ (привязаны к типу дефекта) ===\n");
+        sb.append("Фразы \"нарушает читаемость но не ломает\", \"косметическая проблема\",\n");
+        sb.append("\"стилистика\", \"не соответствует конвенции\", \"избыточно, но работает\" —\n");
+        sb.append("это сигнал поставить \"not-require-fix\".\n");
+        sb.append("Фразы \"условие никогда не выполнится\", \"недостижимый код\",\n");
+        sb.append("\"dead code\", \"всегда false/true\", \"логическая ошибка\", \"ветка мертва\",\n");
+        sb.append("\"потенциальный NullPointer/TypeError\", \"потеря данных\", \"неверный контракт\" —\n");
+        sb.append("это сигнал поставить \"require-fix\", даже если файл сгенерирован.\n\n");
 
         sb.append("=== РЕШЕНИЕ О НЕОБХОДИМОСТИ ИСПРАВЛЕНИЯ ===\n");
         sb.append("Верни РОВНО ОДИН из двух тегов в поле \"Теги:\"\n");
-        sb.append("- \"require-fix\"     — баг РЕАЛЬНЫЙ, в РУЧНОМ коде, его НУЖНО исправить.\n");
-        sb.append("- \"not-require-fix\" — баг НЕ требует исправления: сгенерированный код,\n");
-        sb.append("  false positive, стилистика без последствий, wontfix.\n\n");
+        sb.append("- \"require-fix\"     — дефект РЕАЛЬНЫЙ (логическая ошибка / dead-code /\n");
+        sb.append("                        неверный контракт / потеря данных), НУЖНО исправить —\n");
+        sb.append("                        независимо от того, сгенерирован файл или написан вручную.\n");
+        sb.append("- \"not-require-fix\" — исправление не требуется: стилистика, дублирование,\n");
+        sb.append("                        false positive, wontfix, шум сгенерированного кода\n");
+        sb.append("                        без влияния на поведение.\n\n");
 
-        sb.append("СВЯЗЬ СТАТУСА И ФИКС-ТЕГА:\n");
+        sb.append("=== СВЯЗЬ СТАТУСА И ФИКС-ТЕГА ===\n");
         sb.append("- status=confirm       → require-fix\n");
         sb.append("- status=resolve       → not-require-fix (уже исправлено)\n");
         sb.append("- status=wontfix       → not-require-fix\n");
         sb.append("- status=falsepositive → not-require-fix\n");
-        sb.append("- status=accept        → require-fix (ручной код) или not-require-fix (сгенерированный)\n\n");
+        sb.append("- status=accept:\n");
+        sb.append("    * ручной код + реальный баг          → require-fix\n");
+        sb.append("    * сгенерированный код + реальный баг → require-fix   ← это важно\n");
+        sb.append("    * ручной код + стилистика            → not-require-fix\n");
+        sb.append("    * сгенерированный код + стилистика   → not-require-fix\n\n");
+
+        sb.append("=== ЭТАЛОННЫЙ ПРИМЕР ===\n");
+        sb.append("Файл: src/Model/AddDirsItems.php (сгенерирован OpenAPI-генератором)\n");
+        sb.append("Правило: Array or Countable object count comparisons should make sense\n");
+        sb.append("Код: if (!is_null($services) && (count($services) < 0)) { throw ... }\n");
+        sb.append("Правильный ответ:\n");
+        sb.append("  Статус: accept\n");
+        sb.append("  Критичность: подтверждаю — count() всегда >= 0, ветка throw недостижима,\n");
+        sb.append("    это dead-code и неверная валидация входных данных.\n");
+        sb.append("  Теги: require-fix, code-smell\n");
+        sb.append("  Обоснование: файл сгенерирован, но дефект реальный; проверка длины массива\n");
+        sb.append("    не работает — надо исправить в коде или в спеке/генераторе.\n\n");
 
         sb.append("ДОСТУПНЫЕ ТЕГИ (используй ТОЛЬКО из этого списка): ").append(tagsList).append("\n");
         sb.append("В поле \"Теги:\" верни СНАЧАЛА require-fix или not-require-fix,\n");
@@ -244,36 +284,80 @@ public final class PromptBuilder {
         sb.append("- resolve: уже исправлено.\n");
         sb.append("- wontfix: не будем исправлять.\n\n");
 
-        sb.append("=== КРИТИЧЕСКИ ВАЖНО: СГЕНЕРИРОВАННЫЙ КОД ===\n");
+        sb.append("=== ПРИЗНАКИ СГЕНЕРИРОВАННОГО КОДА ===\n");
         sb.append("Файл СГЕНЕРИРОВАН, если ЛЮБОЙ признак верен:\n");
         sb.append("- путь содержит \"/Api/\" и имя файла заканчивается на \"Api.php\" (OpenAPI client),\n");
         sb.append("- путь содержит \"/Model/\" (сгенерированные модели),\n");
         sb.append("- маркеры в коде: \"ObjectSerializer\", \"handleResponseWithDataType\", \"ApiException\",\n");
         sb.append("  \"$this->config\", \"$this->headerSelector\", \"buildQuery\",\n");
-        sb.append("- расширения: .pb.go, .pb.php, .pb.cc, .g.cs, *_generated.*, *_pb2.py, *-openapi.*, *.g.dart.\n");
-        sb.append("Для СГЕНЕРИРОВАННОГО кода:\n");
-        sb.append("- статус = accept ИЛИ wontfix (никогда confirm/resolve/falsepositive),\n");
-        sb.append("- фикс-тег = ВСЕГДА \"not-require-fix\",\n");
-        sb.append("- НЕ предлагай рефакторинг, объединение веток, добавление default в switch,\n");
-        sb.append("  удаление дублирования — правки затрутся при следующей регенерации.\n\n");
+        sb.append("- расширения: .pb.go, .pb.php, .pb.cc, .g.cs, *_generated.*, *_pb2.py, *-openapi.*, *.g.dart.\n\n");
 
-        sb.append("=== ЯЗЫКОВЫЕ СИГНАЛЫ ===\n");
-        sb.append("Если пишешь \"функционально работает корректно\", \"не влияет на работу\",\n");
-        sb.append("\"нарушает читаемость но не ломает\", \"косметическая проблема\" —\n");
-        sb.append("это ЯВНЫЙ СИГНАЛ поставить фикс-тег \"not-require-fix\", а не \"require-fix\".\n\n");
+        sb.append("ВАЖНО: сгенерированность файла — это КОНТЕКСТ, а не приговор.\n");
+        sb.append("Решение о фиксе определяется ХАРАКТЕРОМ ДЕФЕКТА, а не происхождением файла.\n\n");
+
+        sb.append("=== ПРИОРИТЕТ ПРАВИЛ (сверху вниз) ===\n");
+        sb.append("1) РЕАЛЬНАЯ ЛОГИЧЕСКАЯ ОШИБКА — приоритет выше, чем \"код сгенерирован\".\n");
+        sb.append("   Признаки (примеры, не исчерпывающе):\n");
+        sb.append("   - сравнение с заведомо невозможным значением: count($x) < 0,\n");
+        sb.append("     strlen($x) < 0, size() < 0, index < 0 для неотрицательного индекса;\n");
+        sb.append("     как следствие — недостижимая ветка throw/return/break (dead-code);\n");
+        sb.append("   - разыменование null без проверки, где по контракту null недопустим;\n");
+        sb.append("   - перепутаны == и =, инвертировано условие, неверный знак сравнения\n");
+        sb.append("     (< вместо >, <= вместо <) в валидации входных данных;\n");
+        sb.append("   - off-by-one в индексах/срезах, потеря или перезапись данных без сохранения;\n");
+        sb.append("   - утечка ресурса, небезопасный парсинг пользовательского ввода;\n");
+        sb.append("   - неверный тип поля в публичном контракте относительно OpenAPI-спеки.\n");
+        sb.append("   Для таких дефектов: статус = accept или confirm, фикс-тег = \"require-fix\".\n");
+        sb.append("   Исправлять нужно в коде, либо в спеке/генераторе — но дефект реален.\n");
+        sb.append("2) СТИЛИСТИКА / СТРУКТУРА — статус = accept или wontfix,\n");
+        sb.append("   фикс-тег = \"not-require-fix\". Сюда относится:\n");
+        sb.append("   - дублирование (в т.ч. одинаковые case в switch),\n");
+        sb.append("   - отсутствие default в switch,\n");
+        sb.append("   - длина методов, вложенность, naming, отсутствие Javadoc,\n");
+        sb.append("   - неиспользуемые импорты, магические числа,\n");
+        sb.append("   - любые замечания, которые исчезнут при следующей регенерации\n");
+        sb.append("     и НЕ влияют на поведение кода.\n\n");
+
+        sb.append("=== ЯЗЫКОВЫЕ СИГНАЛЫ (привязаны к типу дефекта) ===\n");
+        sb.append("Фразы \"нарушает читаемость но не ломает\", \"косметическая проблема\",\n");
+        sb.append("\"стилистика\", \"не соответствует конвенции\", \"избыточно, но работает\" —\n");
+        sb.append("это сигнал поставить \"not-require-fix\".\n");
+        sb.append("Фразы \"условие никогда не выполнится\", \"недостижимый код\",\n");
+        sb.append("\"dead code\", \"всегда false/true\", \"логическая ошибка\", \"ветка мертва\",\n");
+        sb.append("\"потенциальный NullPointer/TypeError\", \"потеря данных\", \"неверный контракт\" —\n");
+        sb.append("это сигнал поставить \"require-fix\", даже если файл сгенерирован.\n\n");
 
         sb.append("=== РЕШЕНИЕ О НЕОБХОДИМОСТИ ИСПРАВЛЕНИЯ ===\n");
         sb.append("Верни РОВНО ОДИН из двух тегов в поле \"Теги:\"\n");
-        sb.append("- \"require-fix\"     — баг РЕАЛЬНЫЙ, в РУЧНОМ коде, его НУЖНО исправить.\n");
-        sb.append("- \"not-require-fix\" — не требует исправления: сгенерированный код,\n");
-        sb.append("  false positive, стилистика без последствий, wontfix.\n\n");
+        sb.append("- \"require-fix\"     — дефект РЕАЛЬНЫЙ (логическая ошибка / dead-code /\n");
+        sb.append("                        неверный контракт / потеря данных), НУЖНО исправить —\n");
+        sb.append("                        независимо от того, сгенерирован файл или написан вручную.\n");
+        sb.append("- \"not-require-fix\" — исправление не требуется: стилистика, дублирование,\n");
+        sb.append("                        false positive, wontfix, шум сгенерированного кода\n");
+        sb.append("                        без влияния на поведение.\n\n");
 
-        sb.append("СВЯЗЬ СТАТУСА И ФИКС-ТЕГА:\n");
+        sb.append("=== СВЯЗЬ СТАТУСА И ФИКС-ТЕГА ===\n");
         sb.append("- status=confirm       → require-fix\n");
         sb.append("- status=resolve       → not-require-fix (уже исправлено)\n");
         sb.append("- status=wontfix       → not-require-fix\n");
         sb.append("- status=falsepositive → not-require-fix\n");
-        sb.append("- status=accept        → require-fix (ручной код) или not-require-fix (сгенерированный)\n\n");
+        sb.append("- status=accept:\n");
+        sb.append("    * ручной код + реальный баг          → require-fix\n");
+        sb.append("    * сгенерированный код + реальный баг → require-fix   ← это важно\n");
+        sb.append("    * ручной код + стилистика            → not-require-fix\n");
+        sb.append("    * сгенерированный код + стилистика   → not-require-fix\n\n");
+
+        sb.append("=== ЭТАЛОННЫЙ ПРИМЕР ===\n");
+        sb.append("Файл: src/Model/AddDirsItems.php (сгенерирован OpenAPI-генератором)\n");
+        sb.append("Правило: Array or Countable object count comparisons should make sense\n");
+        sb.append("Код: if (!is_null($services) && (count($services) < 0)) { throw ... }\n");
+        sb.append("Правильный ответ:\n");
+        sb.append("  Статус: accept\n");
+        sb.append("  Критичность: подтверждаю — count() всегда >= 0, ветка throw недостижима,\n");
+        sb.append("    это dead-code и неверная валидация входных данных.\n");
+        sb.append("  Теги: require-fix, code-smell\n");
+        sb.append("  Обоснование: файл сгенерирован, но дефект реальный; проверка длины массива\n");
+        sb.append("    не работает — надо исправить в коде или в спеке/генераторе.\n\n");
 
         sb.append("ДОСТУПНЫЕ ТЕГИ (используй ТОЛЬКО из этого списка): ").append(tagsList).append("\n");
         sb.append("В поле \"Теги:\" верни СНАЧАЛА require-fix или not-require-fix,\n");

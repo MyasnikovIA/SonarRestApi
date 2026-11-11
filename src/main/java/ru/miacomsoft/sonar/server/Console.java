@@ -16,17 +16,32 @@ import java.util.*;
 
 /**
  * Интерактивная консоль. Дублирует REST-эндпоинты.
+ *
+ * Управление auto-обработкой:
+ *   auto [SEV] [QUAL] --yes  — запускает обработку в фоновом потоке.
+ *   stop                     — graceful-остановка (текущий issue дорабатывается).
+ *
+ * Пока auto идёт:
+ *   - приглашение показывает маркер [auto];
+ *   - прогресс печатается в stderr (не конфликтует с вводом в stdout);
+ *   - принимаются команды stop, quit (quit отклоняется до stop).
  */
 public class Console {
 
     private static final Set<String> KNOWN_TRANSITIONS = Set.of(
             "accept", "falsepositive", "confirm", "resolve", "wontfix", "reopen");
 
-    private final ServerState    state;
-    private final OllamaConfig   ollamaConfig;
-    private volatile String      project;
-    private volatile boolean     running = true;
-    private final Thread         thread;
+    private final ServerState  state;
+    private final OllamaConfig ollamaConfig;
+    private volatile String    project;
+    private volatile boolean   running = true;
+
+    // ---- состояние auto-обработки ----
+    private volatile boolean autoRunning       = false;
+    private volatile boolean autoStopRequested = false;
+
+    private final Object consoleLock = new Object();
+    private final Thread thread;
 
     public Console(ServerState state, OllamaConfig ollamaConfig) {
         this.state        = state;
@@ -49,8 +64,10 @@ public class Console {
         System.out.println("===================================================");
         try {
             while (running) {
-                System.out.print(prompt());
-                System.out.flush();
+                synchronized (consoleLock) {
+                    System.out.print(prompt());
+                    System.out.flush();
+                }
                 String line = r.readLine();
                 if (line == null) { running = false; break; }
                 line = line.trim();
@@ -70,7 +87,8 @@ public class Console {
 
     private String prompt() {
         String p = project == null ? "" : project;
-        return "sonar" + (p.isEmpty() ? "" : ":" + p) + "> ";
+        String mode = autoRunning ? "[auto]" : "";
+        return "sonar" + mode + ":" + p + "> ";
     }
 
     // ==================== dispatch ====================
@@ -82,7 +100,13 @@ public class Console {
 
         switch (cmd) {
             case "help", "?", "h"           -> help();
-            case "quit", "exit", "q"        -> { running = false; }
+            case "quit", "exit", "q"        -> {
+                if (autoRunning) {
+                    System.out.println("[auto] сначала выполните 'stop', затем 'quit'.");
+                } else {
+                    running = false;
+                }
+            }
             case "status"                   -> cmdStatus();
             case "health"                   -> cmdHealth();
             case "project"                  -> cmdProject(a);
@@ -100,6 +124,7 @@ public class Console {
             case "cancelall", "cancel-all"  -> cmdCancelAll(a);
             case "ollama"                   -> cmdOllama(a);
             case "auto", "autoall"          -> cmdAuto(a);
+            case "stop"                     -> cmdStop();
             default -> System.out.println("Unknown command: '" + cmd + "'. Try 'help'");
         }
     }
@@ -138,6 +163,7 @@ public class Console {
                 + (state.getDefaultProject().isEmpty() ? "<not set>" : state.getDefaultProject()));
         System.out.println("consoleProject = "
                 + (project == null || project.isEmpty() ? "<not set>" : project));
+        System.out.println("autoRunning    = " + autoRunning);
     }
 
     private void cmdHealth() {
@@ -623,6 +649,11 @@ public class Console {
             return;
         }
 
+        if (autoRunning) {
+            System.out.println("[auto] уже выполняется. Используйте 'stop' для остановки.");
+            return;
+        }
+
         boolean confirm = false;
         List<String> rest = new ArrayList<>();
         for (String t : a) {
@@ -630,6 +661,7 @@ public class Console {
             else rest.add(t);
         }
 
+        // Режим "auto key <KEY>" — синхронный, один issue
         if (!rest.isEmpty() && "key".equalsIgnoreCase(rest.get(0))) {
             if (rest.size() < 2) {
                 System.out.println("usage: auto key <ISSUE_KEY> [--yes]");
@@ -639,6 +671,7 @@ public class Console {
             return;
         }
 
+        // Bulk-режим
         String[] sq = sevQual(rest.toArray(new String[0]), 0);
         SonarIssuesApi api = state.newApi(project);
         List<Issue> issues = api.fetchOpen(sq[0], sq[1]);
@@ -674,37 +707,118 @@ public class Console {
             return;
         }
 
+        startAutoBulk(sq[0], sq[1], issues.size());
+    }
+
+    private void startAutoBulk(String sev, String qual, int totalIssues) {
+        autoRunning       = true;
+        autoStopRequested = false;
+
         System.out.println("\n=== Запуск массовой обработки через Ollama ===\n");
+        System.out.println("[auto] запущено в фоне. Для остановки введите 'stop'.");
 
-        long t0 = System.currentTimeMillis();
-        AutoProcessor.Stats stats = AutoProcessor.processAll(
-                state, project, sq[0], sq[1], ollamaConfig,
-                this::printProgress
-        );
-        long elapsedMs = System.currentTimeMillis() - t0;
+        final long t0 = System.currentTimeMillis();
+        Thread t = new Thread(() -> {
+            AutoProcessor.Stats stats = null;
+            Exception err = null;
+            try {
+                stats = AutoProcessor.processAll(
+                        state, project, sev, qual, ollamaConfig,
+                        this::printProgress,
+                        () -> autoStopRequested
+                );
+            } catch (Exception e) {
+                err = e;
+            } finally {
+                long elapsed = System.currentTimeMillis() - t0;
+                autoRunning       = false;
+                autoStopRequested = false;
 
-        System.out.println();
-        System.out.println("=== Результат ===");
-        System.out.printf("Всего:         %d%n", stats.total);
-        System.out.printf("Успешно:       %d%n", stats.success);
-        System.out.printf("Ошибок:        %d%n", stats.failed);
-        System.out.printf("Время:         %.1f сек%n", elapsedMs / 1000.0);
-        if (!stats.byStatus.isEmpty()) {
-            System.out.println("По статусам:   " + stats.byStatus);
-        }
-        if (!stats.byFixDecision.isEmpty()) {
-            System.out.println("По фикс-тегам: " + stats.byFixDecision);
-        }
-        if (!stats.failedKeys.isEmpty()) {
-            System.out.println("Failed keys:   " + String.join(", ", stats.failedKeys));
-        }
+                synchronized (consoleLock) {
+                    System.out.println();
+                    if (err != null) {
+                        System.out.println("[auto] FAIL: " + err.getMessage());
+                    }
+                    if (stats != null) {
+                        System.out.println("=== Результат ===");
+                        System.out.printf("Всего:         %d%n", stats.total);
+                        System.out.printf("Успешно:       %d%n", stats.success);
+                        System.out.printf("Ошибок:        %d%n", stats.failed);
+                        if (stats.cancelled) {
+                            System.out.println("Остановлено:   да (по команде 'stop')");
+                        }
+                        if (stats.sessionExpired) {
+                            System.out.println("Остановлено:   да (SESSION EXPIRED — HTTP 401)");
+                        }
+                        if (stats.abortedByNetwork) {
+                            System.out.println("Остановлено:   да (" + stats.abortReason + ")");
+                        }
+                        System.out.printf("Время:         %.1f сек%n", elapsed / 1000.0);
+                        if (!stats.byStatus.isEmpty()) {
+                            System.out.println("По статусам:   " + stats.byStatus);
+                        }
+                        if (!stats.byFixDecision.isEmpty()) {
+                            System.out.println("По фикс-тегам: " + stats.byFixDecision);
+                        }
+                        if (!stats.failedKeys.isEmpty()) {
+                            int show = Math.min(stats.failedKeys.size(), 20);
+                            System.out.println("Failed keys (первые " + show + " из "
+                                    + stats.failedKeys.size() + "):");
+                            for (int i = 0; i < show; i++) {
+                                System.out.println("  " + stats.failedKeys.get(i));
+                            }
+                            if (stats.failedFile != null) {
+                                System.out.println("Полный список: " + stats.failedFile);
+                            }
+                        }
 
-        if (state.isSnapshotReady()
-                && state.getSnapshot().projectKey.equals(project)
-                && !state.isSnapshotBuilding()) {
-            System.out.println("\n[auto] Обновляю снимок в фоне (status — прогресс)");
-            state.buildSnapshotAsync(project);
-        }
+                        // ---- отдельный блок при session expired ----
+                        if (stats.sessionExpired) {
+                            System.out.println();
+                            System.out.println("##################################################");
+                            System.out.println("#  ⚠  СЕССИЯ SONARQUBE ИСТЕКЛА (HTTP 401)        #");
+                            System.out.println("##################################################");
+                            System.out.println("Обработано " + stats.success + " из " + stats.total
+                                    + " issues, дальше — стоп.");
+                            System.out.println();
+                            System.out.println("Что делать:");
+                            System.out.println("  1. Откройте SonarQube в браузере ("
+                                    + (state.isSessionReady() ? state.getSession().host : "?") + ")");
+                            System.out.println("  2. DevTools → Network → любой API-запрос");
+                            System.out.println("  3. Скопируйте заголовки Cookie и X-XSRF-TOKEN в session.txt");
+                            System.out.println("  4. session reload");
+                            System.out.println("  5. auto " + sev + " " + qual + " --yes"
+                                    + "   — продолжит с того же места");
+                            System.out.println("     (обработанные уже не OPEN → fetchOpen их не вернёт)");
+                            System.out.println();
+                        }
+
+                        if (stats.abortedByNetwork) {
+                            System.out.println();
+                            System.out.println("##################################################");
+                            System.out.println("#  ⚠  OLLAMA / СЕТЬ НЕДОСТУПНЫ                      #");
+                            System.out.println("##################################################");
+                            System.out.println("Причина: " + stats.abortReason);
+                            System.out.println("Проверьте: ollama test");
+                            System.out.println();
+                        }
+
+                        // снимок пересобираем ТОЛЬКО при успешном/отменённом завершении
+                        boolean shouldRebuild = !stats.sessionExpired && !stats.abortedByNetwork
+                                && stats.success > 0
+                                && state.isSnapshotReady()
+                                && state.getSnapshot().projectKey.equals(project)
+                                && !state.isSnapshotBuilding();
+                        if (shouldRebuild) {
+                            System.out.println("[auto] Обновляю снимок в фоне (status — прогресс)");
+                            state.buildSnapshotAsync(project);
+                        }
+                    }
+                }
+            }
+        }, "auto-processor");
+        t.setDaemon(true);
+        t.start();
     }
 
     private void cmdAutoSingle(String key, boolean confirm) throws Exception {
@@ -774,21 +888,44 @@ public class Console {
         }
     }
 
+    // ==================== stop ====================
+
+    private void cmdStop() {
+        synchronized (consoleLock) {
+            if (!autoRunning) {
+                System.out.println("[auto] обработка не запущена.");
+                return;
+            }
+            autoStopRequested = true;
+            System.out.println("[auto] запрошена остановка "
+                    + "(текущий issue будет доработан, затем цикл завершится).");
+        }
+    }
+
+    // ==================== progress ====================
+
+    /**
+     * Прогресс пишется в stderr — не конфликтует со stdin-эхом пользователя
+     * в stdout. Одна строка = один атомарный println.
+     */
     private void printProgress(AutoProcessor.Progress p) {
         if (p == null || p.total == 0) return;
+        String line;
+        String color;
         switch (p.phase) {
-            case "preparing" -> System.out.printf("[%d/%d] %s — подготовка...%n",
-                    p.current, p.total, p.issueKey);
-            case "ollama"    -> System.out.printf("[%d/%d] %s — Ollama (%s)...%n",
-                    p.current, p.total, p.issueKey, p.detail);
-            case "applying"  -> System.out.printf("[%d/%d] %s — применяю %s...%n",
-                    p.current, p.total, p.issueKey, p.detail);
-            case "done"      -> System.out.printf("[%d/%d] %s → %s  OK%n",
-                    p.current, p.total, p.issueKey, p.detail);
-            case "failed"    -> System.out.printf("[%d/%d] %s → FAIL: %s%n",
-                    p.current, p.total, p.issueKey, p.detail);
-            // "complete" не печатаем — итог выводится в cmdAuto
+            case "preparing" -> { line = String.format("[%d/%d] %s — подготовка...",
+                    p.current, p.total, p.issueKey); color = "\u001B[0m"; }
+            case "ollama"    -> { line = String.format("[%d/%d] %s — Ollama (%s)...",
+                    p.current, p.total, p.issueKey, p.detail); color = "\u001B[0m"; }
+            case "applying"  -> { line = String.format("[%d/%d] %s — применяю %s...",
+                    p.current, p.total, p.issueKey, p.detail); color = "\u001B[0m"; }
+            case "done"      -> { line = String.format("[%d/%d] %s → %s  OK",
+                    p.current, p.total, p.issueKey, p.detail); color = "\u001B[32m"; } // зелёный
+            case "failed"    -> { line = String.format("[%d/%d] %s → FAIL: %s",
+                    p.current, p.total, p.issueKey, p.detail); color = "\u001B[31m"; } // красный
+            default          -> { return; }
         }
+        System.err.println(color + line + "\u001B[0m");
     }
 
     // ==================== helpers ====================
@@ -848,7 +985,7 @@ public class Console {
             Основное:
               help, ?                 — эта справка
               quit, exit, q           — остановить консоль (сервер продолжит работу)
-              status                  — состояние сессии и снимка
+              status                  — состояние сессии, снимка и auto-обработки
               health                  — краткая проверка
               project [KEY | clear]   — показать/задать консольный project
 
@@ -889,17 +1026,43 @@ public class Console {
               ollama test                         — проверить соединение и список моделей
               ollama reload                       — перечитать *.properties с диска
 
-            Авто-обработка всех issues через Ollama:
-              auto [SEV] [QUAL] [--yes]     — обработать все OPEN/REOPENED issues
-              auto key <KEY> [--yes]        — обработать один issue
-                  Аналог "Добавить автоматически комментарий" в UI.
-                  Для каждого issue: промпт → Ollama → парсинг ответа →
-                  применение статуса + установка тегов.
-                  Без --yes — dry-run (только список).
-                  По умолчанию SEV=ALL, QUAL=ALL.
+            Авто-обработка (массовая, аналог кнопки «Добавить автоматически комментарий»):
 
-            SEV  = MEDIUM | HIGH | LOW | INFO | ALL
-            QUAL = MAINTAINABILITY | RELIABILITY | SECURITY | ALL
+              Синтаксис:
+                auto [SEV] [QUAL]           — dry-run: показать, что будет обработано
+                auto [SEV] [QUAL] --yes     — запустить обработку в фоне
+                auto key <KEY>              — dry-run по одному issue
+                auto key <KEY> --yes        — обработать один issue
+                stop                        — graceful-остановка фоновой обработки
+
+              Примеры комбинаций:
+                auto ALL ALL                        → dry-run всех OPEN/REOPENED
+                auto ALL ALL --yes                  → обработать ВСЁ (все SEV, все QUAL)
+                auto HIGH ALL --yes                 → только HIGH (любое качество)
+                auto HIGH SECURITY --yes            → только HIGH + SECURITY
+                auto MEDIUM ALL --yes               → только MEDIUM
+                auto MEDIUM MAINTAINABILITY --yes   → только MEDIUM + MAINTAINABILITY
+                auto LOW ALL --yes                  → только LOW
+                auto INFO ALL --yes                 → только INFO
+                auto ALL SECURITY --yes             → любые SEV, но только SECURITY
+                auto ALL MAINTAINABILITY --yes      → любые SEV, только MAINTAINABILITY
+                auto ALL RELIABILITY --yes          → любые SEV, только RELIABILITY
+                auto key MYPROJ-1234                → dry-run одного issue
+                auto key MYPROJ-1234 --yes          → обработать один issue
+
+              Допустимые SEV:   HIGH | MEDIUM | LOW | INFO | ALL
+              Допустимые QUAL:  MAINTAINABILITY | RELIABILITY | SECURITY | ALL
+
+              Во время выполнения:
+                * обработка идёт в фоновом потоке — консоль принимает команды;
+                * прогресс выводится в stderr (строки [N/M] ISSUE → status OK/FAIL);
+                * приглашение показывает маркер: sonar[auto]:proj>;
+                * команда 'stop' завершит текущий issue и корректно остановит цикл;
+                * 'quit' при активной auto не сработает — сначала 'stop'.
+
+              После успешного завершения (не отменённого):
+                * снимок автоматически пересобирается в фоне (status — прогресс);
+                * итоговая статистика печатается в stdout.
             """);
     }
 }

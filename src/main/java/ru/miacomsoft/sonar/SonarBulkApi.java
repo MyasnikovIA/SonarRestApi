@@ -12,6 +12,9 @@ public class SonarBulkApi {
     private final int batchSize;
     private final long delayMs;
 
+    /** Если true — не печатать "Батч N/M ... OK" в stdout (для auto-режима). */
+    private boolean silent = false;
+
     public SonarBulkApi(SonarClient client) {
         this(client, DEFAULT_BATCH_SIZE, DEFAULT_DELAY_MS);
     }
@@ -23,6 +26,9 @@ public class SonarBulkApi {
         this.batchSize = batchSize;
         this.delayMs = delayMs;
     }
+
+    public boolean isSilent()          { return silent; }
+    public void    setSilent(boolean s){ this.silent = s; }
 
     public int batchCount(int totalIssues) {
         return (totalIssues + batchSize - 1) / batchSize;
@@ -58,8 +64,10 @@ public class SonarBulkApi {
 
             String resp = client.postForm("/api/issues/bulk_change", form);
             results.add(resp);
-            System.out.printf("Батч %d/%d (%d): OK%n",
-                    (i / batchSize + 1), batchCount(issues.size()), batch.size());
+            if (!silent) {
+                System.out.printf("Батч %d/%d (%d): OK%n",
+                        (i / batchSize + 1), batchCount(issues.size()), batch.size());
+            }
 
             if (i + batchSize < issues.size() && delayMs > 0) {
                 Thread.sleep(delayMs);
@@ -89,7 +97,7 @@ public class SonarBulkApi {
             if (it == null || it.key == null || it.key.isEmpty()) continue;
 
             Map<String, String> form = new LinkedHashMap<>();
-            form.put("issue", it.key);            // ← SonarQube принимает issue=KEY
+            form.put("issue", it.key);
             form.put("tags", tagsCsv == null ? "" : tagsCsv);
             client.postForm("/api/issues/set_tags", form);
 
@@ -106,10 +114,14 @@ public class SonarBulkApi {
             Issue it = issues.get(i);
             try {
                 doTransition(it.key, "reopen");
-                System.out.printf("reopen [%d/%d] %s: OK%n", i + 1, total, it.key);
+                if (!silent) {
+                    System.out.printf("reopen [%d/%d] %s: OK%n", i + 1, total, it.key);
+                }
             } catch (Exception e) {
-                System.out.printf("reopen [%d/%d] %s: FAIL %s%n",
-                        i + 1, total, it.key, e.getMessage());
+                if (!silent) {
+                    System.out.printf("reopen [%d/%d] %s: FAIL %s%n",
+                            i + 1, total, it.key, e.getMessage());
+                }
                 failed.add(it.key);
             }
             if (i < total - 1) Thread.sleep(REOPEN_DELAY_MS);

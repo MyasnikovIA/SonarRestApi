@@ -18,16 +18,41 @@ export const perfile = {
             let rawData = d;
             let filterText = '';
             let hideProcessed = false;
+            let ruleFilter = '';                        // ← НОВОЕ
             let selectedKeys = new Set();
+
+            // ========== Список правил для фильтра ==========
+            const ruleCounts = new Map();
+            rawData.files.forEach(f => {
+                (f.issues || []).forEach(it => {
+                    if (it.rule) {
+                        ruleCounts.set(it.rule, (ruleCounts.get(it.rule) || 0) + 1);
+                    }
+                });
+            });
+            const allRules = [...ruleCounts.entries()]
+                .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+            const totalRules = allRules.length;
 
             el.innerHTML = `
                 <div class="pf-header-sticky">
                     <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
                         <div style="display:flex; align-items:center; gap:12px;">
                             <input type="checkbox" id="pf-master-checkbox" title="Выделить всё" style="width:18px; height:18px; cursor:pointer;">
-                            <h3 style="margin:0;">${esc(d.project)} · ${esc(d.severity)}/${esc(d.quality)} · ${d.issuesCount} issues · ${d.filesCount} файлов</h3>
+                            <h3 style="margin:0;">${esc(d.project)} · ${esc(d.severity)}/${esc(d.quality)} · ${d.issuesCount} issues · ${d.filesCount} файлов · ${totalRules} правил</h3>
                         </div>
                         <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+                            <label style="display:flex; align-items:center; gap:6px; font-size:12px;">
+                                <span style="color:var(--text-dim);">Правило:</span>
+                                <select id="pf-rule-filter"
+                                        style="padding:6px 10px; border-radius:6px;
+                                               border:1px solid var(--border);
+                                               background:var(--bg); color:var(--text);
+                                               max-width:300px; font-family:var(--mono);
+                                               font-size:12px;">
+                                    <option value="">— все правила (${totalRules}) —</option>
+                                </select>
+                            </label>
                             <label style="display:flex; align-items:center; gap:4px; font-size:12px; cursor:pointer;">
                                 <input type="checkbox" id="pf-hide-processed"> Скрыть обработанные
                             </label>
@@ -44,16 +69,32 @@ export const perfile = {
             const hideProcessedCb = el.querySelector('#pf-hide-processed');
             const bulkBtn = el.querySelector('#pf-bulk-btn');
             const masterCb = el.querySelector('#pf-master-checkbox');
+            const ruleSelect = el.querySelector('#pf-rule-filter');
 
+            // ---- Заполняем select уникальными правилами ----
+            allRules.forEach(([rule, count]) => {
+                const opt = document.createElement('option');
+                opt.value = rule;
+                opt.textContent = `${rule} (${count})`;
+                ruleSelect.appendChild(opt);
+            });
+
+            // ========== Фильтры ==========
             const applyFilters = () => {
                 const query = filterText.toLowerCase();
                 return rawData.files.map(f => {
                     const matchedIssues = f.issues.filter(it => {
+                        // Фильтр по правилу
+                        if (ruleFilter && it.rule !== ruleFilter) return false;
+
+                        // Фильтр по тексту
                         const matchesText =
                             (it.message || '').toLowerCase().includes(query) ||
                             (it.rule || '').toLowerCase().includes(query) ||
                             (it.ruleName || '').toLowerCase().includes(query);
                         if (!matchesText) return false;
+
+                        // Скрыть обработанные
                         if (hideProcessed) {
                             const isMarked = it.status && it.status !== 'OPEN' && it.status !== 'REOPENED';
                             if (isMarked) return false;
@@ -207,6 +248,7 @@ export const perfile = {
                 masterCb.checked = allVisibleChecked;
             };
 
+            // ========== Обработчики ==========
             filterInput.addEventListener('input', (e) => {
                 filterText = e.target.value;
                 renderList();
@@ -214,6 +256,12 @@ export const perfile = {
 
             hideProcessedCb.addEventListener('change', (e) => {
                 hideProcessed = e.target.checked;
+                renderList();
+            });
+
+            // ← НОВОЕ: обработчик фильтра по правилу
+            ruleSelect.addEventListener('change', (e) => {
+                ruleFilter = e.target.value;
                 renderList();
             });
 

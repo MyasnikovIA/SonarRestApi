@@ -69,6 +69,8 @@ export function statusBadge(status) {
 
 // ==================== TAGS EDITOR ====================
 
+// ==================== TAGS EDITOR ====================
+
 export async function showTagEditor(issues, ctx, onDone) {
     if (!issues.length) return;
 
@@ -182,7 +184,10 @@ export async function showTagEditor(issues, ctx, onDone) {
         btn.textContent = 'Сохранение...';
 
         try {
+            // ИСПРАВЛЕНО: теперь передаём project, чтобы resolveProject на сервере
+            // не падал с 400 Bad Request, если --project не задан при старте.
             const p = new URLSearchParams();
+            if (ctx.state.project) p.set('project', ctx.state.project);
             p.set('keys', keys.join(','));
             p.set('tags', tagsStr);
             await ctx.api('/api/set_tags?' + p, { method: 'POST' });

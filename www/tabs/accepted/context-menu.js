@@ -1,8 +1,8 @@
-import { toast, showTagEditor } from '../../common.js';
+import { showTagEditor } from '../../common.js';
 import { getReopenTransition, runBulkWithProgress } from './helpers.js';
+import { openBulkModal } from './modals/bulk-modal.js';
 import { showChangeStatusModal } from './modals/change-status-modal.js';
 import { showChangelogModal } from './modals/changelog-modal.js';
-import { openBulkModal } from './modals/bulk-modal.js';
 
 export function showContextMenu(x, y, clickedIssue, targetIssues, ctx, reloadCb) {
     document.querySelector('.ctx-menu')?.remove();
@@ -42,7 +42,6 @@ export function showContextMenu(x, y, clickedIssue, targetIssues, ctx, reloadCb)
         showChangelogModal(targetIssues, ctx);
     });
 
-    // 🔓 Снять пометку (Reopen) — с прогресс-модалкой
     menu.querySelector('#ctx-reopen').addEventListener('click', async () => {
         if (!confirm(`Снять пометку (reopen) у ${targetIssues.length} issues?`)) return;
 
@@ -63,7 +62,6 @@ export function showContextMenu(x, y, clickedIssue, targetIssues, ctx, reloadCb)
         reloadCb();
     });
 
-    // ❌ Переоткрытое замечание — с прогресс-модалкой
     menu.querySelector('#ctx-reopened').addEventListener('click', async () => {
         if (!confirm(`Установить статус "Переоткрытое замечание" у ${targetIssues.length} issues?`)) return;
 

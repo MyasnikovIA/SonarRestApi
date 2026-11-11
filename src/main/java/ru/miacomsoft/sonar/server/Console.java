@@ -14,29 +14,18 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
 
-/**
- * Интерактивная консоль. Дублирует REST-эндпоинты.
- *
- * Управление auto-обработкой:
- *   auto [SEV] [QUAL] --yes  — запускает обработку в фоновом потоке.
- *   stop                     — graceful-остановка (текущий issue дорабатывается).
- *
- * Пока auto идёт:
- *   - приглашение показывает маркер [auto];
- *   - прогресс печатается в stderr (не конфликтует с вводом в stdout);
- *   - принимаются команды stop, quit (quit отклоняется до stop).
- */
 public class Console {
 
     private static final Set<String> KNOWN_TRANSITIONS = Set.of(
             "accept", "falsepositive", "confirm", "resolve", "wontfix", "reopen");
 
-    private final ServerState  state;
-    private final OllamaConfig ollamaConfig;
+    private final ServerState   state;
+    private final OllamaConfig  ollamaConfig;
+    private final PromptTemplate template;
+
     private volatile String    project;
     private volatile boolean   running = true;
 
-    // ---- состояние auto-обработки ----
     private volatile boolean autoRunning       = false;
     private volatile boolean autoStopRequested = false;
 
@@ -47,6 +36,7 @@ public class Console {
         this.state        = state;
         this.ollamaConfig = ollamaConfig;
         this.project      = state.getDefaultProject() != null ? state.getDefaultProject() : "";
+        this.template     = new PromptTemplate(BootstrapFiles.resolvePromptsDir());
         this.thread       = new Thread(this::loop, "console");
         this.thread.setDaemon(true);
     }
@@ -54,13 +44,12 @@ public class Console {
     public void start() { thread.start(); }
     public void stop()  { running = false; }
 
-    // ==================== main loop ====================
-
     private void loop() {
         BufferedReader r = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8));
         System.out.println();
         System.out.println("===================================================");
         System.out.println(" Console ready. Type 'help' for commands.");
+        System.out.println(" Prompts dir: " + template.getPromptsDir());
         System.out.println("===================================================");
         try {
             while (running) {
@@ -90,8 +79,6 @@ public class Console {
         String mode = autoRunning ? "[auto]" : "";
         return "sonar" + mode + ":" + p + "> ";
     }
-
-    // ==================== dispatch ====================
 
     private void dispatch(String line) throws Exception {
         String[] tokens = line.split("\\s+");
@@ -123,6 +110,7 @@ public class Console {
             case "cancel"                   -> cmdCancel(a);
             case "cancelall", "cancel-all"  -> cmdCancelAll(a);
             case "ollama"                   -> cmdOllama(a);
+            case "prompt"                   -> cmdPrompt(a);
             case "auto", "autoall"          -> cmdAuto(a);
             case "stop"                     -> cmdStop();
             default -> System.out.println("Unknown command: '" + cmd + "'. Try 'help'");
@@ -164,6 +152,7 @@ public class Console {
         System.out.println("consoleProject = "
                 + (project == null || project.isEmpty() ? "<not set>" : project));
         System.out.println("autoRunning    = " + autoRunning);
+        System.out.println("promptsDir     = " + template.getPromptsDir());
     }
 
     private void cmdHealth() {
@@ -189,8 +178,6 @@ public class Console {
         project = a[0];
         System.out.println("[console] console project = " + project);
     }
-
-    // ==================== session ====================
 
     private void cmdSession(String[] a) throws Exception {
         if (a.length == 0) { sessionHelp(); return; }
@@ -244,8 +231,6 @@ public class Console {
         System.out.println("  session save <path>       — сохранить текущий raw в файл");
     }
 
-    // ==================== refresh ====================
-
     private void cmdRefresh(String[] a) throws Exception {
         if (a.length > 0 && "issue".equalsIgnoreCase(a[0])) {
             if (a.length < 2) { System.out.println("usage: refresh issue <KEY>"); return; }
@@ -286,8 +271,6 @@ public class Console {
         System.out.println("[console] refresh " + (started ? "started" : "not started")
                 + " for " + project + ". Use 'status' to monitor.");
     }
-
-    // ==================== reports ====================
 
     private void cmdSummary(String[] a) throws Exception {
         if (!requireProject()) return;
@@ -392,6 +375,165 @@ public class Console {
         if (snippet.isEmpty()) System.out.println("(фрагмент кода недоступен)");
         else for (String line : snippet) System.out.println(line);
         System.out.println();
+    }
+
+    // ==================== prompt ====================
+
+    private void cmdPrompt(String[] a) throws Exception {
+        if (a.length == 0 || "list".equalsIgnoreCase(a[0]) || "help".equalsIgnoreCase(a[0])) {
+            promptHelp();
+            return;
+        }
+
+        String name = a[0];
+        if (!template.exists(name)) {
+            System.out.println("[prompt] шаблон не найден: " + name);
+            List<String> avail = template.listAvailable();
+            System.out.println("Доступные: " + (avail.isEmpty() ? "<пусто>" : String.join(", ", avail)));
+            return;
+        }
+
+        if (!requireProject()) return;
+
+        String issueKey = null;
+        String keysCsv = null;
+        String sev = "ALL";
+        String qual = "ALL";
+        String status = "accept";
+        String statusLabel = null;
+        String savePath = null;
+
+        for (int i = 1; i < a.length; i++) {
+            String t = a[i];
+            if (t.startsWith("keys="))         keysCsv     = t.substring("keys=".length());
+            else if (t.startsWith("sev="))     sev         = t.substring("sev=".length()).toUpperCase(Locale.ROOT);
+            else if (t.startsWith("qual="))    qual        = t.substring("qual=".length()).toUpperCase(Locale.ROOT);
+            else if (t.startsWith("status="))  status      = t.substring("status=".length());
+            else if (t.startsWith("statusLabel=")) statusLabel = t.substring("statusLabel=".length());
+            else if (t.startsWith("save="))    savePath    = t.substring("save=".length());
+            else if (issueKey == null)         issueKey    = t;
+        }
+
+        SonarIssuesApi api = state.newApi(project);
+        List<String> availableTags;
+        try { availableTags = new ArrayList<>(api.fetchTags(null)); }
+        catch (Exception e) { availableTags = new ArrayList<>(); }
+
+        String prompt;
+
+        switch (name) {
+            case "status-comment", "auto-resolve", "analyze-issue" -> {
+                // Одиночный issue
+                Issue it = null;
+                if (issueKey != null) {
+                    it = api.fetchIssue(issueKey);
+                } else if (keysCsv != null) {
+                    String firstKey = keysCsv.split(",")[0].trim();
+                    if (!firstKey.isEmpty()) it = api.fetchIssue(firstKey);
+                } else {
+                    List<Issue> list = fetchIssues(project, sev, qual);
+                    if (!list.isEmpty()) it = list.get(0);
+                }
+
+                if (it == null) {
+                    System.out.println("[prompt] issue не найден");
+                    return;
+                }
+
+                String ruleName = it.ruleName;
+                if (ruleName == null || ruleName.isEmpty()) {
+                    try { ruleName = api.fetchRuleName(it.rule); }
+                    catch (Exception e) { ruleName = it.rule; }
+                }
+
+                List<String> snippet;
+                try { snippet = api.fetchSnippet(it.key); }
+                catch (Exception e) { snippet = new ArrayList<>(); }
+
+                Map<String, String> params;
+                if ("status-comment".equals(name)) {
+                    params = PromptBuilder.buildStatusCommentParams(
+                            it, ruleName, snippet, status, statusLabel, availableTags);
+                } else {
+                    params = PromptBuilder.buildAnalyzeIssueParams(
+                            it, ruleName, snippet, availableTags);
+                }
+                prompt = template.render(name, params);
+            }
+
+            case "bulk-status-comment" -> {
+                List<Issue> issues;
+                if (keysCsv != null) {
+                    issues = new ArrayList<>();
+                    for (String raw : keysCsv.split(",")) {
+                        String k = raw.trim();
+                        if (k.isEmpty()) continue;
+                        Issue it = api.fetchIssue(k);
+                        if (it != null) issues.add(it);
+                    }
+                } else {
+                    issues = fetchIssues(project, sev, qual);
+                }
+
+                if (issues.isEmpty()) {
+                    System.out.println("[prompt] нет issues для выбранного набора");
+                    return;
+                }
+
+                Map<String, String> params = PromptBuilder.buildBulkStatusCommentParams(
+                        issues, status, statusLabel, availableTags);
+                prompt = template.render(name, params);
+            }
+
+            default -> {
+                System.out.println("[prompt] неизвестный шаблон: " + name);
+                System.out.println("Поддерживается: status-comment | bulk-status-comment | analyze-issue | auto-resolve");
+                return;
+            }
+        }
+
+        if (prompt == null || prompt.isBlank()) {
+            System.out.println("[prompt] промпт пуст — проверьте файл prompts/" + name + ".txt");
+            return;
+        }
+
+        if (savePath != null) {
+            Path out = Path.of(savePath);
+            Files.writeString(out, prompt, StandardCharsets.UTF_8);
+            System.out.println("[prompt] сохранено в " + out.toAbsolutePath()
+                    + " (" + prompt.length() + " chars)");
+        } else {
+            System.out.println();
+            System.out.println("===================================================");
+            System.out.println(" Prompt: " + name + "  (" + prompt.length() + " chars)");
+            System.out.println("===================================================");
+            System.out.println(prompt);
+            System.out.println("===================================================");
+        }
+    }
+
+    private void promptHelp() {
+        System.out.println("Доступные шаблоны в " + template.getPromptsDir() + ":");
+        List<String> names = template.listAvailable();
+        if (names.isEmpty()) {
+            System.out.println("  <пусто> — создайте prompts/auto-resolve.txt, status-comment.txt,");
+            System.out.println("            bulk-status-comment.txt, analyze-issue.txt");
+        } else {
+            for (String n : names) System.out.println("  " + n);
+        }
+        System.out.println();
+        System.out.println("Usage:");
+        System.out.println("  prompt list                                    — список шаблонов");
+        System.out.println("  prompt <name> <KEY> [status=accept] [statusLabel=...]");
+        System.out.println("  prompt <name> keys=A,B,C [status=...]");
+        System.out.println("  prompt <name> sev=ALL qual=ALL [status=...]");
+        System.out.println("  prompt <name> ... save=<path>                  — сохранить в файл");
+        System.out.println();
+        System.out.println("Примеры:");
+        System.out.println("  prompt status-comment 30637c2f-... status=accept");
+        System.out.println("  prompt bulk-status-comment keys=30637c2f-...,abc123 status=accept");
+        System.out.println("  prompt analyze-issue 30637c2f-...");
+        System.out.println("  prompt auto-resolve 30637c2f-... save=/tmp/prompt.txt");
     }
 
     // ==================== mark ====================
@@ -661,7 +803,6 @@ public class Console {
             else rest.add(t);
         }
 
-        // Режим "auto key <KEY>" — синхронный, один issue
         if (!rest.isEmpty() && "key".equalsIgnoreCase(rest.get(0))) {
             if (rest.size() < 2) {
                 System.out.println("usage: auto key <ISSUE_KEY> [--yes]");
@@ -671,7 +812,6 @@ public class Console {
             return;
         }
 
-        // Bulk-режим
         String[] sq = sevQual(rest.toArray(new String[0]), 0);
         SonarIssuesApi api = state.newApi(project);
         List<Issue> issues = api.fetchOpen(sq[0], sq[1]);
@@ -682,6 +822,7 @@ public class Console {
         System.out.printf("issues     = %d  (OPEN / REOPENED)%n", issues.size());
         System.out.printf("ollama     = %s  (model: %s)%n",
                 ollamaConfig.getUrl(), ollamaConfig.getModel());
+        System.out.printf("prompt     = %s/auto-resolve.txt%n", template.getPromptsDir());
 
         if (issues.isEmpty()) {
             System.out.println("\nНет issues для обработки.");
@@ -715,6 +856,7 @@ public class Console {
         autoStopRequested = false;
 
         System.out.println("\n=== Запуск массовой обработки через Ollama ===\n");
+        System.out.println("[auto] промпт: " + template.getPromptsDir() + "/auto-resolve.txt");
         System.out.println("[auto] запущено в фоне. Для остановки введите 'stop'.");
 
         final long t0 = System.currentTimeMillis();
@@ -723,7 +865,7 @@ public class Console {
             Exception err = null;
             try {
                 stats = AutoProcessor.processAll(
-                        state, project, sev, qual, ollamaConfig,
+                        state, project, sev, qual, ollamaConfig, template,
                         this::printProgress,
                         () -> autoStopRequested
                 );
@@ -772,7 +914,6 @@ public class Console {
                             }
                         }
 
-                        // ---- отдельный блок при session expired ----
                         if (stats.sessionExpired) {
                             System.out.println();
                             System.out.println("##################################################");
@@ -789,7 +930,6 @@ public class Console {
                             System.out.println("  4. session reload");
                             System.out.println("  5. auto " + sev + " " + qual + " --yes"
                                     + "   — продолжит с того же места");
-                            System.out.println("     (обработанные уже не OPEN → fetchOpen их не вернёт)");
                             System.out.println();
                         }
 
@@ -803,7 +943,6 @@ public class Console {
                             System.out.println();
                         }
 
-                        // снимок пересобираем ТОЛЬКО при успешном/отменённом завершении
                         boolean shouldRebuild = !stats.sessionExpired && !stats.abortedByNetwork
                                 && stats.success > 0
                                 && state.isSnapshotReady()
@@ -836,6 +975,7 @@ public class Console {
         System.out.printf("message    = %s%n", shorten(it.message, 120));
         System.out.printf("ollama     = %s  (model: %s)%n",
                 ollamaConfig.getUrl(), ollamaConfig.getModel());
+        System.out.printf("prompt     = %s/auto-resolve.txt%n", template.getPromptsDir());
 
         if (!confirm) {
             System.out.println("\nDRY RUN — добавьте --yes, чтобы применить.");
@@ -847,6 +987,7 @@ public class Console {
             if (ruleName == null || ruleName.isEmpty()) {
                 try { ruleName = api.fetchRuleName(it.rule); }
                 catch (Exception e) { ruleName = it.rule; }
+                it.ruleName = ruleName;
             }
             List<String> snippet;
             try { snippet = api.fetchSnippet(it.key); }
@@ -856,7 +997,19 @@ public class Console {
             try { tags = api.fetchTags(null); }
             catch (Exception e) { /* ignore */ }
 
-            String prompt = PromptBuilder.buildAutoResolvePrompt(it, snippet, tags);
+            String prompt;
+            try {
+                Map<String, String> params =
+                        PromptBuilder.buildAutoResolveParams(it, snippet, tags);
+                prompt = template.render("auto-resolve", params);
+                if (prompt == null || prompt.isBlank()) {
+                    System.err.println("[auto] rendered prompt is blank, using fallback");
+                    prompt = PromptBuilder.buildAutoResolvePrompt(it, snippet, tags);
+                }
+            } catch (Exception e) {
+                System.err.println("[auto] template render failed, using fallback: " + e.getMessage());
+                prompt = PromptBuilder.buildAutoResolvePrompt(it, snippet, tags);
+            }
 
             System.out.println("[auto] запрос к Ollama...");
             String raw = new OllamaClient(ollamaConfig).chat(prompt);
@@ -873,8 +1026,15 @@ public class Console {
 
             SonarBulkApi bulk = state.newBulk();
             bulk.change(List.of(it), parsed.status, parsed.comment);
-            if (!parsed.tags.isEmpty()) {
-                try { bulk.setTags(List.of(it), String.join(",", parsed.tags)); }
+
+            Set<String> finalTags = new LinkedHashSet<>();
+            if (it.tags != null) finalTags.addAll(it.tags);
+            if (parsed.tags.contains("require-fix"))     finalTags.remove("not-require-fix");
+            if (parsed.tags.contains("not-require-fix")) finalTags.remove("require-fix");
+            finalTags.addAll(parsed.tags);
+
+            if (!finalTags.isEmpty()) {
+                try { bulk.setTags(List.of(it), String.join(",", finalTags)); }
                 catch (Exception e) { System.err.println("[auto] setTags: " + e.getMessage()); }
             }
 
@@ -888,8 +1048,6 @@ public class Console {
         }
     }
 
-    // ==================== stop ====================
-
     private void cmdStop() {
         synchronized (consoleLock) {
             if (!autoRunning) {
@@ -902,12 +1060,6 @@ public class Console {
         }
     }
 
-    // ==================== progress ====================
-
-    /**
-     * Прогресс пишется в stderr — не конфликтует со stdin-эхом пользователя
-     * в stdout. Одна строка = один атомарный println.
-     */
     private void printProgress(AutoProcessor.Progress p) {
         if (p == null || p.total == 0) return;
         String line;
@@ -920,15 +1072,13 @@ public class Console {
             case "applying"  -> { line = String.format("[%d/%d] %s — применяю %s...",
                     p.current, p.total, p.issueKey, p.detail); color = "\u001B[0m"; }
             case "done"      -> { line = String.format("[%d/%d] %s → %s  OK",
-                    p.current, p.total, p.issueKey, p.detail); color = "\u001B[32m"; } // зелёный
+                    p.current, p.total, p.issueKey, p.detail); color = "\u001B[32m"; }
             case "failed"    -> { line = String.format("[%d/%d] %s → FAIL: %s",
-                    p.current, p.total, p.issueKey, p.detail); color = "\u001B[31m"; } // красный
+                    p.current, p.total, p.issueKey, p.detail); color = "\u001B[31m"; }
             default          -> { return; }
         }
         System.err.println(color + line + "\u001B[0m");
     }
-
-    // ==================== helpers ====================
 
     private boolean requireProject() {
         if (project == null || project.isEmpty()) {
@@ -980,89 +1130,113 @@ public class Console {
 
     private void help() {
         System.out.println("""
-            Console commands (все команды — дубли REST-эндпоинтов):
+        Console commands (все команды — дубли REST-эндпоинтов):
 
-            Основное:
-              help, ?                 — эта справка
-              quit, exit, q           — остановить консоль (сервер продолжит работу)
-              status                  — состояние сессии, снимка и auto-обработки
-              health                  — краткая проверка
-              project [KEY | clear]   — показать/задать консольный project
+        Основное:
+          help, ?                 — эта справка
+          quit, exit, q           — остановить консоль (сервер продолжит работу)
+          status                  — состояние сессии, снимка и auto-обработки
+          health                  — краткая проверка
+          project [KEY | clear]   — показать/задать консольный project
 
-            Сессия:
-              session show            — прочитать session.txt
-              session set <path>      — заменить session.txt из файла + reload + auto build
-              session reload          — перечитать session.txt с диска
-              session save <path>     — сохранить текущий raw в файл
+        Сессия:
+          session show            — прочитать session.txt
+          session set <path>      — заменить session.txt из файла + reload + auto build
+          session reload          — перечитать session.txt с диска
+          session save <path>     — сохранить текущий raw в файл
 
-            Снимок:
-              refresh                 — пересобрать снимок в фоне (async)
-              refresh wait            — пересобрать снимок синхронно
-              refresh issue <KEY>     — обновить один issue в снимке
+        Снимок:
+          refresh                 — пересобрать снимок в фоне (async)
+          refresh wait            — пересобрать снимок синхронно
+          refresh issue <KEY>     — обновить один issue в снимке
 
-            Отчёты (по умолчанию sev=MEDIUM, qual=MAINTAINABILITY):
-              summary  [SEV] [QUAL]              — сводка + facets
-              matrix   [SEV] [QUAL]              — матрица file × rule
-              perfile  [SEV] [QUAL]              — замечания по файлам
-              details  [SEV] [QUAL] [snippets=N] — подробно с фрагментами кода
-              issues   [SEV] [QUAL]              — плоский список
-              keys     [SEV] [QUAL]              — только ключи
-              snippet  <KEY>                     — один issue + код
+        Отчёты (по умолчанию sev=MEDIUM, qual=MAINTAINABILITY):
+          summary  [SEV] [QUAL]              — сводка + facets
+          matrix   [SEV] [QUAL]              — матрица file × rule
+          perfile  [SEV] [QUAL]              — замечания по файлам
+          details  [SEV] [QUAL] [snippets=N] — подробно с фрагментами кода
+          issues   [SEV] [QUAL]              — плоский список
+          keys     [SEV] [QUAL]              — только ключи
+          snippet  <KEY>                     — один issue + код
 
-            Пометки:
-              mark <KEY> <transition> [comment...]  — пометить один issue
-              mark <transition> [SEV] [QUAL] [--yes] — пометить всё по фильтру
-                  transition = accept | falsepositive | confirm | resolve | wontfix | reopen
-                  без --yes — dry-run
-              cancel <KEY>                          — снять пометку (reopen)
-              cancelall [SEV] [QUAL] [--yes]        — снять пометки по фильтру
+        Пометки:
+          mark <KEY> <transition> [comment...]  — пометить один issue
+          mark <transition> [SEV] [QUAL] [--yes] — пометить всё по фильтру
+              transition = accept | falsepositive | confirm | resolve | wontfix | reopen
+              без --yes — dry-run
+          cancel <KEY>                          — снять пометку (reopen)
+          cancelall [SEV] [QUAL] [--yes]        — снять пометки по фильтру
 
-            Ollama (LLM для авто-обработки):
-              ollama show                         — текущие настройки
-              ollama set url <URL>                — например http://localhost:11434
-              ollama set model <MODEL>            — например llama3 или qwen2.5-coder
-              ollama set timeout <SECONDS>        — таймаут запроса (по умолчанию 300)
-              ollama set temperature <FLOAT>      — температура (по умолчанию 0.2)
-              ollama test                         — проверить соединение и список моделей
-              ollama reload                       — перечитать *.properties с диска
+        Промпты (из prompts/*.txt, как /api/prompt/build в web):
+          prompt list                                       — список шаблонов
+          prompt <name> <KEY> [status=accept] [statusLabel=...]
+          prompt <name> keys=A,B,C [status=...]             — группа issues
+          prompt <name> sev=ALL qual=ALL [status=...]       — по фильтру
+          prompt <name> ... save=<path>                     — сохранить в файл
 
-            Авто-обработка (массовая, аналог кнопки «Добавить автоматически комментарий»):
+          Примеры:
+            prompt status-comment 30637c2f-... status=accept
+            prompt bulk-status-comment keys=30637c2f-...,abc123 status=accept
+            prompt analyze-issue 30637c2f-...
+            prompt auto-resolve 30637c2f-... save=/tmp/prompt.txt
 
-              Синтаксис:
-                auto [SEV] [QUAL]           — dry-run: показать, что будет обработано
-                auto [SEV] [QUAL] --yes     — запустить обработку в фоне
-                auto key <KEY>              — dry-run по одному issue
-                auto key <KEY> --yes        — обработать один issue
-                stop                        — graceful-остановка фоновой обработки
+          Допустимые <name>:
+            status-comment          → prompts/status-comment.txt
+            bulk-status-comment     → prompts/bulk-status-comment.txt
+            analyze-issue           → prompts/analyze-issue.txt
+            auto-resolve            → prompts/auto-resolve.txt
 
-              Примеры комбинаций:
-                auto ALL ALL                        → dry-run всех OPEN/REOPENED
-                auto ALL ALL --yes                  → обработать ВСЁ (все SEV, все QUAL)
-                auto HIGH ALL --yes                 → только HIGH (любое качество)
-                auto HIGH SECURITY --yes            → только HIGH + SECURITY
-                auto MEDIUM ALL --yes               → только MEDIUM
-                auto MEDIUM MAINTAINABILITY --yes   → только MEDIUM + MAINTAINABILITY
-                auto LOW ALL --yes                  → только LOW
-                auto INFO ALL --yes                 → только INFO
-                auto ALL SECURITY --yes             → любые SEV, но только SECURITY
-                auto ALL MAINTAINABILITY --yes      → любые SEV, только MAINTAINABILITY
-                auto ALL RELIABILITY --yes          → любые SEV, только RELIABILITY
-                auto key MYPROJ-1234                → dry-run одного issue
-                auto key MYPROJ-1234 --yes          → обработать один issue
+        Ollama (LLM для авто-обработки):
+          ollama show                         — текущие настройки
+          ollama set url <URL>                — например http://localhost:11434
+          ollama set model <MODEL>            — например llama3 или qwen2.5-coder
+          ollama set timeout <SECONDS>        — таймаут запроса (по умолчанию 300)
+          ollama set temperature <FLOAT>      — температура (по умолчанию 0.2)
+          ollama test                         — проверить соединение и список моделей
+          ollama reload                       — перечитать *.properties с диска
 
-              Допустимые SEV:   HIGH | MEDIUM | LOW | INFO | ALL
-              Допустимые QUAL:  MAINTAINABILITY | RELIABILITY | SECURITY | ALL
+        Авто-обработка (массовая, аналог кнопки «Добавить автоматически комментарий»):
 
-              Во время выполнения:
-                * обработка идёт в фоновом потоке — консоль принимает команды;
-                * прогресс выводится в stderr (строки [N/M] ISSUE → status OK/FAIL);
-                * приглашение показывает маркер: sonar[auto]:proj>;
-                * команда 'stop' завершит текущий issue и корректно остановит цикл;
-                * 'quit' при активной auto не сработает — сначала 'stop'.
+          Синтаксис:
+            auto [SEV] [QUAL]           — dry-run: показать, что будет обработано
+            auto [SEV] [QUAL] --yes     — запустить обработку в фоне
+            auto key <KEY>              — dry-run по одному issue
+            auto key <KEY> --yes        — обработать один issue
+            stop                        — graceful-остановка фоновой обработки
 
-              После успешного завершения (не отменённого):
-                * снимок автоматически пересобирается в фоне (status — прогресс);
-                * итоговая статистика печатается в stdout.
-            """);
+          Примеры комбинаций:
+            auto ALL ALL                        → dry-run всех OPEN/REOPENED
+            auto ALL ALL --yes                  → обработать ВСЁ (все SEV, все QUAL)
+            auto HIGH ALL --yes                 → только HIGH (любое качество)
+            auto HIGH SECURITY --yes            → только HIGH + SECURITY
+            auto MEDIUM ALL --yes               → только MEDIUM
+            auto MEDIUM MAINTAINABILITY --yes   → только MEDIUM + MAINTAINABILITY
+            auto LOW ALL --yes                  → только LOW
+            auto INFO ALL --yes                 → только INFO
+            auto ALL SECURITY --yes             → любые SEV, но только SECURITY
+            auto ALL MAINTAINABILITY --yes      → любые SEV, только MAINTAINABILITY
+            auto ALL RELIABILITY --yes          → любые SEV, только RELIABILITY
+            auto key MYPROJ-1234                → dry-run одного issue
+            auto key MYPROJ-1234 --yes          → обработать один issue
+
+          Допустимые SEV:   HIGH | MEDIUM | LOW | INFO | ALL
+          Допустимые QUAL:  MAINTAINABILITY | RELIABILITY | SECURITY | ALL
+
+          Промпт берётся из prompts/auto-resolve.txt — тот же, что и в web.
+          Если файла нет (или он пуст) — используется встроенный fallback.
+          Теги: сохраняются существующие + добавляются предложенные LLM
+          (require-fix ↔ not-require-fix заменяют друг друга).
+
+          Во время выполнения:
+            * обработка идёт в фоновом потоке — консоль принимает команды;
+            * прогресс выводится в stderr (строки [N/M] ISSUE → status OK/FAIL);
+            * приглашение показывает маркер: sonar[auto]:proj>;
+            * команда 'stop' завершит текущий issue и корректно остановит цикл;
+            * 'quit' при активной auto не сработает — сначала 'stop'.
+
+          После успешного завершения (не отменённого):
+            * снимок автоматически пересобирается в фоне (status — прогресс);
+            * итоговая статистика печатается в stdout.
+        """);
     }
 }

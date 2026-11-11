@@ -2,7 +2,9 @@ package ru.miacomsoft.sonar.server.handlers;
 
 import ru.miacomsoft.sonar.Issue;
 
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -10,6 +12,10 @@ import java.util.regex.Pattern;
  * Строит текст промпта для LLM из данных issue.
  * Зеркально соответствует buildStatusCommentPrompt() из
  * web/tabs/perfile/prompts.js.
+ *
+ * С 2025: добавлены build*Params(...) — они возвращают Map для
+ * PromptTemplate.render(...), чтобы консольный режим использовал
+ * ровно те же файлы из prompts/, что и web-версия.
  */
 public final class PromptBuilder {
 
@@ -21,7 +27,6 @@ public final class PromptBuilder {
         Lang(String name, String codeFence) { this.name = name; this.codeFence = codeFence; }
     }
 
-    /** Маппинг статуса в человекочитаемое описание (как в UI). */
     public static String defaultStatusLabel(String status) {
         if (status == null) return "";
         switch (status.toLowerCase()) {
@@ -83,7 +88,6 @@ public final class PromptBuilder {
         }
     }
 
-    /** §HL_START§ / §HL_END§ → ">>> " / " <<<" (как в JS). */
     public static String highlightForPrompt(List<String> snippet, int targetLine) {
         if (snippet == null || snippet.isEmpty()) return "";
         StringBuilder sb = new StringBuilder();
@@ -115,145 +119,142 @@ public final class PromptBuilder {
         return sb.toString();
     }
 
-    public static String buildStatusCommentPrompt(Issue issue, String ruleName,
-                                                  List<String> snippet, String status,
-                                                  String statusLabel, List<String> availableTags) {
-        String code = highlightForPrompt(snippet, issue.line).trim();
+    // ==================== params для PromptTemplate.render ====================
+
+    /**
+     * Общие поля для одного issue (используются во всех 4 шаблонах).
+     * Параметры соответствуют [TAG] из prompts/*.txt.
+     */
+    private static Map<String, String> baseIssueParams(Issue issue, String ruleName,
+                                                       List<String> snippet,
+                                                       List<String> availableTags) {
+        Map<String, String> params = new LinkedHashMap<>();
+
         Lang lang = detectLanguage(issue.component);
+        String codeHighlighted = highlightForPrompt(snippet, issue.line).trim();
+        String codeRaw = (snippet == null) ? "" : String.join("\n", snippet)
+                .replace("§HL_START§", "")
+                .replace("§HL_END§", "");
+
         String severity = (issue.impactSeverity != null && !issue.impactSeverity.isEmpty())
                 ? issue.impactSeverity
                 : (issue.severity != null ? issue.severity : "");
+
+        String ruleCtx = (ruleName != null && !ruleName.isEmpty())
+                ? ruleName
+                : (issue.rule != null ? issue.rule : "");
+
+        String component = issue.component != null ? issue.component : "";
+        String location = component + (issue.line > 0 ? ":" + issue.line : "");
 
         String tagsList = (availableTags != null && !availableTags.isEmpty())
                 ? String.join(", ", availableTags)
                 : "любые релевантные";
 
-        String filePath = issue.component != null ? issue.component : "";
-        String ruleCtx  = (ruleName != null && !ruleName.isEmpty())
-                ? ruleName
-                : (issue.rule != null ? issue.rule : "");
+        params.put("RULE_KEY",         issue.rule != null ? issue.rule : "");
+        params.put("RULE_NAME",        ruleName != null ? ruleName : "");
+        params.put("RULE_NAME_OR_KEY", ruleCtx);
+        params.put("MESSAGE",          issue.message != null ? issue.message : "");
+        params.put("COMPONENT",        component);
+        params.put("FILE",             component);
+        params.put("LINE",             issue.line > 0 ? String.valueOf(issue.line) : "");
+        params.put("LOCATION",         location);
+        params.put("SEVERITY",         severity);
+        params.put("LANGUAGE",         lang.name);
+        params.put("LANGUAGE_FENCE",   lang.codeFence);
+        params.put("CODE",             codeHighlighted);
+        params.put("CODE_RAW",         codeRaw);
+        params.put("TAGS_LIST",        tagsList);
+        params.put("ISSUES_COUNT",     "1");
+        params.put("ISSUES_LIST",      "1. " + (issue.key != null ? issue.key : "") + " | "
+                + (issue.rule != null ? issue.rule : "") + " | " + location + " | "
+                + (issue.message != null ? issue.message : ""));
 
-        StringBuilder sb = new StringBuilder();
-        sb.append("Ты — опытный разработчик и эксперт по статическому анализу кода (SonarQube).\n");
-        sb.append("Проект мультиязычный. НЕ предполагай язык — он указан ниже.\n\n");
-
-        sb.append("ЗАДАЧА:\n");
-        sb.append("1. Подтверди или скорректируй выбранный пользователем статус: \"")
-                .append(status).append("\" — ").append(statusLabel).append("\n");
-        sb.append("2. Определи реальную критичность.\n");
-        sb.append("3. Дай РЕШЕНИЕ: нужно ли исправлять этот баг?\n");
-        sb.append("4. Выбери 2–3 тега из списка доступных (обязательно с фикс-тегом).\n");
-        sb.append("5. Объясни в 1–3 предложениях.\n\n");
-
-        sb.append("ОПРЕДЕЛЕНИЯ СТАТУСОВ:\n");
-        sb.append("- falsepositive: SonarQube ошибся, проблемы нет.\n");
-        sb.append("- accept: реальная проблема, исправим позже (техдолг).\n");
-        sb.append("- confirm: реальная и срочная проблема (security, потеря данных).\n");
-        sb.append("- resolve: уже исправлено в коде.\n");
-        sb.append("- wontfix: реальная проблема, но не будем исправлять.\n\n");
-
-        sb.append("=== ПРИЗНАКИ СГЕНЕРИРОВАННОГО КОДА ===\n");
-        sb.append("Файл считается СГЕНЕРИРОВАННЫМ, если ЛЮБОЙ из признаков верен:\n");
-        sb.append("- путь содержит \"/Api/\" и имя файла заканчивается на \"Api.php\" (OpenAPI/Swagger client),\n");
-        sb.append("- путь содержит \"/Model/\" (сгенерированные модели),\n");
-        sb.append("- в коде есть маркеры: \"ObjectSerializer\", \"handleResponseWithDataType\", \"ApiException\",\n");
-        sb.append("  \"$this->config\", \"$this->headerSelector\", \"buildQuery\", \"ObjectSerializer::deserialize\",\n");
-        sb.append("- расширения: .pb.go, .pb.php, .pb.cc, .g.cs, *_generated.*, *_pb2.py, *-openapi.*, *.g.dart.\n\n");
-
-        sb.append("ВАЖНО: сгенерированность файла — это КОНТЕКСТ, а не приговор.\n");
-        sb.append("Решение о фиксе определяется ХАРАКТЕРОМ ДЕФЕКТА, а не происхождением файла.\n\n");
-
-        sb.append("=== ПРИОРИТЕТ ПРАВИЛ (сверху вниз) ===\n");
-        sb.append("1) РЕАЛЬНАЯ ЛОГИЧЕСКАЯ ОШИБКА — приоритет выше, чем \"код сгенерирован\".\n");
-        sb.append("   Признаки (примеры, не исчерпывающе):\n");
-        sb.append("   - сравнение с заведомо невозможным значением: count($x) < 0,\n");
-        sb.append("     strlen($x) < 0, size() < 0, index < 0 для неотрицательного индекса;\n");
-        sb.append("     как следствие — недостижимая ветка throw/return/break (dead-code);\n");
-        sb.append("   - разыменование null без проверки, где по контракту null недопустим;\n");
-        sb.append("   - перепутаны == и =, инвертировано условие, неверный знак сравнения\n");
-        sb.append("     (< вместо >, <= вместо <) в валидации входных данных;\n");
-        sb.append("   - off-by-one в индексах/срезах, потеря или перезапись данных без сохранения;\n");
-        sb.append("   - утечка ресурса, небезопасный парсинг пользовательского ввода;\n");
-        sb.append("   - неверный тип поля в публичном контракте относительно OpenAPI-спеки.\n");
-        sb.append("   Для таких дефектов: статус = accept или confirm, фикс-тег = \"require-fix\".\n");
-        sb.append("   Исправлять нужно в коде, либо в спеке/генераторе — но дефект реален.\n");
-        sb.append("2) СТИЛИСТИКА / СТРУКТУРА — статус = accept или wontfix,\n");
-        sb.append("   фикс-тег = \"not-require-fix\". Сюда относится:\n");
-        sb.append("   - дублирование (в т.ч. одинаковые case в switch),\n");
-        sb.append("   - отсутствие default в switch,\n");
-        sb.append("   - длина методов, вложенность, naming, отсутствие Javadoc,\n");
-        sb.append("   - неиспользуемые импорты, магические числа,\n");
-        sb.append("   - любые замечания, которые исчезнут при следующей регенерации\n");
-        sb.append("     и НЕ влияют на поведение кода.\n\n");
-
-        sb.append("=== ЯЗЫКОВЫЕ СИГНАЛЫ (привязаны к типу дефекта) ===\n");
-        sb.append("Фразы \"нарушает читаемость но не ломает\", \"косметическая проблема\",\n");
-        sb.append("\"стилистика\", \"не соответствует конвенции\", \"избыточно, но работает\" —\n");
-        sb.append("это сигнал поставить \"not-require-fix\".\n");
-        sb.append("Фразы \"условие никогда не выполнится\", \"недостижимый код\",\n");
-        sb.append("\"dead code\", \"всегда false/true\", \"логическая ошибка\", \"ветка мертва\",\n");
-        sb.append("\"потенциальный NullPointer/TypeError\", \"потеря данных\", \"неверный контракт\" —\n");
-        sb.append("это сигнал поставить \"require-fix\", даже если файл сгенерирован.\n\n");
-
-        sb.append("=== РЕШЕНИЕ О НЕОБХОДИМОСТИ ИСПРАВЛЕНИЯ ===\n");
-        sb.append("Верни РОВНО ОДИН из двух тегов в поле \"Теги:\"\n");
-        sb.append("- \"require-fix\"     — дефект РЕАЛЬНЫЙ (логическая ошибка / dead-code /\n");
-        sb.append("                        неверный контракт / потеря данных), НУЖНО исправить —\n");
-        sb.append("                        независимо от того, сгенерирован файл или написан вручную.\n");
-        sb.append("- \"not-require-fix\" — исправление не требуется: стилистика, дублирование,\n");
-        sb.append("                        false positive, wontfix, шум сгенерированного кода\n");
-        sb.append("                        без влияния на поведение.\n\n");
-
-        sb.append("=== СВЯЗЬ СТАТУСА И ФИКС-ТЕГА ===\n");
-        sb.append("- status=confirm       → require-fix\n");
-        sb.append("- status=resolve       → not-require-fix (уже исправлено)\n");
-        sb.append("- status=wontfix       → not-require-fix\n");
-        sb.append("- status=falsepositive → not-require-fix\n");
-        sb.append("- status=accept:\n");
-        sb.append("    * ручной код + реальный баг          → require-fix\n");
-        sb.append("    * сгенерированный код + реальный баг → require-fix   ← это важно\n");
-        sb.append("    * ручной код + стилистика            → not-require-fix\n");
-        sb.append("    * сгенерированный код + стилистика   → not-require-fix\n\n");
-
-        sb.append("=== ЭТАЛОННЫЙ ПРИМЕР ===\n");
-        sb.append("Файл: src/Model/AddDirsItems.php (сгенерирован OpenAPI-генератором)\n");
-        sb.append("Правило: Array or Countable object count comparisons should make sense\n");
-        sb.append("Код: if (!is_null($services) && (count($services) < 0)) { throw ... }\n");
-        sb.append("Правильный ответ:\n");
-        sb.append("  Статус: accept\n");
-        sb.append("  Критичность: подтверждаю — count() всегда >= 0, ветка throw недостижима,\n");
-        sb.append("    это dead-code и неверная валидация входных данных.\n");
-        sb.append("  Теги: require-fix, code-smell\n");
-        sb.append("  Обоснование: файл сгенерирован, но дефект реальный; проверка длины массива\n");
-        sb.append("    не работает — надо исправить в коде или в спеке/генераторе.\n\n");
-
-        sb.append("ДОСТУПНЫЕ ТЕГИ (используй ТОЛЬКО из этого списка): ").append(tagsList).append("\n");
-        sb.append("В поле \"Теги:\" верни СНАЧАЛА require-fix или not-require-fix,\n");
-        sb.append("затем 1–2 тега СТРОГО из списка выше.\n\n");
-
-        sb.append("Контекст:\n");
-        sb.append("- Правило: ").append(ruleCtx).append("\n");
-        sb.append("- Сообщение: ").append(issue.message != null ? issue.message : "").append("\n");
-        sb.append("- Файл: ").append(filePath).append(issue.line > 0 ? ":" + issue.line : "").append("\n");
-        sb.append("- Severity: ").append(severity).append("\n");
-        sb.append("- Язык: ").append(lang.name).append("\n\n");
-
-        sb.append("Код:\n");
-        sb.append("```").append(lang.codeFence).append("\n");
-        sb.append(code).append("\n");
-        sb.append("```\n\n");
-
-        sb.append("ФОРМАТ ОТВЕТА (СТРОГО, без отклонений):\n");
-        sb.append("1. Строка 1: \"Статус: <accept|falsepositive|confirm|resolve|wontfix>\"\n");
-        sb.append("2. Строка 2: \"Критичность: <подтверждаю|завышена|занижена> — <обоснование>\"\n");
-        sb.append("3. Строка 3: \"Теги: <require-fix|not-require-fix>, <tag2>, <tag3>\"\n");
-        sb.append("4. Строки 4+: 1–3 предложения.\n\n");
-        sb.append("Пиши по-русски, без markdown. Верни ТОЛЬКО этот текст.\n");
-
-        return sb.toString();
+        return params;
     }
 
-    // ==================== NEW: авто-промпт (LLM сам выбирает статус) ====================
+    /** Для prompts/auto-resolve.txt */
+    public static Map<String, String> buildAutoResolveParams(
+            Issue issue, List<String> snippet, List<String> availableTags) {
+        String ruleName = issue.ruleName != null ? issue.ruleName : "";
+        return baseIssueParams(issue, ruleName, snippet, availableTags);
+    }
+
+    /** Для prompts/analyze-issue.txt */
+    public static Map<String, String> buildAnalyzeIssueParams(
+            Issue issue, String ruleName, List<String> snippet, List<String> availableTags) {
+        return baseIssueParams(issue, ruleName, snippet, availableTags);
+    }
+
+    /** Для prompts/status-comment.txt */
+    public static Map<String, String> buildStatusCommentParams(
+            Issue issue, String ruleName, List<String> snippet,
+            String status, String statusLabel, List<String> availableTags) {
+        Map<String, String> params = baseIssueParams(issue, ruleName, snippet, availableTags);
+        String label = (statusLabel != null && !statusLabel.isEmpty())
+                ? statusLabel
+                : defaultStatusLabel(status);
+        params.put("STATUS",       status != null ? status : "");
+        params.put("STATUS_LABEL", label);
+        return params;
+    }
+
+    /** Для prompts/bulk-status-comment.txt */
+    public static Map<String, String> buildBulkStatusCommentParams(
+            List<Issue> issues, String status, String statusLabel,
+            List<String> availableTags) {
+        Map<String, String> params = new LinkedHashMap<>();
+
+        StringBuilder listSb = new StringBuilder();
+        for (int i = 0; i < issues.size(); i++) {
+            Issue it = issues.get(i);
+            String location = (it.component != null ? it.component : "")
+                    + (it.line > 0 ? ":" + it.line : "");
+            if (i > 0) listSb.append('\n');
+            listSb.append(i + 1).append(". ")
+                    .append(it.key).append(" | ")
+                    .append(it.rule).append(" | ")
+                    .append(location).append(" | ")
+                    .append(it.message != null ? it.message : "");
+        }
+
+        String tagsList = (availableTags != null && !availableTags.isEmpty())
+                ? String.join(", ", availableTags)
+                : "любые релевантные";
+
+        String label = (statusLabel != null && !statusLabel.isEmpty())
+                ? statusLabel
+                : defaultStatusLabel(status);
+
+        params.put("ISSUES_LIST",  listSb.toString());
+        params.put("ISSUES_COUNT", String.valueOf(issues.size()));
+        params.put("TAGS_LIST",    tagsList);
+        params.put("STATUS",       status != null ? status : "");
+        params.put("STATUS_LABEL", label);
+
+        // Пустые значения для тегов, которые использует шаблон, но не bulk-режим
+        putEmptyIfAbsent(params, "RULE_KEY");
+        putEmptyIfAbsent(params, "RULE_NAME");
+        putEmptyIfAbsent(params, "RULE_NAME_OR_KEY");
+        putEmptyIfAbsent(params, "MESSAGE");
+        putEmptyIfAbsent(params, "COMPONENT");
+        putEmptyIfAbsent(params, "FILE");
+        putEmptyIfAbsent(params, "LINE");
+        putEmptyIfAbsent(params, "LOCATION");
+        putEmptyIfAbsent(params, "SEVERITY");
+        putEmptyIfAbsent(params, "LANGUAGE");
+        putEmptyIfAbsent(params, "LANGUAGE_FENCE");
+        putEmptyIfAbsent(params, "CODE");
+        putEmptyIfAbsent(params, "CODE_RAW");
+
+        return params;
+    }
+
+    private static void putEmptyIfAbsent(Map<String, String> m, String k) {
+        if (!m.containsKey(k)) m.put(k, "");
+    }
+
+    // ==================== Fallback: жёстко зашитый промпт ====================
 
     public static String buildAutoResolvePrompt(Issue issue, List<String> snippet,
                                                 List<String> availableTags) {
@@ -274,114 +275,36 @@ public final class PromptBuilder {
 
         StringBuilder sb = new StringBuilder();
         sb.append("Ты — опытный разработчик и эксперт по SonarQube.\n\n");
-
         sb.append("ЗАДАЧА: определить статус, критичность, решение о фиксе, теги и обоснование.\n\n");
-
         sb.append("ОПРЕДЕЛЕНИЯ СТАТУСОВ:\n");
         sb.append("- falsepositive: SonarQube ошибся.\n");
         sb.append("- accept: реальная проблема, откладываем.\n");
         sb.append("- confirm: реальная и срочная.\n");
         sb.append("- resolve: уже исправлено.\n");
         sb.append("- wontfix: не будем исправлять.\n\n");
-
-        sb.append("=== ПРИЗНАКИ СГЕНЕРИРОВАННОГО КОДА ===\n");
-        sb.append("Файл СГЕНЕРИРОВАН, если ЛЮБОЙ признак верен:\n");
-        sb.append("- путь содержит \"/Api/\" и имя файла заканчивается на \"Api.php\" (OpenAPI client),\n");
-        sb.append("- путь содержит \"/Model/\" (сгенерированные модели),\n");
-        sb.append("- маркеры в коде: \"ObjectSerializer\", \"handleResponseWithDataType\", \"ApiException\",\n");
-        sb.append("  \"$this->config\", \"$this->headerSelector\", \"buildQuery\",\n");
-        sb.append("- расширения: .pb.go, .pb.php, .pb.cc, .g.cs, *_generated.*, *_pb2.py, *-openapi.*, *.g.dart.\n\n");
-
-        sb.append("ВАЖНО: сгенерированность файла — это КОНТЕКСТ, а не приговор.\n");
-        sb.append("Решение о фиксе определяется ХАРАКТЕРОМ ДЕФЕКТА, а не происхождением файла.\n\n");
-
-        sb.append("=== ПРИОРИТЕТ ПРАВИЛ (сверху вниз) ===\n");
-        sb.append("1) РЕАЛЬНАЯ ЛОГИЧЕСКАЯ ОШИБКА — приоритет выше, чем \"код сгенерирован\".\n");
-        sb.append("   Признаки (примеры, не исчерпывающе):\n");
-        sb.append("   - сравнение с заведомо невозможным значением: count($x) < 0,\n");
-        sb.append("     strlen($x) < 0, size() < 0, index < 0 для неотрицательного индекса;\n");
-        sb.append("     как следствие — недостижимая ветка throw/return/break (dead-code);\n");
-        sb.append("   - разыменование null без проверки, где по контракту null недопустим;\n");
-        sb.append("   - перепутаны == и =, инвертировано условие, неверный знак сравнения\n");
-        sb.append("     (< вместо >, <= вместо <) в валидации входных данных;\n");
-        sb.append("   - off-by-one в индексах/срезах, потеря или перезапись данных без сохранения;\n");
-        sb.append("   - утечка ресурса, небезопасный парсинг пользовательского ввода;\n");
-        sb.append("   - неверный тип поля в публичном контракте относительно OpenAPI-спеки.\n");
-        sb.append("   Для таких дефектов: статус = accept или confirm, фикс-тег = \"require-fix\".\n");
-        sb.append("   Исправлять нужно в коде, либо в спеке/генераторе — но дефект реален.\n");
-        sb.append("2) СТИЛИСТИКА / СТРУКТУРА — статус = accept или wontfix,\n");
-        sb.append("   фикс-тег = \"not-require-fix\". Сюда относится:\n");
-        sb.append("   - дублирование (в т.ч. одинаковые case в switch),\n");
-        sb.append("   - отсутствие default в switch,\n");
-        sb.append("   - длина методов, вложенность, naming, отсутствие Javadoc,\n");
-        sb.append("   - неиспользуемые импорты, магические числа,\n");
-        sb.append("   - любые замечания, которые исчезнут при следующей регенерации\n");
-        sb.append("     и НЕ влияют на поведение кода.\n\n");
-
-        sb.append("=== ЯЗЫКОВЫЕ СИГНАЛЫ (привязаны к типу дефекта) ===\n");
-        sb.append("Фразы \"нарушает читаемость но не ломает\", \"косметическая проблема\",\n");
-        sb.append("\"стилистика\", \"не соответствует конвенции\", \"избыточно, но работает\" —\n");
-        sb.append("это сигнал поставить \"not-require-fix\".\n");
-        sb.append("Фразы \"условие никогда не выполнится\", \"недостижимый код\",\n");
-        sb.append("\"dead code\", \"всегда false/true\", \"логическая ошибка\", \"ветка мертва\",\n");
-        sb.append("\"потенциальный NullPointer/TypeError\", \"потеря данных\", \"неверный контракт\" —\n");
-        sb.append("это сигнал поставить \"require-fix\", даже если файл сгенерирован.\n\n");
-
         sb.append("=== РЕШЕНИЕ О НЕОБХОДИМОСТИ ИСПРАВЛЕНИЯ ===\n");
         sb.append("Верни РОВНО ОДИН из двух тегов в поле \"Теги:\"\n");
-        sb.append("- \"require-fix\"     — дефект РЕАЛЬНЫЙ (логическая ошибка / dead-code /\n");
-        sb.append("                        неверный контракт / потеря данных), НУЖНО исправить —\n");
-        sb.append("                        независимо от того, сгенерирован файл или написан вручную.\n");
-        sb.append("- \"not-require-fix\" — исправление не требуется: стилистика, дублирование,\n");
-        sb.append("                        false positive, wontfix, шум сгенерированного кода\n");
-        sb.append("                        без влияния на поведение.\n\n");
-
-        sb.append("=== СВЯЗЬ СТАТУСА И ФИКС-ТЕГА ===\n");
-        sb.append("- status=confirm       → require-fix\n");
-        sb.append("- status=resolve       → not-require-fix (уже исправлено)\n");
-        sb.append("- status=wontfix       → not-require-fix\n");
-        sb.append("- status=falsepositive → not-require-fix\n");
-        sb.append("- status=accept:\n");
-        sb.append("    * ручной код + реальный баг          → require-fix\n");
-        sb.append("    * сгенерированный код + реальный баг → require-fix   ← это важно\n");
-        sb.append("    * ручной код + стилистика            → not-require-fix\n");
-        sb.append("    * сгенерированный код + стилистика   → not-require-fix\n\n");
-
-        sb.append("=== ЭТАЛОННЫЙ ПРИМЕР ===\n");
-        sb.append("Файл: src/Model/AddDirsItems.php (сгенерирован OpenAPI-генератором)\n");
-        sb.append("Правило: Array or Countable object count comparisons should make sense\n");
-        sb.append("Код: if (!is_null($services) && (count($services) < 0)) { throw ... }\n");
-        sb.append("Правильный ответ:\n");
-        sb.append("  Статус: accept\n");
-        sb.append("  Критичность: подтверждаю — count() всегда >= 0, ветка throw недостижима,\n");
-        sb.append("    это dead-code и неверная валидация входных данных.\n");
-        sb.append("  Теги: require-fix, code-smell\n");
-        sb.append("  Обоснование: файл сгенерирован, но дефект реальный; проверка длины массива\n");
-        sb.append("    не работает — надо исправить в коде или в спеке/генераторе.\n\n");
-
+        sb.append("- \"require-fix\"     — дефект РЕАЛЬНЫЙ, НУЖНО исправить.\n");
+        sb.append("- \"not-require-fix\" — исправление не требуется.\n\n");
         sb.append("ДОСТУПНЫЕ ТЕГИ (используй ТОЛЬКО из этого списка): ").append(tagsList).append("\n");
         sb.append("В поле \"Теги:\" верни СНАЧАЛА require-fix или not-require-fix,\n");
         sb.append("затем 1–2 тега СТРОГО из списка выше.\n\n");
-
         sb.append("Контекст:\n");
         sb.append("- Правило: ").append(ruleCtx).append("\n");
         sb.append("- Сообщение: ").append(issue.message != null ? issue.message : "").append("\n");
         sb.append("- Файл: ").append(filePath).append(issue.line > 0 ? ":" + issue.line : "").append("\n");
         sb.append("- Severity: ").append(severity).append("\n");
         sb.append("- Язык: ").append(lang.name).append("\n\n");
-
         sb.append("Код:\n");
         sb.append("```").append(lang.codeFence).append("\n");
         sb.append(code).append("\n");
         sb.append("```\n\n");
-
         sb.append("ФОРМАТ ОТВЕТА (СТРОГО, без отклонений):\n");
         sb.append("1. Строка 1: \"Статус: <accept|falsepositive|confirm|resolve|wontfix>\"\n");
         sb.append("2. Строка 2: \"Критичность: <подтверждаю|завышена|занижена> — <обоснование>\"\n");
         sb.append("3. Строка 3: \"Теги: <require-fix|not-require-fix>, <tag2>, <tag3>\"\n");
         sb.append("4. Строки 4+: 1–3 предложения.\n\n");
         sb.append("Пиши по-русски, без markdown. Верни ТОЛЬКО этот текст.\n");
-
         return sb.toString();
     }
 }

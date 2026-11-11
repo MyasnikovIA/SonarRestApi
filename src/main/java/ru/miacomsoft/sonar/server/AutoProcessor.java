@@ -17,18 +17,16 @@ import java.util.function.BooleanSupplier;
 
 /**
  * Массовая автоматическая обработка issues через Ollama.
- * Аналог JS-функционала "Добавить автоматически комментарий" из perfile/details.
  *
- * Поведение при ошибках:
- *   - SessionExpiredException (HTTP 401) — немедленная остановка всего прогона,
- *     флаг sessionExpired = true, инструкция пользователю выводится в Console;
- *   - 3 подряд сетевые ошибки (Ollama/сеть) — тоже остановка (нет смысла ждать);
- *   - любая другая ошибка — failed++, продолжаем со следующего issue;
- *   - по завершении — failedKeys записываются в файл auto-failed-*.txt.
+ * Промпт рендерится из prompts/auto-resolve.txt (PromptTemplate).
+ * Если шаблон недоступен / пуст → fallback на hardcoded
+ * PromptBuilder.buildAutoResolvePrompt.
+ *
+ * Теги: существующие у issue + предложенные LLM
+ * (require-fix ↔ not-require-fix заменяют друг друга).
  */
 public class AutoProcessor {
 
-    /** Порог подряд идущих сетевых ошибок для аварийной остановки. */
     private static final int MAX_CONSECUTIVE_NETWORK_ERRORS = 3;
 
     public interface ProgressCallback {
@@ -36,7 +34,7 @@ public class AutoProcessor {
     }
 
     public static class Progress {
-        public String phase;    // preparing | ollama | applying | done | failed | complete
+        public String phase;
         public int    current;
         public int    total;
         public String issueKey;
@@ -51,7 +49,7 @@ public class AutoProcessor {
         public boolean sessionExpired;
         public boolean abortedByNetwork;
         public String  abortReason;
-        public String  failedFile;                 // путь к сохранённому *.txt
+        public String  failedFile;
         public final List<String> failedKeys   = new ArrayList<>();
         public final Map<String, Integer> byStatus       = new TreeMap<>();
         public final Map<String, Integer> byFixDecision  = new TreeMap<>();
@@ -60,11 +58,12 @@ public class AutoProcessor {
     public static Stats processAll(ServerState state, String project,
                                    String sev, String qual,
                                    OllamaConfig config,
+                                   PromptTemplate template,
                                    ProgressCallback onProgress,
                                    BooleanSupplier stopChecker) throws Exception {
 
         SonarIssuesApi api = state.newApi(project);
-        List<Issue> issues = api.fetchOpen(sev, qual);  // OPEN (+REOPENED, если поддерживается)
+        List<Issue> issues = api.fetchOpen(sev, qual);
 
         Stats stats = new Stats();
         stats.total = issues.size();
@@ -75,7 +74,6 @@ public class AutoProcessor {
             return stats;
         }
 
-        // Доступные теги — 1 раз на прогон, пополняем по ходу
         List<String> availableTags = new ArrayList<>();
         try {
             List<String> raw = api.fetchTags(null);
@@ -86,14 +84,13 @@ public class AutoProcessor {
 
         OllamaClient ollama = new OllamaClient(config);
         SonarBulkApi bulk   = state.newBulk();
-        bulk.setSilent(true);                    // ← убираем "Батч 1/1 ... OK"
+        bulk.setSilent(true);
 
         int i = 0;
         int consecutiveNetworkErrors = 0;
         long runT0 = System.currentTimeMillis();
 
         for (Issue it : issues) {
-            // ---- graceful stop между итерациями ----
             if (stopChecker != null && stopChecker.getAsBoolean()) {
                 stats.cancelled = true;
                 System.err.println("[auto] остановка запрошена пользователем");
@@ -122,8 +119,23 @@ public class AutoProcessor {
                 try { snippet = api.fetchSnippet(it.key); }
                 catch (Exception e) { snippet = new ArrayList<>(); }
 
-                // ---------- 3. prompt ----------
-                String prompt = PromptBuilder.buildAutoResolvePrompt(it, snippet, availableTags);
+                // ---------- 3. prompt: из файла prompts/auto-resolve.txt ----------
+                String prompt;
+                try {
+                    Map<String, String> params =
+                            PromptBuilder.buildAutoResolveParams(it, snippet, availableTags);
+                    prompt = template.render("auto-resolve", params);
+                    // Пустая строка после render (например, файл есть, но пустой) — fallback
+                    if (prompt == null || prompt.isBlank()) {
+                        System.err.println("[auto] rendered prompt is blank for " + it.key
+                                + ", using fallback");
+                        prompt = PromptBuilder.buildAutoResolvePrompt(it, snippet, availableTags);
+                    }
+                } catch (Exception e) {
+                    System.err.println("[auto] template render failed for " + it.key
+                            + ", using fallback: " + e.getMessage());
+                    prompt = PromptBuilder.buildAutoResolvePrompt(it, snippet, availableTags);
+                }
 
                 // ---------- 4. Ollama ----------
                 prog.phase  = "ollama";
@@ -144,10 +156,16 @@ public class AutoProcessor {
 
                 bulk.change(List.of(it), parsed.status, parsed.comment);
 
-                // ---------- 6. Применяем теги ----------
-                if (!parsed.tags.isEmpty()) {
+                // ---------- 6. Теги: существующие + LLM ----------
+                Set<String> finalTags = new LinkedHashSet<>();
+                if (it.tags != null) finalTags.addAll(it.tags);
+                if (parsed.tags.contains("require-fix"))     finalTags.remove("not-require-fix");
+                if (parsed.tags.contains("not-require-fix")) finalTags.remove("require-fix");
+                finalTags.addAll(parsed.tags);
+
+                if (!finalTags.isEmpty()) {
                     try {
-                        bulk.setTags(List.of(it), String.join(",", parsed.tags));
+                        bulk.setTags(List.of(it), String.join(",", finalTags));
                     } catch (Exception e) {
                         System.err.println("[auto] setTags " + it.key + ": " + e.getMessage());
                     }
@@ -155,7 +173,7 @@ public class AutoProcessor {
 
                 // ---------- 7. Локальное обновление + статистика ----------
                 it.status = parsed.status;
-                it.tags   = parsed.tags;
+                it.tags   = new ArrayList<>(finalTags);
 
                 for (String t : parsed.tags) {
                     if (!availableTags.contains(t)) availableTags.add(t);
@@ -174,7 +192,6 @@ public class AutoProcessor {
                 consecutiveNetworkErrors = 0;
 
             } catch (SessionExpiredException see) {
-                // ---- сессия истекла: СТОП ----
                 stats.sessionExpired = true;
                 stats.failed++;
                 stats.failedKeys.add(it.key);
@@ -185,7 +202,6 @@ public class AutoProcessor {
                 break;
 
             } catch (Exception e) {
-                // ---- обычная ошибка ----
                 stats.failed++;
                 stats.failedKeys.add(it.key);
 
@@ -211,7 +227,6 @@ public class AutoProcessor {
             }
         }
 
-        // ---- сохранение failed keys ----
         if (!stats.failedKeys.isEmpty()) {
             try {
                 Path out = Path.of("auto-failed-" + sanitize(project) + "-"
@@ -245,8 +260,6 @@ public class AutoProcessor {
 
         return stats;
     }
-
-    // ==================== helpers ====================
 
     private static boolean isNetworkError(Throwable e) {
         if (e == null) return false;

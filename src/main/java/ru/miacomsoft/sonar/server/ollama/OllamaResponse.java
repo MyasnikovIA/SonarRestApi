@@ -5,15 +5,6 @@ import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/**
- * Парсер ответа LLM. Порт parseOllamaResponse.js.
- *
- * Формат:
- *   Статус: <accept|falsepositive|confirm|resolve|wontfix>
- *   Критичность: <подтверждаю|завышена|занижена> — <обоснование>
- *   Теги: <require-fix|not-require-fix>, <tag2>, <tag3>
- *   <1–3 предложения>
- */
 public class OllamaResponse {
 
     private static final Pattern STATUS_RE =
@@ -33,18 +24,16 @@ public class OllamaResponse {
         if (raw == null) raw = "";
         r.raw = raw;
 
-        // Снимаем markdown-обёртки (**bold**, `code`, _italic_), чтобы "**Статус:**" работало
         String cleaned = raw.replaceAll("[*`_]", "");
 
         Matcher sm = STATUS_RE.matcher(cleaned);
         if (sm.find()) r.status = sm.group(1).toLowerCase();
 
-        // Теги
         List<String> rawTags = new ArrayList<>();
         Matcher tm = TAGS_RE.matcher(cleaned);
         if (tm.find()) {
             String tagsStr = tm.group(1);
-            for (String t : tagsStr.split("[,;]")) {
+            for (String t : tagsStr.split("[,;\\s]+")) {
                 String v = t.replaceAll("[*`_]", "").trim().toLowerCase();
                 if (!v.isEmpty()) rawTags.add(v);
             }
@@ -64,7 +53,6 @@ public class OllamaResponse {
             r.tags.add(t);
         }
 
-        // Комментарий: всё после строки "Критичность:"
         StringBuilder cb = new StringBuilder();
         boolean inComment = false;
         for (String line : raw.split("\\r?\\n")) {
@@ -79,7 +67,6 @@ public class OllamaResponse {
         }
         r.comment = cb.toString().trim();
 
-        // Fallback: если «Критичность:» не встретилась — берём всё, кроме служебных строк
         if (r.comment.isEmpty()) {
             StringBuilder alt = new StringBuilder();
             for (String line : raw.split("\\r?\\n")) {

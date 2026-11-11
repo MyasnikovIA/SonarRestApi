@@ -6,6 +6,8 @@ import org.json.JSONObject;
 import ru.miacomsoft.sonar.Issue;
 import ru.miacomsoft.sonar.SonarIssuesApi;
 import ru.miacomsoft.sonar.server.BaseHandler;
+import ru.miacomsoft.sonar.server.BootstrapFiles;
+import ru.miacomsoft.sonar.server.PromptTemplate;
 import ru.miacomsoft.sonar.server.ServerState;
 
 import java.util.ArrayList;
@@ -15,7 +17,9 @@ import java.util.Map;
 /**
  * GET /api/prompt?project=KEY&issueKey=KEY[&status=accept][&statusLabel=...]
  *
- * Возвращает готовый текст промпта для передачи в LLM.
+ * Legacy-эндпоинт. Возвращает готовый текст промпта для передачи в LLM.
+ * Рендерит из prompts/status-comment.txt через PromptTemplate — тот же
+ * шаблон, что использует /api/prompt/build?name=status-comment.
  *
  * Внутри делает все необходимые подзапросы к SonarQube:
  *   - /api/issues/search?issues=KEY          (данные issue)
@@ -42,8 +46,24 @@ import java.util.Map;
  */
 public class PromptHandler extends BaseHandler {
 
+    private final PromptTemplate template;
+
+    /**
+     * Конструктор для обратной совместимости: сам находит каталог промптов
+     * через BootstrapFiles.resolvePromptsDir().
+     */
     public PromptHandler(ServerState state) {
         super(state);
+        this.template = new PromptTemplate(BootstrapFiles.resolvePromptsDir());
+    }
+
+    /**
+     * Основной конструктор: принимает общий PromptTemplate от ApiServer,
+     * чтобы не создавать лишний экземпляр.
+     */
+    public PromptHandler(ServerState state, PromptTemplate template) {
+        super(state);
+        this.template = template;
     }
 
     @Override
@@ -94,9 +114,25 @@ public class PromptHandler extends BaseHandler {
             }
         }
 
-        // 5) Сборка промпта
-        String prompt = PromptBuilder.buildStatusCommentPrompt(
-                issue, ruleName, snippet, status, statusLabel, availableTags);
+        // 5) Сборка промпта: params → PromptTemplate.render("status-comment", params)
+        String prompt;
+        try {
+            Map<String, String> params = PromptBuilder.buildStatusCommentParams(
+                    issue, ruleName, snippet, status, statusLabel, availableTags);
+            prompt = template.render("status-comment", params);
+        } catch (Exception e) {
+            sendError(ex, 500,
+                    "Не удалось построить промпт из " + template.getPromptsDir()
+                            + "/status-comment.txt: " + e.getMessage());
+            return;
+        }
+
+        if (prompt == null || prompt.isBlank()) {
+            sendError(ex, 500,
+                    "Файл prompts/status-comment.txt пуст или не содержит [TAG]-полей: "
+                            + template.getPromptsDir());
+            return;
+        }
 
         // 6) Ответ
         String severity = (issue.impactSeverity != null && !issue.impactSeverity.isEmpty())

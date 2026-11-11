@@ -13,6 +13,77 @@ import {
     applyParsedTags
 } from '../tags.js';
 
+// ---- Человекочитаемые названия полей SonarQube ----
+const FIELD_LABELS = {
+    'status':     'Статус',
+    'resolution': 'Резолюция',
+    'assignee':   'Исполнитель',
+    'tags':       'Теги',
+    'severity':   'Критичность',
+    'type':       'Тип',
+    'file':       'Файл',
+    'rule':       'Правило',
+    'comment':    'Комментарий',
+};
+
+function fieldLabel(key) {
+    return FIELD_LABELS[key] || key;
+}
+
+function formatDate(iso) {
+    if (!iso) return '';
+    try { return new Date(iso).toLocaleString('ru-RU'); }
+    catch { return iso; }
+}
+
+// ---- Рендер одного события таймлайна ----
+function renderTimelineEvent(e) {
+    const dateStr = formatDate(e.date);
+
+    if (e.type === 'comment') {
+        return `
+            <div style="margin-bottom:10px; padding-bottom:10px; border-bottom:1px solid var(--border);">
+                <div style="margin-bottom:4px; display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
+                    <span>💬</span>
+                    <span style="color:var(--accent); font-weight:bold;">${esc(e.userName)}</span>
+                    <span style="color:var(--text-dim);">${esc(dateStr)}</span>
+                </div>
+                <div style="background:var(--bg); border-left:3px solid var(--accent);
+                            padding:6px 10px; border-radius:0 4px 4px 0;
+                            white-space:pre-wrap;">${esc(e.text)}</div>
+            </div>
+        `;
+    }
+
+    const hasStatusChange = e.diffs.some(d => d.key === 'status');
+    const icon = hasStatusChange ? '🔄' : '✏️';
+
+    const diffsHtml = e.diffs.map(diff => {
+        const label = fieldLabel(diff.key);
+        const oldVal = diff.oldValue || '—';
+        const newVal = diff.newValue || '—';
+        return `
+            <div style="margin:2px 0 2px 20px;">
+                <span style="color:var(--text-dim);">${esc(label)}:</span>
+                <span style="color:var(--text-dim); text-decoration:line-through;">${esc(oldVal)}</span>
+                &rarr;
+                <b style="color:var(--text);">${esc(newVal)}</b>
+            </div>
+        `;
+    }).join('');
+
+    return `
+        <div style="margin-bottom:10px; padding-bottom:10px; border-bottom:1px solid var(--border);">
+            <div style="margin-bottom:4px; display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
+                <span>${icon}</span>
+                <span style="color:var(--accent); font-weight:bold;">${esc(e.userName)}</span>
+                <span style="color:var(--text-dim);">${esc(dateStr)}</span>
+            </div>
+            ${diffsHtml}
+        </div>
+    `;
+}
+
 export async function openIssueModal(issue, ctx, reloadCb) {
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
@@ -34,10 +105,16 @@ export async function openIssueModal(issue, ctx, reloadCb) {
     overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
 
     try {
+        // Параллельно: данные issue (tags, comments, snippet) + changelog
         const p = new URLSearchParams();
         if (ctx.state.project) p.set('project', ctx.state.project);
         p.set('issueKey', issue.key);
-        const d = await ctx.api('/api/snippet?' + p);
+
+        const [d, ch] = await Promise.all([
+            ctx.api('/api/snippet?' + p),
+            ctx.api('/api/changelog?' + p).catch(() => ({ changelog: [] }))
+        ]);
+
         const it = d.issue || issue;
 
         const availableTags = await fetchAvailableTags(ctx);
@@ -57,20 +134,46 @@ export async function openIssueModal(issue, ctx, reloadCb) {
             renderTagCheckboxes(overlay.querySelector('#modal-tags-list'), ordered, selectedTags);
         }
 
-        const comments = it.comments || d.comments || [];
-        const commentsHtml = comments.length > 0 ? `
-            <div style="margin-top:16px;">
-                <label style="display:block; font-size:12px; margin-bottom:4px; color:var(--text-dim);">История комментариев:</label>
-                <div style="background:var(--bg3); border:1px solid var(--border); border-radius:6px; padding:12px; max-height:150px; overflow-y:auto; font-size:12px;">
-                    ${comments.map(c => `
-                        <div style="margin-bottom:8px; padding-bottom:8px; border-bottom:1px solid var(--border);">
-                            <div style="color:var(--accent); font-weight:bold; margin-bottom:4px;">${esc(c.login || 'Пользователь')} (${new Date(c.createdAt).toLocaleString()}):</div>
-                            <div style="white-space:pre-wrap;">${esc(c.markdown || c.htmlText || '')}</div>
-                        </div>
-                    `).join('')}
-                </div>
-            </div>
-        ` : '';
+        // ---- Единый таймлайн: changelog + comments ----
+        const changelog = ch.changelog || [];
+        const comments  = it.comments || d.comments || [];
+
+        const events = [];
+
+        changelog.forEach(entry => {
+            events.push({
+                type: 'change',
+                user: entry.user,
+                userName: entry.userName || entry.user || 'Пользователь',
+                date: entry.creationDate,
+                diffs: entry.diffs || []
+            });
+        });
+
+        comments.forEach(c => {
+            events.push({
+                type: 'comment',
+                user: c.login,
+                userName: c.login || 'Пользователь',
+                date: c.createdAt,
+                text: c.markdown || c.htmlText || ''
+            });
+        });
+
+        // Сортировка по убыванию даты
+        events.sort((a, b) => {
+            const da = a.date ? new Date(a.date).getTime() : 0;
+            const db = b.date ? new Date(b.date).getTime() : 0;
+            return db - da;
+        });
+
+        const timelineHtml = events.length > 0
+            ? `<div style="background:var(--bg3); border:1px solid var(--border);
+                           border-radius:6px; padding:12px; max-height:220px;
+                           overflow-y:auto; font-size:12px;">
+                ${events.map(renderTimelineEvent).join('')}
+               </div>`
+            : `<div class="empty">Нет истории изменений и комментариев</div>`;
 
         const body = overlay.querySelector('#modal-body');
         body.innerHTML = `
@@ -90,7 +193,12 @@ export async function openIssueModal(issue, ctx, reloadCb) {
                 ? `<pre class="code" style="max-height:300px; overflow:auto;">${highlightCode(d.snippet.join('\n'))}</pre>`
                 : `<div class="empty">Код недоступен</div>`}
 
-            ${commentsHtml}
+            <div style="margin-top:16px;">
+                <label style="display:block; font-size:12px; margin-bottom:4px; color:var(--text-dim);">
+                    📜 История изменений и комментарии (${events.length})
+                </label>
+                ${timelineHtml}
+            </div>
 
             <div style="margin-top:16px;">
                 <label style="display:block; font-size:12px; margin-bottom:4px;">Теги</label>
@@ -193,12 +301,12 @@ export async function openIssueModal(issue, ctx, reloadCb) {
             const tagsChanged = tagsStr !== (it.tags || []).join(',');
 
             try {
-                const p = new URLSearchParams(ctx.qs());
-                p.set('key', it.key);
-                p.set('transition', status);
-                p.set('comment', comment);
-                p.set('dryRun', 'false');
-                const res = await ctx.api('/api/mark?' + p, { method: 'POST' });
+                const pp = new URLSearchParams(ctx.qs());
+                pp.set('key', it.key);
+                pp.set('transition', status);
+                pp.set('comment', comment);
+                pp.set('dryRun', 'false');
+                const res = await ctx.api('/api/mark?' + pp, { method: 'POST' });
                 if (res.success === false) throw new Error(res.error || 'Ошибка применения');
 
                 if (tagsChanged) {
@@ -226,11 +334,11 @@ export async function openIssueModal(issue, ctx, reloadCb) {
             overlay.querySelector('#modal-btn-reopen').addEventListener('click', async () => {
                 if (!confirm('Отменить комментарий (reopen)? Старые комментарии останутся в истории.')) return;
                 try {
-                    const p = new URLSearchParams(ctx.qs());
-                    p.set('key', it.key);
-                    p.set('transition', getReopenTransition(it.status));
-                    p.set('dryRun', 'false');
-                    const res = await ctx.api('/api/mark?' + p, { method: 'POST' });
+                    const pp = new URLSearchParams(ctx.qs());
+                    pp.set('key', it.key);
+                    pp.set('transition', getReopenTransition(it.status));
+                    pp.set('dryRun', 'false');
+                    const res = await ctx.api('/api/mark?' + pp, { method: 'POST' });
                     if (res.success === false) throw new Error(res.error || 'reopen failed');
                     ctx.toast('Статус сброшен');
                     close();

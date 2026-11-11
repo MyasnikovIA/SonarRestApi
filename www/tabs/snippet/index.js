@@ -21,7 +21,12 @@ export const snippet = {
             if (ctx.state.project) p.set('project', ctx.state.project);
             p.set('issueKey', key);
 
-            const d = await ctx.api('/api/snippet?' + p);
+            // Параллельно: данные issue (включая tags и comments) + changelog
+            const [d, ch] = await Promise.all([
+                ctx.api('/api/snippet?' + p),
+                ctx.api('/api/changelog?' + p).catch(() => ({ changelog: [] }))
+            ]);
+
             const it = d.issue;
             if (!it) {
                 el.innerHTML = '<div class="empty">Issue не найден</div>';
@@ -29,6 +34,67 @@ export const snippet = {
             }
 
             const isMarked = it.status !== 'OPEN' && it.status !== 'REOPENED';
+            const tags       = it.tags || [];
+            const comments   = it.comments || [];
+            const changelog  = ch.changelog || [];
+
+            // ---------- Tags ----------
+            const tagsHtml = tags.length > 0
+                ? `<div style="display:flex; flex-wrap:wrap; gap:6px;">
+                    ${tags.map(t => `
+                        <span style="display:inline-block; padding:3px 10px; border-radius:10px;
+                                     background:var(--bg3); border:1px solid var(--border);
+                                     font-size:12px;">${esc(t)}</span>
+                    `).join('')}
+                   </div>`
+                : `<div class="empty">Нет активных тегов</div>`;
+
+            // ---------- Changelog ----------
+            const changelogHtml = changelog.length > 0
+                ? `<div style="background:var(--bg3); border:1px solid var(--border);
+                               border-radius:6px; padding:12px; max-height:260px;
+                               overflow-y:auto; font-size:12px;">
+                    ${changelog.map(c => `
+                        <div style="margin-bottom:8px; padding-bottom:8px;
+                                    border-bottom:1px solid var(--border);">
+                            <div style="color:var(--accent); font-weight:bold; margin-bottom:4px;">
+                                ${esc(c.userName || c.user || 'Пользователь')}
+                                <span style="color:var(--text-dim); font-weight:normal;">
+                                    (${new Date(c.creationDate).toLocaleString()})
+                                </span>
+                            </div>
+                            <div>
+                                ${(c.diffs || []).map(diff => `
+                                    <div>
+                                        <span style="color:var(--text-dim)">${esc(diff.key)}:</span>
+                                        ${esc(diff.oldValue || '—')} &rarr; <b>${esc(diff.newValue || '')}</b>
+                                    </div>
+                                `).join('')}
+                            </div>
+                        </div>
+                    `).join('')}
+                   </div>`
+                : `<div class="empty">Нет истории изменений</div>`;
+
+            // ---------- Comments ----------
+            const commentsHtml = comments.length > 0
+                ? `<div style="background:var(--bg3); border:1px solid var(--border);
+                               border-radius:6px; padding:12px; max-height:260px;
+                               overflow-y:auto; font-size:12px;">
+                    ${comments.map(c => `
+                        <div style="margin-bottom:8px; padding-bottom:8px;
+                                    border-bottom:1px solid var(--border);">
+                            <div style="color:var(--accent); font-weight:bold; margin-bottom:4px;">
+                                ${esc(c.login || 'Пользователь')}
+                                <span style="color:var(--text-dim); font-weight:normal;">
+                                    (${new Date(c.createdAt).toLocaleString()})
+                                </span>
+                            </div>
+                            <div style="white-space:pre-wrap;">${esc(c.markdown || c.htmlText || '')}</div>
+                        </div>
+                    `).join('')}
+                   </div>`
+                : `<div class="empty">Нет комментариев</div>`;
 
             el.innerHTML = `
                 <div class="card">
@@ -54,7 +120,23 @@ export const snippet = {
                     <div style="color:var(--text-dim);font-size:11px;margin-top:8px;">
                         source: ${esc(d.source)}
                     </div>
-                </div>`;
+                </div>
+
+                <div class="card">
+                    <h4 style="margin-top:0;">🏷️ Активные теги (${tags.length})</h4>
+                    ${tagsHtml}
+                </div>
+
+                <div class="card">
+                    <h4 style="margin-top:0;">📜 История изменений (${changelog.length})</h4>
+                    ${changelogHtml}
+                </div>
+
+                <div class="card">
+                    <h4 style="margin-top:0;">💬 Комментарии (${comments.length})</h4>
+                    ${commentsHtml}
+                </div>
+            `;
 
             el.querySelector('#sn-btn-tags').addEventListener('click', () => {
                 showTagEditor([it], ctx, () => snippet.mount(el, ctx));

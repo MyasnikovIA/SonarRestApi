@@ -110,9 +110,12 @@
         </label>
         <label data-filter="issueKey">Ключ (issueKey)
             <div style="display:flex; gap:8px;">
-                <select id="issueKey" style="flex:1; max-width:300px; padding:6px 10px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text); font-size:13px;">
-                    <option value="">-- Выберите ключ --</option>
-                </select>
+                <input id="issueKey" type="text" list="issueKeysList"
+                       placeholder="Начните вводить ключ…"
+                       style="flex:1; max-width:300px; padding:6px 10px; border-radius:6px;
+                      border:1px solid var(--border); background:var(--bg);
+                      color:var(--text); font-size:13px;">
+                <datalist id="issueKeysList"></datalist>
                 <button id="btn-download-keys" class="btn" title="Скачать список ключей в TXT">📥 Экспорт</button>
             </div>
         </label>

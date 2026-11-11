@@ -10,7 +10,6 @@ import { session } from './tabs/session.js';
 import { status }  from './tabs/status.js';
 import { openOllamaSettingsModal } from './ollama.js';
 
-// ВОТ ЗДЕСЬ БЫЛ ПРОПУЩЕН accepted — теперь он добавлен
 const TABS = [summary, matrix, perfile, details, issues, accepted, snippet, session, status];
 const TAB_BY_ID = Object.fromEntries(TABS.map(t => [t.id, t]));
 
@@ -80,36 +79,41 @@ async function activateTab(id) {
 // ============ Загрузка ключей ============
 
 async function loadKeysToSelect() {
-    const select = document.getElementById('issueKey');
-    if (!select) return;
+    const input    = document.getElementById('issueKey');
+    const datalist = document.getElementById('issueKeysList');
+    if (!input || !datalist) return;
 
-    const currentVal = select.value;
-    select.innerHTML = '<option value="">Загрузка...</option>';
+    const currentVal = input.value;
 
     try {
         const d = await api('/api/keys?' + ctx.qs());
         const keys = d.keys || [];
 
-        select.innerHTML = '<option value="">-- Выберите ключ --</option>';
+        // Перестраиваем datalist
+        datalist.innerHTML = '';
         keys.forEach(k => {
             const opt = document.createElement('option');
             opt.value = k;
-            opt.textContent = k;
-            select.appendChild(opt);
+            datalist.appendChild(opt);
         });
 
+        // Восстанавливаем ввод: приоритет — то, что уже введено пользователем,
+        // иначе — сохранённый state.issueKey, иначе — первый ключ.
         if (currentVal && keys.includes(currentVal)) {
-            select.value = currentVal;
+            input.value = currentVal;
+            state.issueKey = currentVal;
+        } else if (state.issueKey && keys.includes(state.issueKey)) {
+            input.value = state.issueKey;
         } else if (keys.length > 0) {
-            select.value = keys[0];
+            input.value = keys[0];
             state.issueKey = keys[0];
             localStorage.setItem('issueKey', state.issueKey);
         } else {
+            input.value = '';
             state.issueKey = '';
             localStorage.setItem('issueKey', '');
         }
     } catch (e) {
-        select.innerHTML = '<option value="">Ошибка загрузки</option>';
         toast('Не удалось загрузить ключи: ' + e.message, true);
     }
 }
@@ -356,6 +360,7 @@ function initUI() {
     $('sev').value      = state.sev;
     $('qual').value     = state.qual;
     $('snippets').value = state.snippets;
+    $('issueKey').value = state.issueKey;
 
     loadKeysToSelect();
     loadMeasures();
@@ -381,11 +386,24 @@ function initUI() {
         localStorage.setItem('snippets', state.snippets);
     });
 
+    // Коммитим значение при уходе с поля или выборе из datalist
     $('issueKey').addEventListener('change', e => {
-        state.issueKey = e.target.value;
+        state.issueKey = e.target.value.trim();
         localStorage.setItem('issueKey', state.issueKey);
         if (state.activeTab === 'snippet') {
             activateTab('snippet');
+        }
+    });
+
+    // Enter — принудительная перезагрузка snippet даже без blur
+    $('issueKey').addEventListener('keydown', e => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            state.issueKey = e.target.value.trim();
+            localStorage.setItem('issueKey', state.issueKey);
+            if (state.activeTab === 'snippet') {
+                activateTab('snippet');
+            }
         }
     });
 

@@ -269,12 +269,24 @@ export function openAutoBulkModal(issues, ctx, reloadCb) {
                 console.groupEnd();
 
                 const parsed = parseOllamaResponse(fullResponse);
+
+                // ---- ЗАЩИТА: если LLM не вернул статус — не отправляем пустой transition ----
+                if (!parsed.status) {
+                    console.error('[Ollama AUTO] empty status in response:', fullResponse);
+                    ui.log.textContent = 'LLM не вернул статус. Проверьте ответ модели.';
+                    ui.progress.textContent = 'Остановлено: невалидный ответ LLM';
+                    isProcessing = false;
+                    hasGenerated = false;
+                    updateUI();
+                    toast('LLM не вернул статус в ответе — перепроверьте промпт/модель', true);
+                    return;
+                }
+
                 ui.statusSel.value = parsed.status;
                 ui.commentTa.value = parsed.comment;
 
                 currentSuggestedTags = parsed.tags || [];
                 if (currentSuggestedTags.length > 0) {
-                    // ИСПРАВЛЕНО: взаимоисключающие теги снимаются автоматически
                     const { removed } = applyParsedTags(selectedTags, currentSuggestedTags, availableTags);
                     renderAutoTagList();
 
@@ -331,6 +343,16 @@ export function openAutoBulkModal(issues, ctx, reloadCb) {
             const it = issues[currentIndex];
             const status = ui.statusSel.value;
             const comment = ui.commentTa.value;
+
+            // ---- ЗАЩИТА: не отправляем пустой transition ----
+            if (!status) {
+                ui.log.textContent = 'Ошибка: не выбран статус перехода';
+                isProcessing = false;
+                hasGenerated = false;
+                updateUI();
+                toast('Выберите статус перехода', true);
+                return;
+            }
 
             ui.log.textContent = 'Применение...';
 

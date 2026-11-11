@@ -81,8 +81,11 @@ export async function openIssueModal(issue, ctx, reloadCb) {
             <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px 16px; margin-bottom:16px; font-size:12px; color:var(--text-dim);">
                 <div><b>Файл:</b> ${esc(it.component)}</div>
                 <div><b>Строка:</b> ${it.line}</div>
-                <div><b>Правило:</b> <code>${esc(it.rule || '')}</code></div>
-                <div><b>Имя правила:</b> ${esc(d.ruleName || '—')}</div>
+                <div style="grid-column: 1 / -1;">
+                    <b>Правило:</b>
+                    <code>${esc(it.rule || '')}</code>
+                    ${d.ruleName && d.ruleName !== it.rule ? ' — ' + esc(d.ruleName) : ''}
+                </div>
                 <div><b>Severity:</b> <span class="sev-${esc(it.impactSeverity || it.severity || '')}">${esc(it.impactSeverity || it.severity)}</span></div>
                 <div><b>Текущий статус:</b> ${esc(it.status)}</div>
             </div>

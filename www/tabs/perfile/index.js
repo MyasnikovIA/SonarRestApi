@@ -18,7 +18,7 @@ export const perfile = {
             let rawData = d;
             let filterText = '';
             let hideProcessed = false;
-            let ruleFilter = '';                        // ← НОВОЕ
+            let ruleFilter = '';
             let selectedKeys = new Set();
 
             // ========== Список правил для фильтра ==========
@@ -71,7 +71,7 @@ export const perfile = {
             const masterCb = el.querySelector('#pf-master-checkbox');
             const ruleSelect = el.querySelector('#pf-rule-filter');
 
-            // ---- Заполняем select уникальными правилами ----
+            // Заполняем select уникальными правилами
             allRules.forEach(([rule, count]) => {
                 const opt = document.createElement('option');
                 opt.value = rule;
@@ -84,17 +84,14 @@ export const perfile = {
                 const query = filterText.toLowerCase();
                 return rawData.files.map(f => {
                     const matchedIssues = f.issues.filter(it => {
-                        // Фильтр по правилу
                         if (ruleFilter && it.rule !== ruleFilter) return false;
 
-                        // Фильтр по тексту
                         const matchesText =
                             (it.message || '').toLowerCase().includes(query) ||
                             (it.rule || '').toLowerCase().includes(query) ||
                             (it.ruleName || '').toLowerCase().includes(query);
                         if (!matchesText) return false;
 
-                        // Скрыть обработанные
                         if (hideProcessed) {
                             const isMarked = it.status && it.status !== 'OPEN' && it.status !== 'REOPENED';
                             if (isMarked) return false;
@@ -102,7 +99,7 @@ export const perfile = {
                         return true;
                     });
                     return { ...f, issues: matchedIssues };
-                }).filter(f => f.file.toLowerCase().includes(query) || f.issues.length > 0);
+                }).filter(f => f.issues.length > 0);   // ← ФИКС: скрываем пустые файлы
             };
 
             const renderList = () => {
@@ -120,7 +117,6 @@ export const perfile = {
                                 <h4 style="margin:0; text-transform:none;">${esc(f.file)} — ${f.issues.length}</h4>
                             </div>
                         </div>
-                        ${f.issues.length > 0 ? `
                         <table><thead><tr>
                             <th style="width:30px; padding-left:16px;"></th>
                             <th>L</th><th>rule</th><th>sev</th><th>message</th>
@@ -136,7 +132,7 @@ export const perfile = {
                                     <td>${statusBadge(it.status)}${esc(it.message)}</td>
                                 </tr>
                             `}).join('')}
-                        </tbody></table>` : ''}
+                        </tbody></table>
                     </div>
                 `).join('');
 
@@ -259,7 +255,6 @@ export const perfile = {
                 renderList();
             });
 
-            // ← НОВОЕ: обработчик фильтра по правилу
             ruleSelect.addEventListener('change', (e) => {
                 ruleFilter = e.target.value;
                 renderList();

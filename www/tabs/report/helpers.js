@@ -123,11 +123,14 @@ export function formatConfluence(issue, snippet, projectName, host) {
     html += `<p><strong>Пользовательский комментарий:</strong> ${escapeHtml(getLastComment(issue))}</p>\n`;
 
     if (snippet && snippet.length > 0) {
-        const code = snippet.map(line =>
-            line.replace(/§HL_START§/g, '>>> ').replace(/§HL_END§/g, ' <<<')
-        ).join('\n');
-        // ИЗМЕНЕНО: Используем <details> и <summary> для аккордеона
-        html += `<details>\n<summary>Показать фрагмент кода</summary>\n<pre><code>${escapeHtml(code)}</code></pre>\n</details>\n`;
+        // Заменяем маркеры на HTML-теги выделения
+        const code = snippet.map(line => {
+            return escapeHtml(line)
+                .replace(/§HL_START§/g, '<mark class="sonar-issue-mark">')
+                .replace(/§HL_END§/g, '</mark>');
+        }).join('\n');
+
+        html += `<details>\n<summary>Показать фрагмент кода</summary>\n<pre><code>${code}</code></pre>\n</details>\n`;
     }
 
     html += `<br/><hr/><br/>\n`;
@@ -149,7 +152,16 @@ export function formatHtmlFile(fileIssues, projectName, host, fileName) {
         details { margin-top: 12px; border: 1px solid #dfe1e6; border-radius: 4px; background: #f4f5f7; }
         summary { cursor: pointer; padding: 8px 12px; font-weight: 600; color: #42526e; user-select: none; }
         summary:hover { background: #ebecf0; }
-        pre { margin: 0; padding: 12px; background: #fff; overflow-x: auto; border-top: 1px solid #dfe1e6; border-radius: 0 0 4px 4px; font-family: monospace; font-size: 13px; }
+        pre { margin: 0; padding: 12px; background: #fff; overflow-x: auto; border-top: 1px solid #dfe1e6; border-radius: 0 0 4px 4px; font-family: monospace; font-size: 13px; white-space: pre-wrap; }
+
+        /* Стиль для подсветки ошибки (как в модальном окне) */
+        mark.sonar-issue-mark {
+            background-color: rgba(248, 81, 73, 0.25);
+            border-bottom: 2px solid #f85149;
+            color: inherit;
+            padding: 0 2px;
+            border-radius: 2px;
+        }
     </style>\n</head>\n<body>\n`;
     html += `<h1>Проект: ${escapeHtml(projectName)}</h1>\n`;
     html += `<h2>Файл: ${escapeHtml(fileName)}</h2>\n`;
@@ -170,10 +182,14 @@ export function formatHtmlFile(fileIssues, projectName, host, fileName) {
         html += `<p><strong>Пользовательский комментарий:</strong> ${escapeHtml(lastComment)}</p>\n`;
 
         if (it._snippet && it._snippet.length > 0) {
-            const code = it._snippet.map(line =>
-                line.replace(/§HL_START§/g, '>>> ').replace(/§HL_END§/g, ' <<<')
-            ).join('\n');
-            html += `<details>\n<summary>Показать фрагмент кода</summary>\n<pre><code>${escapeHtml(code)}</code></pre>\n</details>\n`;
+            // Заменяем маркеры на HTML-теги выделения
+            const code = it._snippet.map(line => {
+                return escapeHtml(line)
+                    .replace(/§HL_START§/g, '<mark class="sonar-issue-mark">')
+                    .replace(/§HL_END§/g, '</mark>');
+            }).join('\n');
+            
+            html += `<details>\n<summary>Показать фрагмент кода</summary>\n<pre><code>${code}</code></pre>\n</details>\n`;
         }
         html += `</div>\n`;
     });

@@ -40,13 +40,11 @@ export const report = {
                 if (it.rule) allRulesSet.add(it.rule);
             });
 
-            // Формируем список тегов: require-fix, not-require-fix, __NO_TAGS__, потом остальные по алфавиту
             const baseTags = Array.from(allTagsSet)
                 .filter(t => t !== 'require-fix' && t !== 'not-require-fix')
                 .sort((a, b) => a.localeCompare(b));
 
             const sortedTags = ['require-fix', 'not-require-fix', NO_TAGS_KEY, ...baseTags];
-
             const sortedRules = Array.from(allRulesSet).sort();
 
             let filterText = '';
@@ -54,7 +52,6 @@ export const report = {
 
             let selectedTags = new Set();
             let excludedTags = new Set();
-
             let selectedRules = new Set();
 
             let tagQuery = '';
@@ -85,7 +82,6 @@ export const report = {
                             </select>
                         </label>
 
-                        <!-- Multi-select Включить Теги -->
                         <details id="rep-tag-details" style="position:relative;">
                             <summary class="btn" style="list-style:none; cursor:pointer; user-select:none; display:inline-flex; gap:4px; align-items:center;">
                                 🏷️ Теги (<span id="rep-tag-count">0</span>)
@@ -106,7 +102,6 @@ export const report = {
                             </div>
                         </details>
 
-                        <!-- Multi-select ИСКЛЮЧИТЬ Теги -->
                         <details id="rep-exclude-tag-details" style="position:relative;">
                             <summary class="btn" style="list-style:none; cursor:pointer; user-select:none; display:inline-flex; gap:4px; align-items:center;">
                                 🚫 Исключить теги (<span id="rep-exclude-tag-count">0</span>)
@@ -127,7 +122,6 @@ export const report = {
                             </div>
                         </details>
 
-                        <!-- Multi-select Правила -->
                         <details id="rep-rule-details" style="position:relative;">
                             <summary class="btn" style="list-style:none; cursor:pointer; user-select:none; display:inline-flex; gap:4px; align-items:center;">
                                 📏 Правила (<span id="rep-rule-count">0</span>)
@@ -160,7 +154,6 @@ export const report = {
             const masterCb = el.querySelector('#rep-master-cb');
             const exportBtn = el.querySelector('#rep-export-btn');
 
-            // Элементы управления ВКЛЮЧЕННЫМИ тегами
             const tagDetails = el.querySelector('#rep-tag-details');
             const tagSearch = el.querySelector('#rep-tag-search');
             const tagListEl = el.querySelector('#rep-tag-list');
@@ -168,7 +161,6 @@ export const report = {
             const tagClose = el.querySelector('#rep-tag-close');
             const tagCount = el.querySelector('#rep-tag-count');
 
-            // Элементы управления ИСКЛЮЧЕННЫМИ тегами
             const excludeTagDetails = el.querySelector('#rep-exclude-tag-details');
             const excludeTagSearch = el.querySelector('#rep-exclude-tag-search');
             const excludeTagListEl = el.querySelector('#rep-exclude-tag-list');
@@ -176,7 +168,6 @@ export const report = {
             const excludeTagClose = el.querySelector('#rep-exclude-tag-close');
             const excludeTagCount = el.querySelector('#rep-exclude-tag-count');
 
-            // Элементы управления правилами
             const ruleDetails = el.querySelector('#rep-rule-details');
             const ruleSearch = el.querySelector('#rep-rule-search');
             const ruleListEl = el.querySelector('#rep-rule-list');
@@ -184,7 +175,6 @@ export const report = {
             const ruleClose = el.querySelector('#rep-rule-close');
             const ruleCount = el.querySelector('#rep-rule-count');
 
-            // Универсальная функция рендера списка тегов
             const renderTagListTo = (container, query, selectedSet, updateCountFn) => {
                 const q = query.toLowerCase();
                 const visible = sortedTags.filter(t => {
@@ -213,7 +203,7 @@ export const report = {
                         if (e.target.checked) selectedSet.add(e.target.value);
                         else selectedSet.delete(e.target.value);
                         updateCountFn();
-                        renderList(); // Обновляем основной список сразу
+                        renderList();
                     });
                 });
             };
@@ -247,7 +237,6 @@ export const report = {
             const updateExcludeTagCount = () => { excludeTagCount.textContent = excludedTags.size; };
             const updateRuleCount = () => { ruleCount.textContent = selectedRules.size; };
 
-            // Инициализация списков
             renderTagListTo(tagListEl, tagQuery, selectedTags, updateTagCount);
             updateTagCount();
 
@@ -257,12 +246,10 @@ export const report = {
             renderRuleList();
             updateRuleCount();
 
-            // Обработчики поиска
             tagSearch.addEventListener('input', (e) => { tagQuery = e.target.value; renderTagListTo(tagListEl, tagQuery, selectedTags, updateTagCount); });
             excludeTagSearch.addEventListener('input', (e) => { excludeTagQuery = e.target.value; renderTagListTo(excludeTagListEl, excludeTagQuery, excludedTags, updateExcludeTagCount); });
             ruleSearch.addEventListener('input', (e) => { ruleQuery = e.target.value; renderRuleList(); });
 
-            // Обработчики сброса и закрытия (с preventDefault)
             tagClear.addEventListener('click', (e) => {
                 e.preventDefault(); e.stopPropagation();
                 selectedTags.clear(); updateTagCount();
@@ -294,7 +281,6 @@ export const report = {
                 ruleDetails.removeAttribute('open');
             });
 
-            // Контекстное меню
             const ctxMenu = document.createElement('div');
             ctxMenu.className = 'ctx-menu';
             ctxMenu.style.display = 'none';
@@ -304,6 +290,7 @@ export const report = {
                 <div class="ctx-item" id="ctx-txt">📝 Выгрузить TXT</div>
                 <div class="ctx-item" id="ctx-confluence">📋 Выгрузить Confluence (HTML)</div>
                 <div class="ctx-item" style="border-top:1px solid var(--border); margin-top:4px; padding-top:8px;" id="ctx-html-files">📦 Выгрузить HTML (по файлам)</div>
+                <div class="ctx-item" id="ctx-html-files-teams">📦 Выгрузить HTML (с командами)</div>
             `;
             document.body.appendChild(ctxMenu);
             document.addEventListener('click', () => { ctxMenu.style.display = 'none'; }, { once: true });
@@ -311,7 +298,6 @@ export const report = {
             const applyFilters = () => {
                 const q = filterText.toLowerCase();
 
-                // Шаг 1: Применяем основные фильтры (включая выбранные теги)
                 let filtered = allIssues.filter(it => {
                     if (statusFilter === 'PROCESSED' && !it.isProcessed) return false;
                     if (statusFilter === 'UNPROCESSED' && it.isProcessed) return false;
@@ -319,7 +305,6 @@ export const report = {
                     if (selectedTags.size > 0) {
                         const itTags = it.tags || [];
                         let hasMatch = false;
-
                         for (const t of selectedTags) {
                             if (t === NO_TAGS_KEY) {
                                 if (itTags.length === 0) hasMatch = true;
@@ -328,7 +313,6 @@ export const report = {
                             }
                             if (hasMatch) break;
                         }
-
                         if (!hasMatch) return false;
                     }
 
@@ -342,12 +326,10 @@ export const report = {
                         || (it.component || '').toLowerCase().includes(q);
                 });
 
-                // Шаг 2: Применяем исключение тегов к результату
                 if (excludedTags.size > 0) {
                     filtered = filtered.filter(it => {
                         const itTags = it.tags || [];
                         let hasExcluded = false;
-
                         for (const t of excludedTags) {
                             if (t === NO_TAGS_KEY) {
                                 if (itTags.length === 0) hasExcluded = true;
@@ -356,8 +338,7 @@ export const report = {
                             }
                             if (hasExcluded) break;
                         }
-
-                        return !hasExcluded; // Оставляем только те, у которых нет исключаемых тегов
+                        return !hasExcluded;
                     });
                 }
 
@@ -418,7 +399,6 @@ export const report = {
 
                 syncMasterCheckbox(filtered);
 
-                // Группировка по файлам
                 const groups = new Map();
                 filtered.forEach(it => {
                     const file = it.component || '(unknown)';
@@ -426,13 +406,11 @@ export const report = {
                     groups.get(file).push(it);
                 });
 
-                // Сортировка файлов по алфавиту
                 const sortedFiles = [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0]));
 
                 let html = '';
 
                 sortedFiles.forEach(([fileName, fileIssues]) => {
-                    // Сортируем ошибки внутри файла согласно выбранному полю
                     const sortedIssues = applySort(fileIssues);
 
                     html += `
@@ -458,7 +436,6 @@ export const report = {
                                     </thead>
                                     <tbody>
                                         ${sortedIssues.map(it => {
-                                            // Отрисовка тегов. Если тегов нет, показываем серый бейдж
                                             const tagsHtml = (it.tags && it.tags.length > 0)
                                                 ? it.tags.map(t => `<span class="tag" style="margin:1px;">${esc(t)}</span>`).join('')
                                                 : `<span class="tag" style="margin:1px; opacity:0.6; font-style:italic;">${NO_TAGS_LABEL}</span>`;
@@ -489,7 +466,6 @@ export const report = {
 
                 listEl.innerHTML = html;
 
-                // Привязываем события к сгенерированному HTML
                 listEl.querySelectorAll('.rep-sort').forEach(th => {
                     th.addEventListener('click', () => {
                         const field = th.dataset.field;
@@ -499,7 +475,6 @@ export const report = {
                     });
                 });
 
-                // Чекбоксы конкретных ошибок
                 listEl.querySelectorAll('.rep-cb').forEach(cb => {
                     cb.addEventListener('change', (e) => {
                         if (e.target.checked) selectedKeys.add(e.target.dataset.key);
@@ -514,7 +489,6 @@ export const report = {
                     });
                 });
 
-                // Чекбоксы групп файлов
                 listEl.querySelectorAll('.rep-file-cb').forEach(cb => {
                     cb.addEventListener('change', (e) => {
                         const file = e.target.dataset.file;
@@ -526,7 +500,6 @@ export const report = {
                             else selectedKeys.delete(it.key);
                         });
 
-                        // Обновляем состояние чекбоксов в этом файле
                         const card = cb.closest('.card');
                         card.querySelectorAll('.rep-cb').forEach(rowCb => {
                             rowCb.checked = isChecked;
@@ -576,7 +549,6 @@ export const report = {
                 });
 
                 listEl.querySelectorAll('.rep-row').forEach(tr => {
-                    // Клик по строке переключает чекбокс
                     tr.addEventListener('click', (e) => {
                         if (e.target.type === 'checkbox' || e.target.closest('.rep-btn-toggle')) return;
 
@@ -590,7 +562,6 @@ export const report = {
                         const key = tr.dataset.key;
                         if (selectedKeys.size === 0) {
                             selectedKeys.add(key);
-                            // Обновляем чекбокс без перерисовки всей таблицы
                             const cb = tr.querySelector('.rep-cb');
                             if (cb) cb.checked = true;
 
@@ -628,6 +599,7 @@ export const report = {
             ctxMenu.querySelector('#ctx-txt').addEventListener('click', () => { ctxMenu.style.display = 'none'; startExport('txt'); });
             ctxMenu.querySelector('#ctx-confluence').addEventListener('click', () => { ctxMenu.style.display = 'none'; startExport('confluence'); });
             ctxMenu.querySelector('#ctx-html-files').addEventListener('click', () => { ctxMenu.style.display = 'none'; startExport('html-files'); });
+            ctxMenu.querySelector('#ctx-html-files-teams').addEventListener('click', () => { ctxMenu.style.display = 'none'; startExport('html-files-teams'); });
 
             masterCb.addEventListener('change', (e) => {
                 let filtered = applyFilters();

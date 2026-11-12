@@ -23,12 +23,76 @@ export const session = {
                 <button id="btn-open-session-modal" class="btn btn-accent">
                     ⚙ Настроить подключение
                 </button>
+            </div>
+
+            <div class="card" style="max-width:860px; margin-top:20px;">
+                <h3 style="margin-top:0;">Сопоставление файлов и команд</h3>
+                <p style="color:var(--text-dim); margin-top:0; font-size:13px;">
+                    Загрузите CSV-файл для автоматического добавления имени команды в отчеты.
+                    Ожидаемые колонки: A — путь к файлу (например, <code>/Forms/...</code>), C — имя команды.
+                </p>
+                <div style="display:flex; gap:10px; align-items:center;">
+                    <input type="file" id="csv-upload" accept=".csv" style="display:none;">
+                    <button id="btn-upload-csv" class="btn">📂 Загрузить CSV</button>
+                    <button id="btn-clear-csv" class="btn btn-danger">Очистить</button>
+                    <span id="csv-status" style="font-size:12px;"></span>
+                </div>
             </div>`;
 
         await refreshSummary(el, ctx);
 
         el.querySelector('#btn-open-session-modal').addEventListener('click', () => {
             openSessionModal(ctx, () => refreshSummary(el, ctx));
+        });
+
+        // --- Логика загрузки CSV ---
+        const fileInput = el.querySelector('#csv-upload');
+        const statusEl = el.querySelector('#csv-status');
+
+        const updateCsvStatus = async () => {
+            try {
+                // Проверяем, есть ли файл на сервере, делая тестовый GET
+                const res = await fetch('/api/team_mapping');
+                if (res.ok) {
+                    statusEl.textContent = '✓ CSV загружен на сервер';
+                    statusEl.style.color = 'var(--ok)';
+                } else {
+                    statusEl.textContent = '— CSV не загружен';
+                    statusEl.style.color = 'var(--text-dim)';
+                }
+            } catch {
+                statusEl.textContent = '— Ошибка проверки';
+                statusEl.style.color = 'var(--err)';
+            }
+        };
+        await updateCsvStatus();
+
+        el.querySelector('#btn-upload-csv').addEventListener('click', () => fileInput.click());
+
+        el.querySelector('#btn-clear-csv').addEventListener('click', async () => {
+            try {
+                await ctx.api('/api/team_mapping', { method: 'DELETE' });
+                await updateCsvStatus();
+                ctx.toast('Сопоставление команд очищено');
+            } catch (e) {
+                ctx.toast('Ошибка очистки: ' + e.message, true);
+            }
+        });
+
+        fileInput.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = async (ev) => {
+                try {
+                    await ctx.apiText('/api/team_mapping', ev.target.result, 'PUT');
+                    await updateCsvStatus();
+                    ctx.toast('CSV загружен и сохранен на сервере');
+                } catch (err) {
+                    ctx.toast('Ошибка загрузки CSV: ' + err.message, true);
+                }
+            };
+            reader.readAsText(file);
         });
     },
 };
@@ -192,13 +256,11 @@ function openSessionModal(ctx, onDone) {
     $('sess-cancel').addEventListener('click', close);
     overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
 
-    // --- toggle token visibility ---
     $('sess-toggle-token').addEventListener('click', () => {
         const t = $('sess-token');
         t.type = t.type === 'password' ? 'text' : 'password';
     });
 
-    // --- auth switch (token ⇄ cookie) ---
     const updateAuthVisibility = () => {
         const auth = $('sess-auth').value;
         $('sess-token-block').style.display  = auth === 'cookie' ? 'none'  : 'block';
@@ -206,14 +268,12 @@ function openSessionModal(ctx, onDone) {
     };
     $('sess-auth').addEventListener('change', updateAuthVisibility);
 
-    // --- token link follows sonar.url ---
     const updateTokenLink = () => {
         const raw = $('sess-url').value.trim() || 'https://sonar.bars.group';
         $('sess-token-link').href = raw.replace(/\/+$/, '') + '/account/security';
     };
     $('sess-url').addEventListener('input', updateTokenLink);
 
-    // --- initial load ---
     (async () => {
         const status = $('sess-status');
         status.textContent = 'загрузка…';
@@ -247,7 +307,6 @@ function openSessionModal(ctx, onDone) {
         }
     })();
 
-    // --- save ---
     $('sess-save').addEventListener('click', async () => {
         const btn    = $('sess-save');
         const status = $('sess-status');
@@ -264,7 +323,6 @@ function openSessionModal(ctx, onDone) {
             $('sess-url').value = url;
         }
 
-        // --- validation ---
         if (!url) {
             ctx.toast('Укажите адрес SonarQube (sonar.url)', true);
             $('sess-url').focus();
@@ -285,7 +343,6 @@ function openSessionModal(ctx, onDone) {
             return;
         }
 
-        // --- build session.properties ---
         const lines = ['# SonarQube connection'];
         lines.push('sonar.url=' + url);
         lines.push('sonar.user=' + user);
@@ -316,7 +373,6 @@ function openSessionModal(ctx, onDone) {
 
             if (result) {
                 result.style.display = 'block';
-                // секретов в ответе нет, поэтому безопасно печатать всё
                 result.textContent = JSON.stringify({
                     saved:        d.saved,
                     path:         d.path,
@@ -333,11 +389,9 @@ function openSessionModal(ctx, onDone) {
             ctx.toast('session.properties сохранён и применён');
             ctx.refreshStatus?.();
 
-            // секреты в полях не оставляем
             $('sess-token').value  = '';
             $('sess-cookie').value = '';
 
-            // закрываем через полсекунды, чтобы пользователь увидел результат
             setTimeout(() => {
                 close();
                 if (onDone) onDone();

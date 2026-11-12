@@ -4,6 +4,7 @@ import { exportMd } from './exporters/exportMd.js';
 import { exportTxt } from './exporters/exportTxt.js';
 import { exportConfluence } from './exporters/exportConfluence.js';
 import { exportHtmlZip } from './exporters/exportHtmlZip.js';
+import { exportHtmlZipTeams } from './exporters/exportHtmlZipTeams.js';
 
 export async function showExportModal(issues, formatType, ctx, projectName) {
     if (!issues.length) return;
@@ -14,7 +15,7 @@ export async function showExportModal(issues, formatType, ctx, projectName) {
     overlay.innerHTML = `
         <div class="modal-content" style="max-width: 520px;">
             <div class="modal-header">
-                <h3 style="margin:0;">Генерация отчета (${formatType === 'confluence' ? 'Confluence' : (formatType === 'html-files' ? 'HTML в ZIP' : formatType.toUpperCase())})</h3>
+                <h3 style="margin:0;">Генерация отчета (${formatType === 'confluence' ? 'Confluence' : (formatType === 'html-files' ? 'HTML в ZIP' : (formatType === 'html-files-teams' ? 'HTML с командами' : formatType.toUpperCase()))})</h3>
             </div>
             <div class="modal-body">
                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; font-size:12px;">
@@ -60,7 +61,7 @@ export async function showExportModal(issues, formatType, ctx, projectName) {
         console.warn('Не удалось получить host для ссылок', e);
     }
 
-    // ЭТАП 1: Загрузка всех сниппетов (общий этап для всех форматов)
+    // ЭТАП 1: Загрузка всех сниппетов
     for (let i = 0; i < total; i++) {
         if (cancelled) break;
         const it = issues[i];
@@ -104,6 +105,9 @@ export async function showExportModal(issues, formatType, ctx, projectName) {
             } else if (formatType === 'html-files') {
                 statusEl.textContent = 'упаковка в ZIP-архив...';
                 await exportHtmlZip(issues, projectName, host);
+            } else if (formatType === 'html-files-teams') {
+                statusEl.textContent = 'упаковка в ZIP-архив (с командами)...';
+                await exportHtmlZipTeams(issues, projectName, host);
             }
             statusEl.textContent = 'Готово! Файл успешно скачан.';
         } catch (err) {

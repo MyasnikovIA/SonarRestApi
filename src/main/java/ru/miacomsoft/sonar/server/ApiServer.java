@@ -50,7 +50,10 @@ public final class ApiServer {
         server.createContext("/api/keys",      new KeysHandler(state));
         server.createContext("/api/snippet",   new SnippetHandler(state));
         server.createContext("/api/changelog", new ChangelogHandler(state));
-        server.createContext("/api/projects",  new ProjectsHandler(state)); // <-- НОВЫЙ ЭНДПОИНТ
+        server.createContext("/api/projects",  new ProjectsHandler(state));
+
+        // НОВЫЙ ЭНДПОИНТ
+        server.createContext("/api/team_mapping", new TeamMappingHandler(state));
 
         server.createContext("/api/tags",      new TagsHandler(state));
         server.createContext("/api/set_tags",  new SetTagsHandler(state));

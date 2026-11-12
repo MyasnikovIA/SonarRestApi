@@ -20,7 +20,6 @@ public final class ApiServer {
         Path promptsDir = resolvePromptsDir();
         PromptTemplate template = new PromptTemplate(promptsDir);
 
-        // Диагностика: что видит сервер на старте
         System.out.println("[ApiServer] prompts dir: " + promptsDir);
         List<String> availablePrompts = template.listAvailable();
         System.out.println("[ApiServer] available prompts: "
@@ -51,6 +50,7 @@ public final class ApiServer {
         server.createContext("/api/keys",      new KeysHandler(state));
         server.createContext("/api/snippet",   new SnippetHandler(state));
         server.createContext("/api/changelog", new ChangelogHandler(state));
+        server.createContext("/api/projects",  new ProjectsHandler(state)); // <-- НОВЫЙ ЭНДПОИНТ
 
         server.createContext("/api/tags",      new TagsHandler(state));
         server.createContext("/api/set_tags",  new SetTagsHandler(state));
@@ -58,7 +58,6 @@ public final class ApiServer {
         server.createContext("/api/mark",      new MarkHandler(state));
         server.createContext("/api/cancel",    new CancelHandler(state));
 
-        // Сборка промптов из файлов + диагностика
         server.createContext("/api/prompt/build", new BuildPromptHandler(state, template));
         server.createContext("/api/prompt/list",  new ListPromptsHandler(state, template));
 
@@ -106,14 +105,6 @@ public final class ApiServer {
         return Files.isDirectory(cwd) ? cwd : null;
     }
 
-    /**
-     * Порядок поиска:
-     *   1) -Dsonar.prompts=<abs path>
-     *   2) <jar-dir>/prompts
-     *   3) <jar-parent>/prompts
-     *   4) ./prompts (cwd)
-     * Если ничего не найдено — создаём ./prompts и используем его.
-     */
     private static Path resolvePromptsDir() {
         String sys = System.getProperty("sonar.prompts");
         if (sys != null && !sys.isBlank()) {

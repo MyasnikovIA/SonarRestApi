@@ -14,10 +14,10 @@
     </div>
     <div class="project-box">
         <label>project</label>
-        <input id="project" type="text" placeholder="MEDMIS-MISmobile.doctor_api_spec">
+        <input id="project" type="text" list="projectList" autocomplete="off" placeholder="MEDMIS-MISmobile.doctor_api_spec">
+        <datalist id="projectList"></datalist>
     </div>
 
-    <!-- МЕТРИКИ ПРОЕКТА (заполняется из /api/measures) -->
     <div class="measures-bar hidden" id="measures-bar">
         <span class="measure-qg qg-unknown" id="measure-qg" title="Quality Gate">? QG</span>
 
@@ -67,7 +67,6 @@
         </span>
     </div>
 
-    <!-- Прогресс-бар -->
     <div class="progress-container hidden" id="progress-container">
         <div class="progress-bar-bg">
             <div class="progress-bar-fill" id="progress-bar-fill" style="width: 0%;"></div>

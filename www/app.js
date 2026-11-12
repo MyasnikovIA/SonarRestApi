@@ -66,6 +66,11 @@ async function activateTab(id) {
 
     const activePanel = document.getElementById(`panel-${id}`);
     if (activePanel) {
+        if (!state.project) {
+            activePanel.innerHTML = '<div class="empty">Выберите или введите проект в верхней панели</div>';
+            return;
+        }
+
         let contentContainer = activePanel.querySelector('.tab-content');
         if (!contentContainer) {
             contentContainer = document.createElement('div');
@@ -76,6 +81,28 @@ async function activateTab(id) {
     }
 }
 
+// ============ Загрузка проектов ============
+
+async function loadProjectsList() {
+    const datalist = document.getElementById('projectList');
+    if (!datalist) return;
+
+    try {
+        const d = await api('/api/projects');
+        const projects = d.projects || [];
+
+        datalist.innerHTML = '';
+        projects.forEach(p => {
+            const opt = document.createElement('option');
+            opt.value = p.key;
+            opt.textContent = p.name; // В браузере будет видно и имя, и ключ
+            datalist.appendChild(opt);
+        });
+    } catch (e) {
+        console.warn('Не удалось загрузить список проектов:', e.message);
+    }
+}
+
 // ============ Загрузка ключей ============
 
 async function loadKeysToSelect() {
@@ -83,13 +110,18 @@ async function loadKeysToSelect() {
     const datalist = document.getElementById('issueKeysList');
     if (!input || !datalist) return;
 
+    if (!state.project) {
+        datalist.innerHTML = '';
+        input.value = '';
+        return;
+    }
+
     const currentVal = input.value;
 
     try {
         const d = await api('/api/keys?' + ctx.qs());
         const keys = d.keys || [];
 
-        // Перестраиваем datalist
         datalist.innerHTML = '';
         keys.forEach(k => {
             const opt = document.createElement('option');
@@ -97,8 +129,6 @@ async function loadKeysToSelect() {
             datalist.appendChild(opt);
         });
 
-        // Восстанавливаем ввод: приоритет — то, что уже введено пользователем,
-        // иначе — сохранённый state.issueKey, иначе — первый ключ.
         if (currentVal && keys.includes(currentVal)) {
             input.value = currentVal;
             state.issueKey = currentVal;
@@ -114,11 +144,13 @@ async function loadKeysToSelect() {
             localStorage.setItem('issueKey', '');
         }
     } catch (e) {
-        toast('Не удалось загрузить ключи: ' + e.message, true);
+        console.warn('Не удалось загрузить ключи: ' + e.message);
     }
 }
 
 async function downloadKeys() {
+    if (!state.project) { toast('Сначала выберите проект', true); return; }
+
     const btn = document.getElementById('btn-download-keys');
     const oldText = btn.textContent;
     btn.textContent = '...';
@@ -208,7 +240,9 @@ async function refreshStatusBar() {
         if (!state.project && h.defaultProject) {
             state.project = h.defaultProject;
             document.getElementById('project').value = state.project;
+            loadKeysToSelect();
             loadMeasures();
+            activateTab(state.activeTab);
         }
     } catch {
         document.getElementById('status-dot').className = 'dot err';
@@ -271,7 +305,6 @@ function renderMeasures(d) {
     if (!bar) return;
     bar.classList.remove('hidden');
 
-    // Quality Gate
     const status = String(d.alertStatus || '').toUpperCase();
     const qg = document.getElementById('measure-qg');
     if (qg) {
@@ -286,14 +319,12 @@ function renderMeasures(d) {
             status === 'WARN'  ? 'qg-warn' : 'qg-unknown');
     }
 
-    // Total: legacy violations, иначе сумма MQR
     const total =
         Number(d.violations) ||
         (Number(d.maintainabilityIssues) + Number(d.reliabilityIssues) + Number(d.securityIssues)) ||
         0;
     setText('measure-total', formatNum(total));
 
-    // Разбивка: MQR приоритет, legacy fallback
     const secCount = Number(d.securityIssues)        || Number(d.vulnerabilities) || 0;
     const relCount = Number(d.reliabilityIssues)     || Number(d.bugs)            || 0;
     const mntCount = Number(d.maintainabilityIssues) || Number(d.codeSmells)      || 0;
@@ -302,7 +333,6 @@ function renderMeasures(d) {
     setText('measure-reliability-count',     formatNum(relCount));
     setText('measure-maintainability-count', formatNum(mntCount));
 
-    // Рейтинги
     const secR = document.getElementById('measure-security-rating');
     const relR = document.getElementById('measure-reliability-rating');
     const mntR = document.getElementById('measure-maintainability-rating');
@@ -311,7 +341,6 @@ function renderMeasures(d) {
     if (relR) { relR.textContent = ratingLetter(d.reliabilityRating);     setRatingClass(relR, d.reliabilityRating); }
     if (mntR) { mntR.textContent = ratingLetter(d.maintainabilityRating); setRatingClass(mntR, d.maintainabilityRating); }
 
-    // Дополнительные
     setText('measure-accepted', formatNum(d.acceptedIssues || 0));
 
     const cov = Number(d.coverage);
@@ -362,15 +391,23 @@ function initUI() {
     $('snippets').value = state.snippets;
     $('issueKey').value = state.issueKey;
 
-    loadKeysToSelect();
-    loadMeasures();
+    loadProjectsList();
+
+    if (state.project) {
+        loadKeysToSelect();
+        loadMeasures();
+    }
+    activateTab(state.activeTab);
 
     $('project').addEventListener('change', e => {
         state.project = e.target.value.trim();
         localStorage.setItem('project', state.project);
         loadKeysToSelect();
         loadMeasures();
+        activateTab(state.activeTab); // Перезагружаем текущую вкладку
     });
+
+    // ... остальные слушатели без изменений ...
     $('sev').addEventListener('change', e => {
         state.sev = e.target.value;
         localStorage.setItem('sev', state.sev);
@@ -386,7 +423,6 @@ function initUI() {
         localStorage.setItem('snippets', state.snippets);
     });
 
-    // Коммитим значение при уходе с поля или выборе из datalist
     $('issueKey').addEventListener('change', e => {
         state.issueKey = e.target.value.trim();
         localStorage.setItem('issueKey', state.issueKey);
@@ -395,7 +431,6 @@ function initUI() {
         }
     });
 
-    // Enter — принудительная перезагрузка snippet даже без blur
     $('issueKey').addEventListener('keydown', e => {
         if (e.key === 'Enter') {
             e.preventDefault();
@@ -418,13 +453,9 @@ function initUI() {
     $('btn-ollama-settings').addEventListener('click', () => {
         openOllamaSettingsModal(ctx);
     });
-
-    activateTab(state.activeTab);
 }
 
 initUI();
 refreshStatusBar();
 setInterval(refreshStatusBar, 5000);
-
-// Периодическое обновление мер (отдельный интервал — реже, т.к. данные крупные)
 setInterval(loadMeasures, 30000);

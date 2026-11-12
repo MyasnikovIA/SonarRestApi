@@ -280,6 +280,13 @@ export const report = {
                 exportBtn.textContent = `Действия с выбранными (${selectedKeys.size})`;
             };
 
+            const syncMasterCheckbox = (filtered) => {
+                const visibleKeys = filtered.map(it => it.key);
+                const allVisible = visibleKeys.length > 0 && visibleKeys.every(k => selectedKeys.has(k));
+                masterCb.checked = allVisible;
+                masterCb.indeterminate = !allVisible && visibleKeys.some(k => selectedKeys.has(k));
+            };
+
             const renderList = () => {
                 let filtered = applyFilters();
                 filtered = applySort(filtered);
@@ -291,10 +298,7 @@ export const report = {
                     return;
                 }
 
-                const visibleKeys = filtered.map(it => it.key);
-                const allVisible = visibleKeys.length > 0 && visibleKeys.every(k => selectedKeys.has(k));
-                masterCb.checked = allVisible;
-                masterCb.indeterminate = !allVisible && visibleKeys.some(k => selectedKeys.has(k));
+                syncMasterCheckbox(filtered);
 
                 let headerHtml = `
                     <tr>
@@ -349,12 +353,13 @@ export const report = {
                     });
                 });
 
+                // ВАЖНО: Убрали renderList() отсюда, чтобы избежать зависаний
                 listEl.querySelectorAll('.rep-cb').forEach(cb => {
                     cb.addEventListener('change', (e) => {
                         if (e.target.checked) selectedKeys.add(e.target.dataset.key);
                         else selectedKeys.delete(e.target.dataset.key);
-                        renderList();
                         updateExportBtn();
+                        syncMasterCheckbox(filtered);
                     });
                 });
 
@@ -397,13 +402,27 @@ export const report = {
                 });
 
                 listEl.querySelectorAll('.rep-row').forEach(tr => {
+                    // Клик по строке переключает чекбокс (для удобства)
+                    tr.addEventListener('click', (e) => {
+                        // Игнорируем клик по самому чекбоксу или кнопке "Показать"
+                        if (e.target.type === 'checkbox' || e.target.closest('.rep-btn-toggle')) return;
+
+                        const cb = tr.querySelector('.rep-cb');
+                        cb.checked = !cb.checked;
+                        // Вызываем событие change, чтобы обновить состояние
+                        cb.dispatchEvent(new Event('change'));
+                    });
+
                     tr.addEventListener('contextmenu', (e) => {
                         e.preventDefault();
                         const key = tr.dataset.key;
                         if (selectedKeys.size === 0) {
                             selectedKeys.add(key);
-                            renderList();
+                            // Обновляем чекбокс без перерисовки всей таблицы
+                            const cb = tr.querySelector('.rep-cb');
+                            if (cb) cb.checked = true;
                             updateExportBtn();
+                            syncMasterCheckbox(filtered);
                         }
 
                         ctxMenu.style.display = 'block';

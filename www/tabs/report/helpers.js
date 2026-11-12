@@ -188,7 +188,7 @@ export function formatHtmlFile(fileIssues, projectName, host, fileName) {
                     .replace(/§HL_START§/g, '<mark class="sonar-issue-mark">')
                     .replace(/§HL_END§/g, '</mark>');
             }).join('\n');
-            
+
             html += `<details>\n<summary>Показать фрагмент кода</summary>\n<pre><code>${code}</code></pre>\n</details>\n`;
         }
         html += `</div>\n`;

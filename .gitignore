@@ -48,3 +48,4 @@ out/artifacts/SonarRestApi_jar/session.properties
 console.properties
 ollama.properties
 session.properties
+team_mapping.csv

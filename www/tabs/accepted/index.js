@@ -4,8 +4,6 @@ import { showContextMenu } from './context-menu.js';
 import { openAcceptedModal } from './modals/accepted-modal.js';
 import { exportAcceptedToMarkdown } from './export-md.js';
 
-// ==================== FACET CHIPS ====================
-
 function renderFacetChips(kind, values) {
     const entries = Object.entries(values).filter(([, n]) => n > 0);
     if (!entries.length) return '';
@@ -18,8 +16,6 @@ function renderFacetChips(kind, values) {
         </span>
     `).join('');
 }
-
-// ==================== TAB ====================
 
 export const accepted = {
     id: 'accepted',
@@ -43,7 +39,8 @@ export const accepted = {
             const types        = facets.types || {};
             const resolutions  = facets.resolutions || {};
 
-            // ---------- collect all unique tags ----------
+            const uniqueRules  = [...new Set(issues.map(it => it.rule))].sort();
+
             const tagCounts = new Map();
             issues.forEach(it => {
                 (it.tags || []).forEach(t => {
@@ -53,11 +50,11 @@ export const accepted = {
             const allTags = [...tagCounts.entries()]
                 .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
 
-            // ---------- filter state ----------
             let filterText       = '';
             let severityFilter   = '';
             let typeFilter       = '';
             let resolutionFilter = '';
+            let ruleFilter       = '';
             const selectedKeys   = new Set();
             const selectedTags   = new Set();
             let tagSearchQuery   = '';
@@ -74,6 +71,13 @@ export const accepted = {
                             ${renderFacetChips('res', resolutions)}
                         </div>
                         <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+                            <label style="display:flex; align-items:center; gap:6px; font-size:12px;">
+                                <span style="color:var(--text-dim);">Правило:</span>
+                                <select id="acc-rule-filter" style="padding:6px 10px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text); max-width:250px; font-family:var(--mono); font-size:12px;">
+                                    <option value="">— все правила (${uniqueRules.length}) —</option>
+                                    ${uniqueRules.map(r => `<option value="${esc(r)}">${esc(r)}</option>`).join('')}
+                                </select>
+                            </label>
                             <details id="acc-tags-details" style="position:relative;">
                                 <summary id="acc-tags-btn" class="btn"
                                          style="cursor:pointer; list-style:none; user-select:none;">
@@ -124,8 +128,7 @@ export const accepted = {
             const tagsListEl   = el.querySelector('#acc-tags-list');
             const tagsClearBtn = el.querySelector('#acc-tags-clear');
             const tagsCloseBtn = el.querySelector('#acc-tags-close');
-
-            // ==================== TAG LIST ====================
+            const ruleSelect   = el.querySelector('#acc-rule-filter');
 
             const updateTagsCount = () => {
                 tagsCountEl.textContent = selectedTags.size;
@@ -182,14 +185,13 @@ export const accepted = {
                 tagsDetails.removeAttribute('open');
             });
 
-            // ==================== FILTER + GROUPING ====================
-
             const applyFilters = () => {
                 const q = filterText.toLowerCase();
                 return issues.filter(it => {
                     if (severityFilter && (it.impactSeverity || it.severity) !== severityFilter) return false;
                     if (typeFilter && it.type !== typeFilter) return false;
                     if (resolutionFilter && it.resolution !== resolutionFilter) return false;
+                    if (ruleFilter && it.rule !== ruleFilter) return false;
 
                     if (selectedTags.size > 0) {
                         const itTags = new Set(it.tags || []);
@@ -217,11 +219,8 @@ export const accepted = {
                 return [...grouped.entries()].sort((a, b) => a[0].localeCompare(b[0]));
             };
 
-            // ==================== RENDER ====================
-
             const syncFileCheckbox = (fileName, fileIssues) => {
-                const fileCard = [...listEl.querySelectorAll('.pf-file-card')]
-                    .find(c => c.dataset.file === fileName);
+                const fileCard = [...listEl.querySelectorAll('.pf-file-card')].find(c => c.dataset.file === fileName);
                 if (!fileCard) return;
                 const fileCb = fileCard.querySelector('.acc-file-checkbox');
                 if (!fileCb) return;
@@ -419,7 +418,10 @@ export const accepted = {
                 renderList();
             });
 
-            // ==================== EXPORT MD ====================
+            ruleSelect.addEventListener('change', e => {
+                ruleFilter = e.target.value;
+                renderList();
+            });
 
             exportBtn.addEventListener('click', async () => {
                 const filtered = applyFilters();
@@ -428,11 +430,11 @@ export const accepted = {
                     return;
                 }
 
-                // Собираем строку фильтра для шапки отчёта
                 const parts = [];
                 if (severityFilter)   parts.push(`severity=${severityFilter}`);
                 if (typeFilter)       parts.push(`type=${typeFilter}`);
                 if (resolutionFilter) parts.push(`resolution=${resolutionFilter}`);
+                if (ruleFilter)       parts.push(`rule=${ruleFilter}`);
                 if (selectedTags.size > 0) {
                     parts.push(`tags=${[...selectedTags].join(',')}`);
                 }
@@ -457,8 +459,6 @@ export const accepted = {
                     exportBtn.textContent = orig;
                 }
             });
-
-            // ==================== BULK REOPEN ====================
 
             bulkBtn.addEventListener('click', async () => {
                 const keys = [...selectedKeys];

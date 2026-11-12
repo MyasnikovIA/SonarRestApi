@@ -12,11 +12,11 @@ import {
     applyParsedTags
 } from '../tags.js';
 
-// ============================================================
-// Mapping transition -> SonarQube status.
-// После успешного /api/mark локально ставим SonarQube-статус,
-// чтобы statusBadge и фильтр "скрыть обработанные" работали корректно.
-// ============================================================
+const MAX_AI_ISSUES  = 50;
+const SAMPLE_SIZE    = 15;
+const MAX_FILE_LIST  = 20;
+const MAX_LINES_PER_SNIPPET = 40;
+
 const SONAR_STATUS_MAP = {
     'accept':        'ACCEPTED',
     'falsepositive': 'FALSE_POSITIVE',
@@ -24,22 +24,6 @@ const SONAR_STATUS_MAP = {
     'resolve':       'RESOLVED',
     'wontfix':       'WONTFIX'
 };
-
-// ============================================================
-// AI не может обработать тысячи issue за раз:
-//   1) URL-сервер отклоняет keys=... длиннее ~8 KB
-//   2) сервер делает 1 запрос SonarQube на каждый ключ
-//   3) Ollama не умеет работать с промптом 200+ KB
-//
-// При issues.length > MAX_AI_ISSUES строим промпт локально:
-//   - первые SAMPLE_SIZE issues — с полным кодом (через /api/snippet)
-//   - остальные — только сводка по правилам и файлам
-//   - в промпте явно говорим LLM, что группа больше выборки
-// ============================================================
-const MAX_AI_ISSUES  = 50;    // порог: выше — переключаемся на «выборку»
-const SAMPLE_SIZE    = 15;    // сколько issues с кодом попадает в промпт
-const MAX_FILE_LIST  = 20;    // сколько файлов показывать в сводке
-const MAX_LINES_PER_SNIPPET = 40;   // обрезаем очень длинные сниппеты
 
 export function openBulkModal(issues, ctx, reloadCb) {
     if (!issues.length) { toast('Нет доступных issues для изменения', true); return; }
@@ -145,7 +129,6 @@ export function openBulkModal(issues, ctx, reloadCb) {
             }
         });
 
-        // ---- Сгенерировать промпт ----
         overlay.querySelector('#bulk-btn-gen-prompt').addEventListener('click', async () => {
             const status = overlay.querySelector('#bulk-status').value;
             const statusLabel = overlay.querySelector('#bulk-status').selectedOptions[0].textContent.trim();
@@ -182,7 +165,6 @@ export function openBulkModal(issues, ctx, reloadCb) {
             }
         });
 
-        // ---- Получить резолюцию ИИ ----
         bindOllamaResolveButton(overlay, {
             ctx,
             buildPrompt: async (status, statusLabel) => {
@@ -219,7 +201,6 @@ export function openBulkModal(issues, ctx, reloadCb) {
         });
         bindOllamaSettingsButton(overlay, ctx, '#bulk-btn-ollama-settings');
 
-        // ---- Применить ----
         overlay.querySelector('#bulk-apply').addEventListener('click', async () => {
             const status = overlay.querySelector('#bulk-status').value;
             const comment = overlay.querySelector('#bulk-comment').value;
@@ -232,6 +213,17 @@ export function openBulkModal(issues, ctx, reloadCb) {
                 title: 'Массовое применение статуса',
                 issues,
                 perItemAction: async (it, _i, signal) => {
+                    // 1. Сначала обновляем теги
+                    if (tagsChanged) {
+                        const pTags = new URLSearchParams();
+                        if (ctx.state.project) pTags.set('project', ctx.state.project);
+                        pTags.set('keys', it.key);
+                        pTags.set('issue', it.key);
+                        pTags.set('tags', tagsStr);
+                        await ctx.api('/api/set_tags?' + pTags.toString(), { method: 'POST', signal });
+                    }
+
+                    // 2. Затем меняем статус и добавляем комментарий
                     const p = new URLSearchParams(ctx.qs());
                     p.set('key', it.key);
                     p.set('transition', status);
@@ -242,10 +234,7 @@ export function openBulkModal(issues, ctx, reloadCb) {
                 }
             });
 
-            // Локально обновляем статус/теги у успешных — rawData.files
-            // родительской вкладки perfile получит свежие данные.
-            // При этом it.status проставляем в SonarQube-формате (ACCEPTED и т.п.),
-            // чтобы statusBadge и фильтр "Скрыть обработанные" работали корректно.
+            // Локально обновляем статус у успешных issues
             if (result.success > 0 && !result.cancelled) {
                 const failedKeys = new Set(result.failed.map(f => f.key));
                 const sonarStatus = SONAR_STATUS_MAP[status] || status.toUpperCase();
@@ -255,22 +244,6 @@ export function openBulkModal(issues, ctx, reloadCb) {
                         if (tagsChanged) it.tags = [...selectedTags];
                     }
                 });
-            }
-
-            if (tagsChanged && result.success > 0) {
-                const failedKeys = new Set(result.failed.map(f => f.key));
-                const okKeys = issues.map(it => it.key).filter(k => !failedKeys.has(k));
-                if (okKeys.length > 0) {
-                    try {
-                        const tagResult = await setIssueTags(ctx, okKeys, [...selectedTags]);
-                        if (tagResult.errors && tagResult.errors.length > 0) {
-                            ctx.toast(`Теги: ${tagResult.success}/${tagResult.total} успешно, ${tagResult.errors.length} с ошибкой`, true);
-                        }
-                    } catch (e) {
-                        console.error('Ошибка применения тегов', e);
-                        ctx.toast('Статусы применены, но теги не обновились: ' + e.message, true);
-                    }
-                }
             }
 
             if (result.cancelled) {
@@ -287,34 +260,23 @@ export function openBulkModal(issues, ctx, reloadCb) {
     })();
 }
 
-// ============================================================
-// Промпт с выборкой: первые SAMPLE_SIZE issues с кодом + сводка остальных.
-// Асинхронно тянет /api/snippet для SAMPLE_SIZE issues параллельно.
-// ============================================================
 async function buildSampledPrompt(ctx, issues, status, statusLabel, availableTags) {
     const total        = issues.length;
     const sampleIssues = issues.slice(0, SAMPLE_SIZE);
     const restIssues   = issues.slice(SAMPLE_SIZE);
 
-    // --- 1. Параллельно получаем код для sample ---
     const sampleData = await Promise.all(sampleIssues.map(async (it) => {
         const p = new URLSearchParams();
         if (ctx.state.project) p.set('project', ctx.state.project);
         p.set('issueKey', it.key);
-
         try {
             const d = await ctx.api('/api/snippet?' + p);
-            return {
-                issue:    d.issue || it,
-                snippet:  d.snippet || [],
-                ruleName: d.ruleName || it.ruleName || ''
-            };
+            return { issue: d.issue || it, snippet: d.snippet || [], ruleName: d.ruleName || it.ruleName || '' };
         } catch (e) {
             return { issue: it, snippet: [], ruleName: it.ruleName || '' };
         }
     }));
 
-    // --- 2. Сводка по остальным ---
     const restByRule = new Map();
     restIssues.forEach(it => {
         const r = it.rule || '(unknown)';
@@ -328,9 +290,7 @@ async function buildSampledPrompt(ctx, issues, status, statusLabel, availableTag
     const shownFiles      = restFiles.slice(0, MAX_FILE_LIST);
     const hiddenFilesCnt  = Math.max(0, restFiles.length - MAX_FILE_LIST);
 
-    // --- 3. Собираем промпт ---
     const lines = [];
-
     lines.push('Ты — опытный разработчик и эксперт по SonarQube.');
     lines.push('');
     lines.push(`ЗАДАЧА: обработать ГРУППУ из ${total} замечаний SonarQube (одинаковый статус для всех).`);
@@ -364,7 +324,6 @@ async function buildSampledPrompt(ctx, issues, status, statusLabel, availableTag
     lines.push('Подтверди этот статус для всей группы или скорректируй, если он явно неверный.');
     lines.push('');
 
-    // ---- Явное предупреждение, что группа больше выборки ----
     lines.push('=== ВАЖНО: ПАРТИЯ ПРЕВЫШАЕТ ЛИМИТ КОНТЕКСТА ===');
     lines.push(`Всего замечаний в группе: ${total}.`);
     lines.push(`В промпт включена ВЫБОРКА из ${sampleIssues.length} замечаний с кодом.`);
@@ -377,7 +336,6 @@ async function buildSampledPrompt(ctx, issues, status, statusLabel, availableTag
     }
     lines.push('');
 
-    // ---- Выборка с кодом ----
     lines.push(`=== ВЫБОРКА С КОДОМ (${sampleIssues.length} из ${total}) ===`);
     lines.push('');
 
@@ -385,7 +343,6 @@ async function buildSampledPrompt(ctx, issues, status, statusLabel, availableTag
         const { issue, snippet, ruleName } = sampleData[i];
         const loc = (issue.component || '?') + (issue.line > 0 ? ':' + issue.line : '');
         const sev = issue.impactSeverity || issue.severity || '';
-
         lines.push(`--- Issue ${i + 1}/${sampleIssues.length} ---`);
         lines.push(`Правило: ${issue.rule || '?'}${ruleName ? ' — ' + ruleName : ''}`);
         lines.push(`Файл: ${loc}`);
@@ -406,14 +363,12 @@ async function buildSampledPrompt(ctx, issues, status, statusLabel, availableTag
         lines.push('');
     }
 
-    // ---- Сводка по остальным ----
     if (restIssues.length > 0) {
         lines.push(`=== ОСТАЛЬНЫЕ ${restIssues.length} ISSUES (код не передан) ===`);
         lines.push('Эти замечания относятся к тем же правилам/файлам, что и выборка:');
         lines.push('');
 
-        const rulesSorted = [...restByRule.entries()]
-            .sort((a, b) => b[1].length - a[1].length);
+        const rulesSorted = [...restByRule.entries()].sort((a, b) => b[1].length - a[1].length);
         rulesSorted.forEach(([rule, list]) => {
             const filesCnt = new Set(list.map(x => x.component).filter(Boolean)).size;
             lines.push(`- ${rule} — ${list.length} замечаний в ${filesCnt} файлах`);

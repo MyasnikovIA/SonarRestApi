@@ -17,11 +17,10 @@ export const perfile = {
 
             let rawData = d;
             let filterText = '';
-            let hideProcessed = false;
+            let hideProcessed = true; // По умолчанию скрываем
             let ruleFilter = '';
             let selectedKeys = new Set();
 
-            // ========== Список правил для фильтра ==========
             let allRules = [];
             let totalRules = 0;
 
@@ -29,13 +28,13 @@ export const perfile = {
                 const ruleCounts = new Map();
                 rawData.files.forEach(f => {
                     (f.issues || []).forEach(it => {
-                        if (it.rule) {
+                        const isMarked = it.status && it.status !== 'OPEN' && it.status !== 'REOPENED';
+                        if (it.rule && !isMarked) {
                             ruleCounts.set(it.rule, (ruleCounts.get(it.rule) || 0) + 1);
                         }
                     });
                 });
-                allRules = [...ruleCounts.entries()]
-                    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+                allRules = [...ruleCounts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
                 totalRules = allRules.length;
             };
             collectRules();
@@ -50,17 +49,12 @@ export const perfile = {
                         <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
                             <label style="display:flex; align-items:center; gap:6px; font-size:12px;">
                                 <span style="color:var(--text-dim);">Правило:</span>
-                                <select id="pf-rule-filter"
-                                        style="padding:6px 10px; border-radius:6px;
-                                               border:1px solid var(--border);
-                                               background:var(--bg); color:var(--text);
-                                               max-width:300px; font-family:var(--mono);
-                                               font-size:12px;">
+                                <select id="pf-rule-filter" style="padding:6px 10px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text); max-width:300px; font-family:var(--mono); font-size:12px;">
                                     <option value="">— все правила (${totalRules}) —</option>
                                 </select>
                             </label>
                             <label style="display:flex; align-items:center; gap:4px; font-size:12px; cursor:pointer;">
-                                <input type="checkbox" id="pf-hide-processed"> Скрыть обработанные
+                                <input type="checkbox" id="pf-hide-processed" ${hideProcessed ? 'checked' : ''}> Скрыть обработанные
                             </label>
                             <input type="text" id="pf-filter" placeholder="Фильтр по файлу или сообщению..." style="padding:6px 10px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text); width:250px;">
                             <button id="pf-bulk-btn" class="btn btn-accent" style="display:none;">Действия с выбранными (0)</button>
@@ -78,7 +72,6 @@ export const perfile = {
             const ruleSelect = el.querySelector('#pf-rule-filter');
             const headerTitle = el.querySelector('#pf-header-title');
 
-            // Заполняем select уникальными правилами
             allRules.forEach(([rule, count]) => {
                 const opt = document.createElement('option');
                 opt.value = rule;
@@ -89,7 +82,6 @@ export const perfile = {
             const rebuildRulesSelect = () => {
                 const prev = ruleFilter;
                 collectRules();
-
                 ruleSelect.innerHTML = '';
                 const allOpt = document.createElement('option');
                 allOpt.value = '';
@@ -112,11 +104,9 @@ export const perfile = {
 
                 const totalIssues = rawData.files.reduce((s, f) => s + f.issues.length, 0);
                 const totalFiles = rawData.files.filter(f => f.issues.length > 0).length;
-                headerTitle.textContent =
-                    `${d.project} · ${d.severity}/${d.quality} · ${totalIssues} issues · ${totalFiles} файлов · ${totalRules} правил`;
+                headerTitle.textContent = `${d.project} · ${d.severity}/${d.quality} · ${totalIssues} issues · ${totalFiles} файлов · ${totalRules} правил`;
             };
 
-            // ========== Фильтры ==========
             const applyFilters = () => {
                 const query = filterText.toLowerCase();
                 return rawData.files.map(f => {
@@ -152,7 +142,7 @@ export const perfile = {
                 if (filtered.length === 0) {
                     listEl.innerHTML = '<div class="empty">Ничего не найдено по фильтру</div>';
                     syncCheckboxes(filtered);
-                    updateBulkBtn(); // <-- ОБЯЗАТЕЛЬНО обновляем кнопку
+                    updateBulkBtn();
                     return;
                 }
 
@@ -233,12 +223,6 @@ export const perfile = {
                             targetIssues = [issue];
                         }
 
-                        // === ИСПРАВЛЕНИЕ ===
-                        // Раньше здесь было:
-                        //   () => document.querySelector('.tab[data-tab="perfile"]').click()
-                        // что вызывало перемонтирование вкладки и повторную загрузку
-                        // данных из устаревшего snapshot'а. Теперь — локальный рендер
-                        // по уже мутированному rawData (bulk-modal обновляет it.status).
                         const localReloadCb = () => {
                             selectedKeys.clear();
                             updateBulkBtn();
@@ -263,7 +247,7 @@ export const perfile = {
                     });
                 });
 
-                updateBulkBtn(); // <-- ОБЯЗАТЕЛЬНО обновляем кнопку
+                updateBulkBtn();
             };
 
             const syncCheckboxes = (filtered) => {
@@ -302,24 +286,21 @@ export const perfile = {
                 fileCb.indeterminate = someChecked && !allChecked;
             };
 
-            // ========== Обработчики ==========
-
-            // При смене любого фильтра очищаем выделение, чтобы избежать "невидимых" выбранных issues
             filterInput.addEventListener('input', (e) => {
                 filterText = e.target.value;
-                selectedKeys.clear(); // <-- очищаем
+                selectedKeys.clear();
                 renderList();
             });
 
             hideProcessedCb.addEventListener('change', (e) => {
                 hideProcessed = e.target.checked;
-                selectedKeys.clear(); // <-- очищаем
+                selectedKeys.clear();
                 renderList();
             });
 
             ruleSelect.addEventListener('change', (e) => {
                 ruleFilter = e.target.value;
-                selectedKeys.clear(); // <-- очищаем
+                selectedKeys.clear();
                 renderList();
             });
 

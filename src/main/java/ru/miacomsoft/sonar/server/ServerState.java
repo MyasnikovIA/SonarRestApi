@@ -16,10 +16,6 @@ import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.ConcurrentHashMap;
 
-/**
- * Централизованное состояние сервера.
- * Сессия хранится в session.properties (стандартный SonarQube Web API).
- */
 public class ServerState {
 
     public enum SnapshotStatus { EMPTY, BUILDING, READY, FAILED }
@@ -76,8 +72,6 @@ public class ServerState {
         }
     }
 
-    // ================= getters =================
-
     public Path    getSessionFile()          { return sessionFile; }
     public String  getDefaultProject()       { return defaultProject; }
     public int     getBatchSize()            { return batchSize; }
@@ -117,16 +111,12 @@ public class ServerState {
         return new SonarBulkApi(getClient(), batchSize, delayMs);
     }
 
-    // ================= session =================
-
     public synchronized String readRawFile() throws IOException {
         if (sessionFile == null || !Files.exists(sessionFile)) return "";
         return Files.readString(sessionFile, StandardCharsets.UTF_8);
     }
 
-    /** Записывает новый текст session.properties + перезагружает сессию. */
     public synchronized void update(String raw) throws IOException {
-        // Сначала валидируем через SessionManager — на диск ещё ничего не пишем
         SessionManager sm;
         try {
             sm = new SessionManager(raw);
@@ -149,37 +139,6 @@ public class ServerState {
         this.session = sm;
         this.client = new SonarClient(sm);
     }
-
-    private static void validateProperties(String raw) {
-        if (raw == null || raw.isBlank()) {
-            throw new IllegalArgumentException("Пустое тело session.properties");
-        }
-        Properties p = new Properties();
-        try (StringReader sr = new StringReader(raw)) {
-            p.load(sr);
-        } catch (IOException e) {
-            throw new IllegalArgumentException(
-                    "Ошибка парсинга session.properties: " + e.getMessage(), e);
-        }
-        String url = p.getProperty("sonar.url", "").trim();
-        if (url.isEmpty()) {
-            throw new IllegalArgumentException("В session.properties не задан sonar.url");
-        }
-        String auth = p.getProperty("sonar.auth", "bearer").trim().toLowerCase();
-        if ("cookie".equals(auth)) {
-            if (p.getProperty("sonar.cookie", "").trim().isEmpty()) {
-                throw new IllegalArgumentException(
-                        "sonar.auth=cookie, но sonar.cookie пуст");
-            }
-        } else {
-            if (p.getProperty("sonar.token", "").trim().isEmpty()) {
-                throw new IllegalArgumentException(
-                        "sonar.auth=" + auth + ", но sonar.token пуст");
-            }
-        }
-    }
-
-    // ================= snapshot =================
 
     private void onProgress(String phase, int cur, int tot) {
         this.snapshotPhase = phase;
@@ -256,8 +215,8 @@ public class ServerState {
         }
 
         String st = fresh.status == null ? "" : fresh.status;
-        boolean stillOpen = "OPEN".equals(st) || "CONFIRMED".equals(st)
-                || "REOPENED".equals(st);
+        // ИСПРАВЛЕНИЕ: Оставляем только OPEN и REOPENED, чтобы CONFIRMED и ACCEPTED тоже скрывались.
+        boolean stillOpen = "OPEN".equals(st) || "REOPENED".equals(st);
 
         if (!stillOpen) {
             if (current != null && current.projectKey.equals(projectKey)) {

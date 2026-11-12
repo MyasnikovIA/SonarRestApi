@@ -51,8 +51,6 @@ public abstract class BaseHandler implements HttpHandler {
 
     protected abstract void handleRequest(HttpExchange ex) throws Exception;
 
-    // ================= project resolution =================
-
     protected String resolveProject(HttpExchange ex) {
         String p = parseQuery(ex).get("project");
         if (p == null || p.isEmpty()) p = state.getDefaultProject();
@@ -68,8 +66,6 @@ public abstract class BaseHandler implements HttpHandler {
         return p;
     }
 
-    // ================= snapshot-aware helpers =================
-
     protected SonarIssuesApi newApi(String projectKey) {
         return state.newApi(projectKey);
     }
@@ -78,14 +74,12 @@ public abstract class BaseHandler implements HttpHandler {
         return state.newBulk();
     }
 
-    /** Возвращает Snapshot, если он построен именно для этого проекта, иначе null. */
     protected Snapshot snapshotFor(String projectKey) {
         Snapshot s = state.getSnapshot();
         if (s != null && s.projectKey.equals(projectKey)) return s;
         return null;
     }
 
-    /** Facet (rules/files/severities) — из snapshot или live. */
     protected Map<String, Integer> fetchFacet(String project, String sev, String qual, String facet)
             throws Exception {
         Snapshot s = snapshotFor(project);
@@ -100,7 +94,6 @@ public abstract class BaseHandler implements HttpHandler {
         return newApi(project).facet(sev, qual, facet);
     }
 
-    /** Сниппет с приоритетом snapshot-кэша, fallback на live. */
     protected List<String> fetchSnippetCached(String project, String issueKey) throws Exception {
         Snapshot s = snapshotFor(project);
         if (s != null) {
@@ -110,14 +103,11 @@ public abstract class BaseHandler implements HttpHandler {
         return newApi(project).fetchSnippet(issueKey);
     }
 
-    /** Удобно добавить в JSON-ответ сведения об источнике данных. */
     protected void putSource(JSONObject o, String project) {
         Snapshot s = snapshotFor(project);
         o.put("source", s != null ? "snapshot" : "live");
         if (s != null) o.put("snapshotBuiltAt", s.builtAt.toString());
     }
-
-    // ================= query helpers =================
 
     protected Map<String, String> parseQuery(HttpExchange ex) {
         Map<String, String> q = new LinkedHashMap<>();
@@ -156,8 +146,6 @@ public abstract class BaseHandler implements HttpHandler {
         return "true".equalsIgnoreCase(v) || "1".equals(v) || "yes".equalsIgnoreCase(v);
     }
 
-    // ================= response =================
-
     protected void sendJson(HttpExchange ex, int status, JSONObject obj) throws IOException {
         byte[] bytes = obj.toString().getBytes(StandardCharsets.UTF_8);
         ex.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");
@@ -184,7 +172,7 @@ public abstract class BaseHandler implements HttpHandler {
         ex.getResponseHeaders().set("Access-Control-Allow-Headers", "Content-Type, X-Requested-With");
         ex.getResponseHeaders().set("Access-Control-Max-Age", "86400");
     }
-    /** Служебный QUAL-фильтр для Security Hotspots (SonarQube такого QUAL не знает). */
+
     protected boolean isHotspotQuery(String qual) {
         return "SECURITY_HOTSPOT".equalsIgnoreCase(qual);
     }
@@ -194,7 +182,11 @@ public abstract class BaseHandler implements HttpHandler {
             return newApi(project).fetchHotspots(sev);
         }
         Snapshot s = snapshotFor(project);
-        if (s != null) return s.filter(sev, qual);
+        if (s != null) {
+            List<Issue> issues = s.filter(sev, qual);
+            issues.removeIf(it -> !"OPEN".equals(it.status) && !"REOPENED".equals(it.status));
+            return issues;
+        }
         return newApi(project).fetchAll(sev, qual);
     }
 
@@ -212,7 +204,12 @@ public abstract class BaseHandler implements HttpHandler {
             return byFile;
         }
         Snapshot s = snapshotFor(project);
-        if (s != null) return s.filterByFile(sev, qual);
+        if (s != null) {
+            Map<String, List<Issue>> byFile = s.filterByFile(sev, qual);
+            byFile.values().forEach(list -> list.removeIf(it -> !"OPEN".equals(it.status) && !"REOPENED".equals(it.status)));
+            byFile.entrySet().removeIf(e -> e.getValue().isEmpty());
+            return byFile;
+        }
         return newApi(project).issuesByFile(sev, qual);
     }
 }

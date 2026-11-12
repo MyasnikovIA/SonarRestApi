@@ -35,7 +35,7 @@ public class SonarIssuesApi {
     }
 
     private String buildQuery(String impactSeverity, String quality) {
-        return buildQueryWithStatuses("CONFIRMED,OPEN", impactSeverity, quality);
+        return buildQueryWithStatuses("OPEN,REOPENED", impactSeverity, quality);
     }
 
     private String buildQueryWithStatuses(String statuses, String impactSeverity, String quality) {
@@ -48,7 +48,7 @@ public class SonarIssuesApi {
         if (quality != null && !"ALL".equals(quality)) {
             q.append("&impactSoftwareQualities=").append(enc(quality));
         }
-        String st = (statuses == null || statuses.isEmpty()) ? "CONFIRMED,OPEN" : statuses;
+        String st = (statuses == null || statuses.isEmpty()) ? "OPEN,REOPENED" : statuses;
         q.append("&issueStatuses=").append(enc(st));
         q.append("&additionalFields=").append(enc("_all"));
         q.append("&timeZone=").append(enc("Asia/Novosibirsk"));
@@ -56,7 +56,15 @@ public class SonarIssuesApi {
     }
 
     public int count(String impactSeverity, String quality) throws Exception {
-        return countWithStatuses("CONFIRMED,OPEN", impactSeverity, quality);
+        try {
+            return countWithStatuses("OPEN,REOPENED", impactSeverity, quality);
+        } catch (RuntimeException e) {
+            String msg = e.getMessage();
+            if (msg != null && (msg.contains("REOPENED") || msg.contains("issueStatuses"))) {
+                return countWithStatuses("OPEN", impactSeverity, quality);
+            }
+            throw e;
+        }
     }
 
     public int countWithStatuses(String statuses, String impactSeverity, String quality)
@@ -68,7 +76,7 @@ public class SonarIssuesApi {
     }
 
     public List<Issue> fetchAll(String impactSeverity, String quality) throws Exception {
-        return fetchAllByStatuses("CONFIRMED,OPEN", impactSeverity, quality);
+        return fetchOpen(impactSeverity, quality);
     }
 
     public List<Issue> fetchAccepted(String impactSeverity, String quality) throws Exception {
@@ -99,7 +107,15 @@ public class SonarIssuesApi {
 
     public Map<String, Integer> facet(String impactSeverity, String quality, String facetName)
             throws Exception {
-        return facetWithStatuses("CONFIRMED,OPEN", impactSeverity, quality, facetName);
+        try {
+            return facetWithStatuses("OPEN,REOPENED", impactSeverity, quality, facetName);
+        } catch (RuntimeException e) {
+            String msg = e.getMessage();
+            if (msg != null && (msg.contains("REOPENED") || msg.contains("issueStatuses"))) {
+                return facetWithStatuses("OPEN", impactSeverity, quality, facetName);
+            }
+            throw e;
+        }
     }
 
     public Map<String, Integer> facetWithStatuses(String statuses, String impactSeverity,
@@ -125,9 +141,21 @@ public class SonarIssuesApi {
         return result;
     }
 
+    /**
+     * ИСПРАВЛЕНИЕ: Теперь используется fetchOpen, который имеет фолбэк
+     * на статус OPEN, если сервер SonarQube не поддерживает REOPENED.
+     */
     public Map<String, List<Issue>> issuesByFile(String impactSeverity, String quality)
             throws Exception {
-        return issuesByFileByStatuses("CONFIRMED,OPEN", impactSeverity, quality);
+        List<Issue> all = fetchOpen(impactSeverity, quality);
+        Map<String, List<Issue>> byFile = new TreeMap<>();
+        for (Issue it : all) {
+            byFile.computeIfAbsent(it.component, k -> new ArrayList<>()).add(it);
+        }
+        for (List<Issue> list : byFile.values()) {
+            list.sort(Comparator.comparingInt(i -> i.line));
+        }
+        return byFile;
     }
 
     public Map<String, List<Issue>> issuesByFileByStatuses(String statuses,
@@ -159,7 +187,6 @@ public class SonarIssuesApi {
         return root.optJSONArray("changelog");
     }
 
-    // НОВОЕ: Получение доступных тегов
     public List<String> fetchTags(String query) throws Exception {
         String url = "/api/issues/tags?ps=100";
         if (query != null && !query.isEmpty()) {
@@ -322,16 +349,7 @@ public class SonarIssuesApi {
                 .replace("&#39;", "'")
                 .replace("&nbsp;", " ");
     }
-    /**
-     * Загружает Security Hotspots проекта.
-     *
-     * SonarQube /api/hotspots/search принимает только ОДИН status за запрос
-     * (TO_REVIEW ИЛИ REVIEWED — CSV не поддерживается), поэтому делаем два запроса
-     * и склеиваем. Фильтр по vulnerabilityProbability — на клиенте, т.к. серверной
-     * фильтрации по нему нет.
-     *
-     * @param vulnerabilityProbability HIGH | MEDIUM | LOW | ALL | null
-     */
+
     public List<Issue> fetchHotspots(String vulnerabilityProbability) throws Exception {
         List<Issue> out = new ArrayList<>();
         String[] statuses = { "TO_REVIEW", "REVIEWED" };
@@ -369,33 +387,19 @@ public class SonarIssuesApi {
                     out.add(issue);
                 }
                 page++;
-                if (page > 100) break;  // safety
+                if (page > 100) break;
             }
         }
         return out;
     }
-    /**
-     * Загружает только необработанные замечания (OPEN и REOPENED).
-     * CONFIRMED не включается — он уже обработан пользователем.
-     */
-    /**
-     * Загружает только необработанные замечания.
-     *
-     * В SonarQube 9.x/10.x статуса REOPENED больше нет — переоткрытое
-     * замечание возвращается в OPEN. В старых версиях REOPENED ещё
-     * существовал, но такие инстансы на запрос со REOPENED отвечают 400.
-     *
-     * Поэтому: сначала пробуем современный запрос (OPEN,REOPENED), при
-     * ошибке «must be one of» откатываемся на OPEN — это безопасно для
-     * обеих моделей (OPEN покрывает и переоткрытые замечания).
-     */
+
     public List<Issue> fetchOpen(String impactSeverity, String quality) throws Exception {
         try {
             return fetchAllByStatuses("OPEN,REOPENED", impactSeverity, quality);
         } catch (RuntimeException e) {
             String msg = e.getMessage();
             if (msg != null && (msg.contains("REOPENED") || msg.contains("issueStatuses"))) {
-                return fetchAllByStatuses("OPEN", impactSeverity, quality);   // тихо
+                return fetchAllByStatuses("OPEN", impactSeverity, quality);
             }
             throw e;
         }

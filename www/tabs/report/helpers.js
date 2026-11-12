@@ -113,7 +113,8 @@ export function formatConfluence(issue, snippet, projectName, host) {
     const ruleName = issue.ruleName ? ` — ${issue.ruleName}` : '';
     const tagsStr = (issue.tags && issue.tags.length > 0) ? issue.tags.join(', ') : 'нет';
 
-    let html = `<h3>${escapeHtml(issue.key)}</h3>\n`;
+    let html = `\n`;
+    html += `<p><strong>Идентификатор ошибки:</strong>${escapeHtml(issue.key)}</p>\n`;
     html += `<p><strong>Ссылка:</strong> <a href="${escapeHtml(link)}">${escapeHtml(link)}</a></p>\n`;
     html += `<p><strong>Правило:</strong> ${escapeHtml(issue.rule)}${escapeHtml(ruleName)}</p>\n`;
     html += `<p><strong>Файл:</strong> ${escapeHtml(issue.component)}:${issue.line}</p>\n`;

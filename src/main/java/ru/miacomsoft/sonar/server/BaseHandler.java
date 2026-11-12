@@ -51,6 +51,8 @@ public abstract class BaseHandler implements HttpHandler {
 
     protected abstract void handleRequest(HttpExchange ex) throws Exception;
 
+    // ================= project resolution =================
+
     protected String resolveProject(HttpExchange ex) {
         String p = parseQuery(ex).get("project");
         if (p == null || p.isEmpty()) p = state.getDefaultProject();
@@ -65,6 +67,8 @@ public abstract class BaseHandler implements HttpHandler {
         }
         return p;
     }
+
+    // ================= snapshot-aware helpers =================
 
     protected SonarIssuesApi newApi(String projectKey) {
         return state.newApi(projectKey);
@@ -109,6 +113,8 @@ public abstract class BaseHandler implements HttpHandler {
         if (s != null) o.put("snapshotBuiltAt", s.builtAt.toString());
     }
 
+    // ================= query helpers =================
+
     protected Map<String, String> parseQuery(HttpExchange ex) {
         Map<String, String> q = new LinkedHashMap<>();
         String raw = ex.getRequestURI().getRawQuery();
@@ -145,6 +151,8 @@ public abstract class BaseHandler implements HttpHandler {
         if (v == null || v.isEmpty()) return def;
         return "true".equalsIgnoreCase(v) || "1".equals(v) || "yes".equalsIgnoreCase(v);
     }
+
+    // ================= response =================
 
     protected void sendJson(HttpExchange ex, int status, JSONObject obj) throws IOException {
         byte[] bytes = obj.toString().getBytes(StandardCharsets.UTF_8);
@@ -184,8 +192,14 @@ public abstract class BaseHandler implements HttpHandler {
         Snapshot s = snapshotFor(project);
         if (s != null) {
             List<Issue> issues = s.filter(sev, qual);
-            issues.removeIf(it -> !"OPEN".equals(it.status) && !"REOPENED".equals(it.status));
-            return issues;
+            // ИСПРАВЛЕНИЕ: Создаем новый ArrayList, так как Snapshot.filter() может вернуть unmodifiableList
+            List<Issue> filtered = new ArrayList<>();
+            for (Issue it : issues) {
+                if ("OPEN".equals(it.status) || "REOPENED".equals(it.status)) {
+                    filtered.add(it);
+                }
+            }
+            return filtered;
         }
         return newApi(project).fetchAll(sev, qual);
     }
@@ -206,9 +220,20 @@ public abstract class BaseHandler implements HttpHandler {
         Snapshot s = snapshotFor(project);
         if (s != null) {
             Map<String, List<Issue>> byFile = s.filterByFile(sev, qual);
-            byFile.values().forEach(list -> list.removeIf(it -> !"OPEN".equals(it.status) && !"REOPENED".equals(it.status)));
-            byFile.entrySet().removeIf(e -> e.getValue().isEmpty());
-            return byFile;
+            // ИСПРАВЛЕНИЕ: Создаем новый TreeMap и новые списки, чтобы не модифицировать unmodifiableList
+            Map<String, List<Issue>> res = new TreeMap<>();
+            for (Map.Entry<String, List<Issue>> entry : byFile.entrySet()) {
+                List<Issue> filtered = new ArrayList<>();
+                for (Issue it : entry.getValue()) {
+                    if ("OPEN".equals(it.status) || "REOPENED".equals(it.status)) {
+                        filtered.add(it);
+                    }
+                }
+                if (!filtered.isEmpty()) {
+                    res.put(entry.getKey(), filtered);
+                }
+            }
+            return res;
         }
         return newApi(project).issuesByFile(sev, qual);
     }

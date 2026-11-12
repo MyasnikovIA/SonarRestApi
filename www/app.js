@@ -5,12 +5,14 @@ import { perfile } from './tabs/perfile.js';
 import { details } from './tabs/details.js';
 import { issues }  from './tabs/issues.js';
 import { accepted } from './tabs/accepted.js';
+import { report }   from './tabs/report/index.js'; // <-- ИМПОРТ НОВОЙ ВКЛАДКИ
 import { snippet } from './tabs/snippet.js';
 import { session } from './tabs/session.js';
 import { status }  from './tabs/status.js';
 import { openOllamaSettingsModal } from './ollama.js';
 
-const TABS = [summary, matrix, perfile, details, issues, accepted, snippet, session, status];
+// <-- ДОБАВЛЕНА В МАССИВ
+const TABS = [summary, matrix, perfile, details, issues, accepted, report, snippet, session, status];
 const TAB_BY_ID = Object.fromEntries(TABS.map(t => [t.id, t]));
 
 const state = {
@@ -66,7 +68,7 @@ async function activateTab(id) {
 
     const activePanel = document.getElementById(`panel-${id}`);
     if (activePanel) {
-        if (!state.project) {
+        if (!state.project && id !== 'session' && id !== 'status') {
             activePanel.innerHTML = '<div class="empty">Выберите или введите проект в верхней панели</div>';
             return;
         }
@@ -407,7 +409,6 @@ function initUI() {
         activateTab(state.activeTab); // Перезагружаем текущую вкладку
     });
 
-    // ... остальные слушатели без изменений ...
     $('sev').addEventListener('change', e => {
         state.sev = e.target.value;
         localStorage.setItem('sev', state.sev);

@@ -98,7 +98,10 @@ public class Snapshot {
     // ================= фильтры =================
 
     public List<Issue> filter(String sev, String qual) {
-        if ("ALL".equals(sev) && "ALL".equals(qual)) return issues;
+        if ("ALL".equals(sev) && "ALL".equals(qual)) {
+            // ИСПРАВЛЕНИЕ: Возвращаем копию, чтобы вызывающий код мог безопасно модифицировать список
+            return new ArrayList<>(issues);
+        }
         List<Issue> out = new ArrayList<>();
         for (Issue i : issues) {
             if (i.matches(sev, qual)) out.add(i);

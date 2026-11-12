@@ -4,40 +4,47 @@ import { formatJira, formatMd, formatTxt, formatConfluence, formatHtmlFile } fro
 // Функция для безопасного формирования имени файла по шаблону:
 // Project_(Path_to_File.ext).html
 function makeFileName(projectName, originalFilePath) {
-    // 1. Убираем имя проекта из пути файла (если оно есть, например "project:src/Api.php" -> "src/Api.php")
+    // 1. Убираем имя проекта из пути файла (если оно есть)
     let cleanPath = originalFilePath;
     if (cleanPath.includes(':')) {
         cleanPath = cleanPath.split(':').pop();
     }
-
-    // 2. Заменяем слэши и обратные слэши на подчеркивания
+    // 2. Заменяем слэши на подчеркивания
     cleanPath = cleanPath.replace(/[\\/]/g, '_');
-
-    // 3. Убираем недопустимые символы для файловой системы
+    // 3. Убираем недопустимые символы
     cleanPath = cleanPath.replace(/[^A-Za-z0-9._-]/g, '_');
-
     // 4. Очищаем имя проекта
     const safeProject = projectName.replace(/[^A-Za-z0-9._-]/g, '_');
 
-    // Формируем итоговое имя: Project_(src_Api_File.php).html
     return `${safeProject}_(${cleanPath}).html`;
 }
 
 export async function showExportModal(issues, formatType, ctx, projectName) {
     if (!issues.length) return;
 
-    // Если это html-files и браузер поддерживает File System Access API,
-    // запрашиваем папку ДО начала долгого процесса загрузки сниппетов
     let dirHandle = null;
-    if (formatType === 'html-files' && window.showDirectoryPicker) {
-        try {
-            dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
-        } catch (e) {
-            if (e.name === 'AbortError') {
-                toast('Выбор папки отменен', true);
-                return; // Прерываем выполнение
+    // Пытаемся использовать File System Access API (только Chrome/Edge, только HTTPS/localhost)
+    if (formatType === 'html-files') {
+        if (window.showDirectoryPicker) {
+            try {
+                dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
+                // Принудительно запрашиваем разрешение на запись для всей папки
+                if (await dirHandle.queryPermission({ mode: 'readwrite' }) !== 'granted') {
+                    const perm = await dirHandle.requestPermission({ mode: 'readwrite' });
+                    if (perm !== 'granted') {
+                        toast('Нет разрешения на запись в выбранную папку', true);
+                        return;
+                    }
+                }
+            } catch (e) {
+                if (e.name === 'AbortError') {
+                    toast('Выбор папки отменен', true);
+                    return;
+                }
+                console.warn('Directory picker failed', e);
             }
-            console.warn('Directory picker failed', e);
+        } else {
+            toast('Ваш браузер не поддерживает выбор папки (нужен Chrome/Edge и HTTPS). Файлы будут скачиваться по одному.', true);
         }
     }
 
@@ -110,7 +117,6 @@ export async function showExportModal(issues, formatType, ctx, projectName) {
         blocks.push(`<p><em>Сгенерировано: ${now} &middot; Всего issues: ${total}</em></p>\n<hr/>\n`);
     }
 
-    // Для html-files собираем группы
     const filesMap = new Map();
 
     // ЭТАП 1: Загрузка всех сниппетов
@@ -164,7 +170,7 @@ export async function showExportModal(issues, formatType, ctx, projectName) {
             const filesArray = Array.from(filesMap.entries());
 
             if (dirHandle) {
-                // Используем File System Access API (выбор папки)
+                // Сохраняем напрямую в выбранную папку (без подтверждений)
                 statusEl.textContent = 'сохранение файлов в папку...';
                 let savedCount = 0;
 
@@ -188,12 +194,16 @@ export async function showExportModal(issues, formatType, ctx, projectName) {
                     }
                 }
             } else {
-                // Fallback: стандартное скачивание (без выбора папки)
-                statusEl.textContent = 'формирование файлов (скачивание)...';
+                // Поштучное скачивание (Fallback для HTTP, браузер может спрашивать имя)
+                statusEl.textContent = 'скачивание файлов...';
                 let delay = 0;
                 for (const [fileName, fileIssues] of filesArray) {
+                    if (cancelled) break;
+
                     const html = formatHtmlFile(fileIssues, projectName, host, fileName);
                     const safeFilename = makeFileName(projectName, fileName);
+
+                    currentEl.textContent = `Скачивание: ${safeFilename}`;
 
                     setTimeout(() => {
                         const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
@@ -206,7 +216,7 @@ export async function showExportModal(issues, formatType, ctx, projectName) {
                         document.body.removeChild(a);
                         URL.revokeObjectURL(url);
                     }, delay);
-                    delay += 500; // 500ms между скачиваниями
+                    delay += 300; // 300ms между скачиваниями, чтобы браузер не блокировал
                 }
             }
         } else if (blocks.length > 1) {

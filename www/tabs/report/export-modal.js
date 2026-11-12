@@ -1,8 +1,45 @@
-import { esc } from '../../common.js';
-import { formatJira, formatMd, formatTxt, formatConfluence } from './helpers.js';
+import { esc, toast } from '../../common.js';
+import { formatJira, formatMd, formatTxt, formatConfluence, formatHtmlFile } from './helpers.js';
+
+// Функция для безопасного формирования имени файла по шаблону:
+// Project_(Path_to_File.ext).html
+function makeFileName(projectName, originalFilePath) {
+    // 1. Убираем имя проекта из пути файла (если оно есть, например "project:src/Api.php" -> "src/Api.php")
+    let cleanPath = originalFilePath;
+    if (cleanPath.includes(':')) {
+        cleanPath = cleanPath.split(':').pop();
+    }
+
+    // 2. Заменяем слэши и обратные слэши на подчеркивания
+    cleanPath = cleanPath.replace(/[\\/]/g, '_');
+
+    // 3. Убираем недопустимые символы для файловой системы
+    cleanPath = cleanPath.replace(/[^A-Za-z0-9._-]/g, '_');
+
+    // 4. Очищаем имя проекта
+    const safeProject = projectName.replace(/[^A-Za-z0-9._-]/g, '_');
+
+    // Формируем итоговое имя: Project_(src_Api_File.php).html
+    return `${safeProject}_(${cleanPath}).html`;
+}
 
 export async function showExportModal(issues, formatType, ctx, projectName) {
     if (!issues.length) return;
+
+    // Если это html-files и браузер поддерживает File System Access API,
+    // запрашиваем папку ДО начала долгого процесса загрузки сниппетов
+    let dirHandle = null;
+    if (formatType === 'html-files' && window.showDirectoryPicker) {
+        try {
+            dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
+        } catch (e) {
+            if (e.name === 'AbortError') {
+                toast('Выбор папки отменен', true);
+                return; // Прерываем выполнение
+            }
+            console.warn('Directory picker failed', e);
+        }
+    }
 
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
@@ -10,7 +47,7 @@ export async function showExportModal(issues, formatType, ctx, projectName) {
     overlay.innerHTML = `
         <div class="modal-content" style="max-width: 520px;">
             <div class="modal-header">
-                <h3 style="margin:0;">Генерация отчета (${formatType === 'confluence' ? 'Confluence' : formatType.toUpperCase()})</h3>
+                <h3 style="margin:0;">Генерация отчета (${formatType === 'confluence' ? 'Confluence' : (formatType === 'html-files' ? 'HTML по файлам' : formatType.toUpperCase())})</h3>
             </div>
             <div class="modal-body">
                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; font-size:12px;">
@@ -22,7 +59,7 @@ export async function showExportModal(issues, formatType, ctx, projectName) {
                 </div>
                 <div id="exp-current" style="margin-top:10px; font-size:12px; color:var(--text-dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">—</div>
                 <div style="margin-top:16px; display:flex; justify-content:flex-end; gap:8px;">
-                    <button id="exp-cancel" class="btn btn-danger">Остановить</button>
+                    <button id="exp-cancel" class="btn btn-danger" type="button">Остановить</button>
                 </div>
             </div>
         </div>
@@ -58,7 +95,7 @@ export async function showExportModal(issues, formatType, ctx, projectName) {
         console.warn('Не удалось получить host для ссылок', e);
     }
 
-    // Заголовки
+    // Заголовки для единых файлов
     if (formatType === 'jira') {
         blocks.push(`h3. Проект: ${projectName}\n`);
         blocks.push(`*Всего issues:* ${total}\n*Сгенерировано:* ${now}\n\n`);
@@ -73,6 +110,10 @@ export async function showExportModal(issues, formatType, ctx, projectName) {
         blocks.push(`<p><em>Сгенерировано: ${now} &middot; Всего issues: ${total}</em></p>\n<hr/>\n`);
     }
 
+    // Для html-files собираем группы
+    const filesMap = new Map();
+
+    // ЭТАП 1: Загрузка всех сниппетов
     for (let i = 0; i < total; i++) {
         if (cancelled) break;
         const it = issues[i];
@@ -100,34 +141,90 @@ export async function showExportModal(issues, formatType, ctx, projectName) {
             snippet = it._snippet;
         }
 
-        if (formatType === 'jira')       blocks.push(formatJira(it, snippet, projectName, host));
-        if (formatType === 'md')         blocks.push(formatMd(it, snippet, projectName, host));
-        if (formatType === 'txt')        blocks.push(formatTxt(it, snippet, projectName, host));
-        if (formatType === 'confluence') blocks.push(formatConfluence(it, snippet, projectName, host));
+        if (formatType === 'html-files') {
+            const fileName = it.component || '(unknown)';
+            if (!filesMap.has(fileName)) filesMap.set(fileName, []);
+            filesMap.get(fileName).push(it);
+        } else {
+            if (formatType === 'jira')       blocks.push(formatJira(it, snippet, projectName, host));
+            if (formatType === 'md')         blocks.push(formatMd(it, snippet, projectName, host));
+            if (formatType === 'txt')        blocks.push(formatTxt(it, snippet, projectName, host));
+            if (formatType === 'confluence') blocks.push(formatConfluence(it, snippet, projectName, host));
 
-        if (formatType === 'md')  blocks.push('\n---\n');
-        if (formatType === 'txt') blocks.push('\n----------------------------------------\n');
+            if (formatType === 'md')  blocks.push('\n---\n');
+            if (formatType === 'txt') blocks.push('\n----------------------------------------\n');
+        }
     }
 
-    counterEl.textContent = `${cancelled ? 'Остановлено на ' + (blocks.length) : total} / ${total}`;
-    statusEl.textContent = cancelled ? 'отменено' : 'формирование файла...';
-    fillEl.style.width = `${cancelled ? 100 : 100}%`;
+    // ЭТАП 2: Сохранение файлов
+    fillEl.style.width = '100%';
 
-    if (blocks.length > 1) {
-        const text = blocks.join('\n');
-        const ext = formatType === 'jira' ? 'txt' : (formatType === 'confluence' ? 'html' : formatType);
-        const mime = formatType === 'md' ? 'text/markdown' : (formatType === 'confluence' ? 'text/html' : 'text/plain');
+    if (!cancelled) {
+        if (formatType === 'html-files') {
+            const filesArray = Array.from(filesMap.entries());
 
-        const filename = `report_${projectName.replace(/[^A-Za-z0-9._-]/g, '_')}_${Date.now()}.${ext}`;
-        const blob = new Blob([text], { type: `${mime};charset=utf-8` });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
+            if (dirHandle) {
+                // Используем File System Access API (выбор папки)
+                statusEl.textContent = 'сохранение файлов в папку...';
+                let savedCount = 0;
+
+                for (const [fileName, fileIssues] of filesArray) {
+                    if (cancelled) break;
+
+                    const safeFilename = makeFileName(projectName, fileName);
+                    currentEl.textContent = `Сохранение: ${safeFilename}`;
+
+                    try {
+                        const html = formatHtmlFile(fileIssues, projectName, host, fileName);
+                        const fileHandle = await dirHandle.getFileHandle(safeFilename, { create: true });
+                        const writable = await fileHandle.createWritable();
+                        await writable.write(html);
+                        await writable.close();
+                        savedCount++;
+                        statusEl.textContent = `Сохранено ${savedCount} из ${filesArray.length}`;
+                    } catch (err) {
+                        console.error('Ошибка записи файла:', safeFilename, err);
+                        toast(`Ошибка записи ${safeFilename}: ${err.message}`, true);
+                    }
+                }
+            } else {
+                // Fallback: стандартное скачивание (без выбора папки)
+                statusEl.textContent = 'формирование файлов (скачивание)...';
+                let delay = 0;
+                for (const [fileName, fileIssues] of filesArray) {
+                    const html = formatHtmlFile(fileIssues, projectName, host, fileName);
+                    const safeFilename = makeFileName(projectName, fileName);
+
+                    setTimeout(() => {
+                        const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = safeFilename;
+                        document.body.appendChild(a);
+                        a.click();
+                        document.body.removeChild(a);
+                        URL.revokeObjectURL(url);
+                    }, delay);
+                    delay += 500; // 500ms между скачиваниями
+                }
+            }
+        } else if (blocks.length > 1) {
+            const text = blocks.join('\n');
+            const ext = formatType === 'jira' ? 'txt' : (formatType === 'confluence' ? 'html' : formatType);
+            const mime = formatType === 'md' ? 'text/markdown' : (formatType === 'confluence' ? 'text/html' : 'text/plain');
+
+            const filename = `${projectName.replace(/[^A-Za-z0-9._-]/g, '_')}_${Date.now()}.${ext}`;
+            const blob = new Blob([text], { type: `${mime};charset=utf-8` });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
     }
 
     statusEl.textContent = cancelled ? 'Отменено пользователем' : 'Готово!';

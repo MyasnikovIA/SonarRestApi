@@ -89,7 +89,7 @@ export async function exportReportToMarkdown(issues, ctx, projectName) {
     }
 
     const md = lines.join('\n');
-    const filename = `report_${sanitize(projectName)}_${Date.now()}.md`;
+    const filename = `${sanitize(projectName)}_${Date.now()}.md`;
     const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');

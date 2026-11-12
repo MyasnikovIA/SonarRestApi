@@ -133,3 +133,51 @@ export function formatConfluence(issue, snippet, projectName, host) {
     html += `<br/><hr/><br/>\n`;
     return html;
 }
+
+// НОВАЯ ФУНКЦИЯ для отдельного файла с аккордеоном
+export function formatHtmlFile(fileIssues, projectName, host, fileName) {
+    const now = new Date().toLocaleString('ru-RU');
+    let html = `<!DOCTYPE html>\n<html lang="ru">\n<head>\n<meta charset="UTF-8">\n<title>Отчет: ${escapeHtml(projectName)} - ${escapeHtml(fileName)}</title>\n`;
+    html += `<style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height: 1.5; color: #172b4d; max-width: 1000px; margin: 0 auto; padding: 20px; background: #fafbfc; }
+        h1, h2 { color: #0052cc; margin-bottom: 8px; }
+        h3 { color: #172b4d; margin-bottom: 8px; font-size: 16px; }
+        p { margin: 6px 0; }
+        a { color: #0052cc; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        .issue { border: 1px solid #dfe1e6; border-radius: 4px; background: #fff; padding: 16px; margin-bottom: 16px; }
+        details { margin-top: 12px; border: 1px solid #dfe1e6; border-radius: 4px; background: #f4f5f7; }
+        summary { cursor: pointer; padding: 8px 12px; font-weight: 600; color: #42526e; user-select: none; }
+        summary:hover { background: #ebecf0; }
+        pre { margin: 0; padding: 12px; background: #fff; overflow-x: auto; border-top: 1px solid #dfe1e6; border-radius: 0 0 4px 4px; font-family: monospace; font-size: 13px; }
+    </style>\n</head>\n<body>\n`;
+    html += `<h1>Проект: ${escapeHtml(projectName)}</h1>\n`;
+    html += `<h2>Файл: ${escapeHtml(fileName)}</h2>\n`;
+    html += `<p><em>Сгенерировано: ${now} &middot; Всего issues: ${fileIssues.length}</em></p>\n<hr/>\n`;
+
+    fileIssues.forEach(it => {
+        const link = getIssueLink(it, projectName, host);
+        const ruleName = it.ruleName ? ` — ${it.ruleName}` : '';
+        const tagsStr = (it.tags && it.tags.length > 0) ? it.tags.join(', ') : 'нет';
+        const lastComment = getLastComment(it);
+
+        html += `<div class="issue">\n`;
+        html += `<p><strong>Идентификатор ошибки:</strong>${escapeHtml(it.key)}  (Строка: ${it.line})</p>\n`;
+        html += `<p><strong>Ссылка:</strong> <a href="${escapeHtml(link)}" target="_blank">${escapeHtml(link)}</a></p>\n`;
+        html += `<p><strong>Правило:</strong> ${escapeHtml(it.rule)}${escapeHtml(ruleName)}</p>\n`;
+        html += `<p><strong>Теги:</strong> ${escapeHtml(tagsStr)}</p>\n`;
+        html += `<p><strong>Сообщение:</strong> ${escapeHtml(it.message)}</p>\n`;
+        html += `<p><strong>Пользовательский комментарий:</strong> ${escapeHtml(lastComment)}</p>\n`;
+
+        if (it._snippet && it._snippet.length > 0) {
+            const code = it._snippet.map(line =>
+                line.replace(/§HL_START§/g, '>>> ').replace(/§HL_END§/g, ' <<<')
+            ).join('\n');
+            html += `<details>\n<summary>Показать фрагмент кода</summary>\n<pre><code>${escapeHtml(code)}</code></pre>\n</details>\n`;
+        }
+        html += `</div>\n`;
+    });
+
+    html += `</body>\n</html>`;
+    return html;
+}

@@ -68,7 +68,7 @@ export const report = {
                             <input type="checkbox" id="rep-master-cb" style="width:18px; height:18px; cursor:pointer;" title="Выделить всё">
                             <h3 style="margin:0;" id="rep-header-title">${esc(ctx.state.project)} · Всего: ${allIssues.length}</h3>
                         </div>
-                        <button id="rep-export-btn" class="btn btn-accent" style="display:none;">Действия с выбранными (0)</button>
+                        <button id="rep-export-btn" class="btn btn-accent" style="display:none;" type="button">Действия с выбранными (0)</button>
                     </div>
                     <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-top:12px;">
                         <label style="display:flex; align-items:center; gap:4px; font-size:12px;">
@@ -95,8 +95,8 @@ export const report = {
                                               background:var(--bg3); color:var(--text);">
                                 <div id="rep-tag-list" style="max-height:220px; overflow-y:auto; display:flex; flex-direction:column; gap:2px; margin-bottom:8px;"></div>
                                 <div style="display:flex; justify-content:space-between; gap:8px;">
-                                    <button id="rep-tag-clear" class="btn" style="flex:1;">Сбросить</button>
-                                    <button id="rep-tag-close" class="btn" style="flex:1;">Готово</button>
+                                    <button id="rep-tag-clear" class="btn" style="flex:1;" type="button">Сбросить</button>
+                                    <button id="rep-tag-close" class="btn" style="flex:1;" type="button">Готово</button>
                                 </div>
                             </div>
                         </details>
@@ -116,8 +116,8 @@ export const report = {
                                               background:var(--bg3); color:var(--text);">
                                 <div id="rep-rule-list" style="max-height:220px; overflow-y:auto; display:flex; flex-direction:column; gap:2px; margin-bottom:8px;"></div>
                                 <div style="display:flex; justify-content:space-between; gap:8px;">
-                                    <button id="rep-rule-clear" class="btn" style="flex:1;">Сбросить</button>
-                                    <button id="rep-rule-close" class="btn" style="flex:1;">Готово</button>
+                                    <button id="rep-rule-clear" class="btn" style="flex:1;" type="button">Сбросить</button>
+                                    <button id="rep-rule-close" class="btn" style="flex:1;" type="button">Готово</button>
                                 </div>
                             </div>
                         </details>
@@ -170,8 +170,7 @@ export const report = {
                         if (e.target.checked) selectedTags.add(e.target.value);
                         else selectedTags.delete(e.target.value);
                         updateTagCount();
-                        renderTagList();
-                        renderList();
+                        renderList(); // Обновляем список сразу, не перерисовывая чекбоксы
                     });
                 });
             };
@@ -196,7 +195,6 @@ export const report = {
                         if (e.target.checked) selectedRules.add(e.target.value);
                         else selectedRules.delete(e.target.value);
                         updateRuleCount();
-                        renderRuleList();
                         renderList();
                     });
                 });
@@ -211,12 +209,36 @@ export const report = {
             updateRuleCount();
 
             tagSearch.addEventListener('input', (e) => { tagQuery = e.target.value; renderTagList(); });
-            tagClear.addEventListener('click', () => { selectedTags.clear(); updateTagCount(); renderTagList(); renderList(); });
-            tagClose.addEventListener('click', () => tagDetails.removeAttribute('open'));
-
             ruleSearch.addEventListener('input', (e) => { ruleQuery = e.target.value; renderRuleList(); });
-            ruleClear.addEventListener('click', () => { selectedRules.clear(); updateRuleCount(); renderRuleList(); renderList(); });
-            ruleClose.addEventListener('click', () => ruleDetails.removeAttribute('open'));
+
+            // ИСПРАВЛЕНИЕ КНОПОК СБРОСА
+            tagClear.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                selectedTags.clear();
+                updateTagCount();
+                renderTagList();
+                renderList();
+            });
+            tagClose.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                tagDetails.removeAttribute('open');
+            });
+
+            ruleClear.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                selectedRules.clear();
+                updateRuleCount();
+                renderRuleList();
+                renderList();
+            });
+            ruleClose.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                ruleDetails.removeAttribute('open');
+            });
 
             // Контекстное меню
             const ctxMenu = document.createElement('div');
@@ -227,6 +249,7 @@ export const report = {
                 <div class="ctx-item" id="ctx-md">📄 Выгрузить Markdown</div>
                 <div class="ctx-item" id="ctx-txt">📝 Выгрузить TXT</div>
                 <div class="ctx-item" id="ctx-confluence">📋 Выгрузить Confluence (HTML)</div>
+                <div class="ctx-item" style="border-top:1px solid var(--border); margin-top:4px; padding-top:8px;" id="ctx-html-files">📦 Выгрузить HTML (по файлам)</div>
             `;
             document.body.appendChild(ctxMenu);
             document.addEventListener('click', () => { ctxMenu.style.display = 'none'; }, { once: true });
@@ -287,9 +310,17 @@ export const report = {
                 masterCb.indeterminate = !allVisible && visibleKeys.some(k => selectedKeys.has(k));
             };
 
+            const syncFileCheckbox = (fileName, fileIssues) => {
+                const cb = listEl.querySelector(`.rep-file-cb[data-file="${fileName.replace(/"/g, '\\"')}"]`);
+                if (!cb) return;
+                const allChecked = fileIssues.length > 0 && fileIssues.every(it => selectedKeys.has(it.key));
+                const someChecked = fileIssues.some(it => selectedKeys.has(it.key));
+                cb.checked = allChecked;
+                cb.indeterminate = someChecked && !allChecked;
+            };
+
             const renderList = () => {
                 let filtered = applyFilters();
-                filtered = applySort(filtered);
 
                 if (!filtered.length) {
                     listEl.innerHTML = '<div class="empty">Нет данных по фильтру</div>';
@@ -300,50 +331,74 @@ export const report = {
 
                 syncMasterCheckbox(filtered);
 
-                let headerHtml = `
-                    <tr>
-                        <th style="width:30px; padding-left:16px;"></th>
-                        <th class="rep-sort" data-field="rule" style="cursor:pointer;">Правило ${sortField === 'rule' ? (sortAsc ? '▲' : '▼') : ''}</th>
-                        <th class="rep-sort" data-field="component" style="cursor:pointer;">Файл ${sortField === 'component' ? (sortAsc ? '▲' : '▼') : ''}</th>
-                        <th class="rep-sort" data-field="severity" style="cursor:pointer;">Severity ${sortField === 'severity' ? (sortAsc ? '▲' : '▼') : ''}</th>
-                        <th class="rep-sort" data-field="message" style="cursor:pointer;">Сообщение ${sortField === 'message' ? (sortAsc ? '▲' : '▼') : ''}</th>
-                        <th>Теги</th>
-                        <th>Код</th>
-                    </tr>
-                `;
+                // Группировка по файлам
+                const groups = new Map();
+                filtered.forEach(it => {
+                    const file = it.component || '(unknown)';
+                    if (!groups.has(file)) groups.set(file, []);
+                    groups.get(file).push(it);
+                });
 
-                listEl.innerHTML = `
-                    <div class="card" style="padding:0; overflow:hidden;">
-                        <div style="overflow-x:auto">
-                            <table>
-                                <thead>${headerHtml}</thead>
-                                <tbody>
-                                    ${filtered.map(it => {
-                                        const tagsHtml = (it.tags || []).map(t => `<span class="tag" style="margin:1px;">${esc(t)}</span>`).join('');
-                                        const isChecked = selectedKeys.has(it.key) ? 'checked' : '';
-                                        return `
-                                            <tr class="rep-row" data-key="${esc(it.key)}" style="cursor:pointer;">
-                                                <td style="padding-left:16px;"><input type="checkbox" class="rep-cb" data-key="${esc(it.key)}" ${isChecked}></td>
-                                                <td><code>${esc(it.rule)}</code></td>
-                                                <td>${esc(it.component)}:${it.line}</td>
-                                                <td class="sev-${esc(it.impactSeverity || it.severity || '')}">${esc(it.impactSeverity || it.severity)}</td>
-                                                <td>${esc(it.message)}</td>
-                                                <td>${tagsHtml}</td>
-                                                <td><button class="btn rep-btn-toggle" data-key="${esc(it.key)}" style="padding:2px 8px; font-size:11px;">Показать</button></td>
-                                            </tr>
-                                            <tr id="snippet-row-${it.key}" style="display:none; background:var(--bg3);">
-                                                <td colspan="7" style="padding:12px 16px;">
-                                                    <div class="empty" id="snippet-content-${it.key}">Загрузка...</div>
-                                                </td>
-                                            </tr>
-                                        `;
-                                    }).join('')}
-                                </tbody>
-                            </table>
+                // Сортировка файлов по алфавиту
+                const sortedFiles = [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+
+                let html = '';
+
+                sortedFiles.forEach(([fileName, fileIssues]) => {
+                    // Сортируем ошибки внутри файла согласно выбранному полю
+                    const sortedIssues = applySort(fileIssues);
+
+                    html += `
+                        <div class="card" style="margin-bottom: 16px; padding: 0; overflow: hidden;">
+                            <div class="pf-file-header" style="padding: 12px 16px; background: var(--bg3); border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center;">
+                                <div style="display:flex; align-items:center; gap:8px;">
+                                    <input type="checkbox" class="rep-file-cb" data-file="${esc(fileName)}" style="width:16px; height:16px; cursor:pointer;">
+                                    <h4 style="margin: 0; text-transform: none;">📁 ${esc(fileName)} <span style="font-weight: normal; color: var(--text-dim); font-size: 13px;">— ${fileIssues.length}</span></h4>
+                                </div>
+                            </div>
+
+                            <div style="overflow-x: auto;">
+                                <table>
+                                    <thead>
+                                        <tr>
+                                            <th style="width:30px; padding-left:16px;"></th>
+                                            <th class="rep-sort" data-field="rule" style="cursor:pointer;">Правило ${sortField === 'rule' ? (sortAsc ? '▲' : '▼') : ''}</th>
+                                            <th class="rep-sort" data-field="severity" style="cursor:pointer;">Severity ${sortField === 'severity' ? (sortAsc ? '▲' : '▼') : ''}</th>
+                                            <th class="rep-sort" data-field="message" style="cursor:pointer;">Сообщение ${sortField === 'message' ? (sortAsc ? '▲' : '▼') : ''}</th>
+                                            <th>Теги</th>
+                                            <th>Код</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        ${sortedIssues.map(it => {
+                                            const tagsHtml = (it.tags || []).map(t => `<span class="tag" style="margin:1px;">${esc(t)}</span>`).join('');
+                                            const isChecked = selectedKeys.has(it.key) ? 'checked' : '';
+                                            return `
+                                                <tr class="rep-row" data-key="${esc(it.key)}" data-file="${esc(fileName)}" style="cursor:pointer;">
+                                                    <td style="padding-left:16px;"><input type="checkbox" class="rep-cb" data-key="${esc(it.key)}" ${isChecked}></td>
+                                                    <td><code>${esc(it.rule)}</code></td>
+                                                    <td class="sev-${esc(it.impactSeverity || it.severity || '')}">${esc(it.impactSeverity || it.severity)}</td>
+                                                    <td>${esc(it.message)}</td>
+                                                    <td>${tagsHtml}</td>
+                                                    <td><button class="btn rep-btn-toggle" data-key="${esc(it.key)}" style="padding:2px 8px; font-size:11px;" type="button">Показать</button></td>
+                                                </tr>
+                                                <tr id="snippet-row-${it.key}" style="display:none; background:var(--bg3);">
+                                                    <td colspan="6" style="padding:12px 16px;">
+                                                        <div class="empty" id="snippet-content-${it.key}">Загрузка...</div>
+                                                    </td>
+                                                </tr>
+                                            `;
+                                        }).join('')}
+                                    </tbody>
+                                </table>
+                            </div>
                         </div>
-                    </div>
-                `;
+                    `;
+                });
 
+                listEl.innerHTML = html;
+
+                // Привязываем события к сгенерированному HTML
                 listEl.querySelectorAll('.rep-sort').forEach(th => {
                     th.addEventListener('click', () => {
                         const field = th.dataset.field;
@@ -353,11 +408,39 @@ export const report = {
                     });
                 });
 
-                // ВАЖНО: Убрали renderList() отсюда, чтобы избежать зависаний
+                // Чекбоксы конкретных ошибок
                 listEl.querySelectorAll('.rep-cb').forEach(cb => {
                     cb.addEventListener('change', (e) => {
                         if (e.target.checked) selectedKeys.add(e.target.dataset.key);
                         else selectedKeys.delete(e.target.dataset.key);
+
+                        const file = cb.closest('tr').dataset.file;
+                        const fileIssues = groups.get(file);
+                        syncFileCheckbox(file, fileIssues);
+
+                        updateExportBtn();
+                        syncMasterCheckbox(filtered);
+                    });
+                });
+
+                // Чекбоксы групп файлов
+                listEl.querySelectorAll('.rep-file-cb').forEach(cb => {
+                    cb.addEventListener('change', (e) => {
+                        const file = e.target.dataset.file;
+                        const fileIssues = groups.get(file);
+                        const isChecked = e.target.checked;
+
+                        fileIssues.forEach(it => {
+                            if (isChecked) selectedKeys.add(it.key);
+                            else selectedKeys.delete(it.key);
+                        });
+
+                        // Обновляем состояние чекбоксов в этом файле
+                        const card = cb.closest('.card');
+                        card.querySelectorAll('.rep-cb').forEach(rowCb => {
+                            rowCb.checked = isChecked;
+                        });
+
                         updateExportBtn();
                         syncMasterCheckbox(filtered);
                     });
@@ -402,14 +485,12 @@ export const report = {
                 });
 
                 listEl.querySelectorAll('.rep-row').forEach(tr => {
-                    // Клик по строке переключает чекбокс (для удобства)
+                    // Клик по строке переключает чекбокс
                     tr.addEventListener('click', (e) => {
-                        // Игнорируем клик по самому чекбоксу или кнопке "Показать"
                         if (e.target.type === 'checkbox' || e.target.closest('.rep-btn-toggle')) return;
 
                         const cb = tr.querySelector('.rep-cb');
                         cb.checked = !cb.checked;
-                        // Вызываем событие change, чтобы обновить состояние
                         cb.dispatchEvent(new Event('change'));
                     });
 
@@ -421,6 +502,11 @@ export const report = {
                             // Обновляем чекбокс без перерисовки всей таблицы
                             const cb = tr.querySelector('.rep-cb');
                             if (cb) cb.checked = true;
+
+                            const file = tr.dataset.file;
+                            const fileIssues = groups.get(file);
+                            syncFileCheckbox(file, fileIssues);
+
                             updateExportBtn();
                             syncMasterCheckbox(filtered);
                         }
@@ -450,6 +536,7 @@ export const report = {
             ctxMenu.querySelector('#ctx-md').addEventListener('click', () => { ctxMenu.style.display = 'none'; startExport('md'); });
             ctxMenu.querySelector('#ctx-txt').addEventListener('click', () => { ctxMenu.style.display = 'none'; startExport('txt'); });
             ctxMenu.querySelector('#ctx-confluence').addEventListener('click', () => { ctxMenu.style.display = 'none'; startExport('confluence'); });
+            ctxMenu.querySelector('#ctx-html-files').addEventListener('click', () => { ctxMenu.style.display = 'none'; startExport('html-files'); });
 
             masterCb.addEventListener('change', (e) => {
                 let filtered = applyFilters();
@@ -459,8 +546,15 @@ export const report = {
                 updateExportBtn();
             });
 
-            statusSel.addEventListener('change', e => { statusFilter = e.target.value; renderList(); });
-            textInput.addEventListener('input', e => { filterText = e.target.value; renderList(); });
+            statusSel.addEventListener('change', e => {
+                statusFilter = e.target.value;
+                renderList();
+            });
+
+            textInput.addEventListener('input', e => {
+                filterText = e.target.value;
+                renderList();
+            });
 
             renderList();
 

@@ -33,13 +33,22 @@ export function getIssueLink(issue, projectName, host = 'sonar.bars.group') {
     return `https://${host}/project/issues?impactSeverities=${sev}&issueStatuses=${status}&open=${issue.key}&id=${projectName}`;
 }
 
+export function escapeHtml(unsafe) {
+    if (unsafe == null) return '';
+    return String(unsafe)
+         .replace(/&/g, "&amp;")
+         .replace(/</g, "&lt;")
+         .replace(/>/g, "&gt;")
+         .replace(/"/g, "&quot;")
+         .replace(/'/g, "&#039;");
+}
+
 // --- Форматтеры ---
 
 export function formatJira(issue, snippet, projectName, host) {
     const link = getIssueLink(issue, projectName, host);
     let text = `h4. ${issue.key}\n`;
     text += `*Ссылка:* [${issue.key}|${link}]\n`;
-
     const ruleName = issue.ruleName ? ` — ${issue.ruleName}` : '';
     text += `*Правило:* ${issue.rule}${ruleName}\n`;
     text += `*Файл:* ${issue.component}:${issue.line}\n`;
@@ -97,4 +106,29 @@ export function formatTxt(issue, snippet, projectName, host) {
         text += `\nКод:\n${code}\n`;
     }
     return text;
+}
+
+export function formatConfluence(issue, snippet, projectName, host) {
+    const link = getIssueLink(issue, projectName, host);
+    const ruleName = issue.ruleName ? ` — ${issue.ruleName}` : '';
+    const tagsStr = (issue.tags && issue.tags.length > 0) ? issue.tags.join(', ') : 'нет';
+
+    let html = `<h3>${escapeHtml(issue.key)}</h3>\n`;
+    html += `<p><strong>Ссылка:</strong> <a href="${escapeHtml(link)}">${escapeHtml(link)}</a></p>\n`;
+    html += `<p><strong>Правило:</strong> ${escapeHtml(issue.rule)}${escapeHtml(ruleName)}</p>\n`;
+    html += `<p><strong>Файл:</strong> ${escapeHtml(issue.component)}:${issue.line}</p>\n`;
+    html += `<p><strong>Теги:</strong> ${escapeHtml(tagsStr)}</p>\n`;
+    html += `<p><strong>Сообщение:</strong> ${escapeHtml(issue.message)}</p>\n`;
+    html += `<p><strong>Пользовательский комментарий:</strong> ${escapeHtml(getLastComment(issue))}</p>\n`;
+
+    if (snippet && snippet.length > 0) {
+        const code = snippet.map(line =>
+            line.replace(/§HL_START§/g, '>>> ').replace(/§HL_END§/g, ' <<<')
+        ).join('\n');
+        html += `<p><strong>Фрагмент кода:</strong></p>\n`;
+        html += `<pre><code>${escapeHtml(code)}</code></pre>\n`;
+    }
+
+    html += `<br/><hr/><br/>\n`;
+    return html;
 }

@@ -1,5 +1,5 @@
 import { esc } from '../../common.js';
-import { formatJira, formatMd, formatTxt } from './helpers.js';
+import { formatJira, formatMd, formatTxt, formatConfluence } from './helpers.js';
 
 export async function showExportModal(issues, formatType, ctx, projectName) {
     if (!issues.length) return;
@@ -10,7 +10,7 @@ export async function showExportModal(issues, formatType, ctx, projectName) {
     overlay.innerHTML = `
         <div class="modal-content" style="max-width: 520px;">
             <div class="modal-header">
-                <h3 style="margin:0;">Генерация отчета (${formatType.toUpperCase()})</h3>
+                <h3 style="margin:0;">Генерация отчета (${formatType === 'confluence' ? 'Confluence' : formatType.toUpperCase()})</h3>
             </div>
             <div class="modal-body">
                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; font-size:12px;">
@@ -48,7 +48,6 @@ export async function showExportModal(issues, formatType, ctx, projectName) {
     const total = issues.length;
     const now = new Date().toLocaleString('ru-RU');
 
-    // Получаем хост SonarQube для формирования ссылок
     let host = 'sonar.bars.group';
     try {
         const status = await ctx.api('/api/status');
@@ -69,6 +68,9 @@ export async function showExportModal(issues, formatType, ctx, projectName) {
     } else if (formatType === 'txt') {
         blocks.push(`=== Отчет по проекту: ${projectName} ===\n`);
         blocks.push(`Сгенерировано: ${now}\nВсего issues: ${total}\n\n`);
+    } else if (formatType === 'confluence') {
+        blocks.push(`<h2>Проект: ${projectName}</h2>\n`);
+        blocks.push(`<p><em>Сгенерировано: ${now} &middot; Всего issues: ${total}</em></p>\n<hr/>\n`);
     }
 
     for (let i = 0; i < total; i++) {
@@ -98,9 +100,10 @@ export async function showExportModal(issues, formatType, ctx, projectName) {
             snippet = it._snippet;
         }
 
-        if (formatType === 'jira') blocks.push(formatJira(it, snippet, projectName, host));
-        if (formatType === 'md')   blocks.push(formatMd(it, snippet, projectName, host));
-        if (formatType === 'txt')  blocks.push(formatTxt(it, snippet, projectName, host));
+        if (formatType === 'jira')       blocks.push(formatJira(it, snippet, projectName, host));
+        if (formatType === 'md')         blocks.push(formatMd(it, snippet, projectName, host));
+        if (formatType === 'txt')        blocks.push(formatTxt(it, snippet, projectName, host));
+        if (formatType === 'confluence') blocks.push(formatConfluence(it, snippet, projectName, host));
 
         if (formatType === 'md')  blocks.push('\n---\n');
         if (formatType === 'txt') blocks.push('\n----------------------------------------\n');
@@ -112,9 +115,10 @@ export async function showExportModal(issues, formatType, ctx, projectName) {
 
     if (blocks.length > 1) {
         const text = blocks.join('\n');
-        const filename = `report_${projectName.replace(/[^A-Za-z0-9._-]/g, '_')}_${Date.now()}.${formatType === 'jira' ? 'txt' : formatType}`;
-        const mime = formatType === 'md' ? 'text/markdown' : 'text/plain';
+        const ext = formatType === 'jira' ? 'txt' : (formatType === 'confluence' ? 'html' : formatType);
+        const mime = formatType === 'md' ? 'text/markdown' : (formatType === 'confluence' ? 'text/html' : 'text/plain');
 
+        const filename = `report_${projectName.replace(/[^A-Za-z0-9._-]/g, '_')}_${Date.now()}.${ext}`;
         const blob = new Blob([text], { type: `${mime};charset=utf-8` });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');

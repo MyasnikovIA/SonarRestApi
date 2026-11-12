@@ -226,6 +226,7 @@ export const report = {
                 <div class="ctx-item" id="ctx-jira">📋 Выгрузить Jira</div>
                 <div class="ctx-item" id="ctx-md">📄 Выгрузить Markdown</div>
                 <div class="ctx-item" id="ctx-txt">📝 Выгрузить TXT</div>
+                <div class="ctx-item" id="ctx-confluence">📋 Выгрузить Confluence (HTML)</div>
             `;
             document.body.appendChild(ctxMenu);
             document.addEventListener('click', () => { ctxMenu.style.display = 'none'; }, { once: true });
@@ -236,14 +237,12 @@ export const report = {
                     if (statusFilter === 'PROCESSED' && !it.isProcessed) return false;
                     if (statusFilter === 'UNPROCESSED' && it.isProcessed) return false;
 
-                    // Логика "ИЛИ" для тегов (если выбран хотя бы 1 тег, и он есть у ошибки)
                     if (selectedTags.size > 0) {
                         const itTags = it.tags || [];
                         const hasMatch = itTags.some(t => selectedTags.has(t));
                         if (!hasMatch) return false;
                     }
 
-                    // Логика "ИЛИ" для правил
                     if (selectedRules.size > 0) {
                         if (!selectedRules.has(it.rule)) return false;
                     }
@@ -431,6 +430,7 @@ export const report = {
             ctxMenu.querySelector('#ctx-jira').addEventListener('click', () => { ctxMenu.style.display = 'none'; startExport('jira'); });
             ctxMenu.querySelector('#ctx-md').addEventListener('click', () => { ctxMenu.style.display = 'none'; startExport('md'); });
             ctxMenu.querySelector('#ctx-txt').addEventListener('click', () => { ctxMenu.style.display = 'none'; startExport('txt'); });
+            ctxMenu.querySelector('#ctx-confluence').addEventListener('click', () => { ctxMenu.style.display = 'none'; startExport('confluence'); });
 
             masterCb.addEventListener('change', (e) => {
                 let filtered = applyFilters();

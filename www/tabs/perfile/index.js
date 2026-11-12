@@ -233,16 +233,33 @@ export const perfile = {
                             targetIssues = [issue];
                         }
 
-                        showIssueContextMenu(e.pageX, e.pageY, issue, targetIssues, filtered, ctx, () => {
-                            document.querySelector('.tab[data-tab="perfile"]').click();
-                        }, () => {
+                        // === ИСПРАВЛЕНИЕ ===
+                        // Раньше здесь было:
+                        //   () => document.querySelector('.tab[data-tab="perfile"]').click()
+                        // что вызывало перемонтирование вкладки и повторную загрузку
+                        // данных из устаревшего snapshot'а. Теперь — локальный рендер
+                        // по уже мутированному rawData (bulk-modal обновляет it.status).
+                        const localReloadCb = () => {
                             selectedKeys.clear();
-                            filtered.forEach(f => f.issues.forEach(it => selectedKeys.add(it.key)));
+                            updateBulkBtn();
+                            rebuildRulesSelect();
                             renderList();
-                        }, () => {
-                            selectedKeys.clear();
-                            renderList();
-                        });
+                        };
+
+                        showIssueContextMenu(
+                            e.pageX, e.pageY,
+                            issue, targetIssues, filtered, ctx,
+                            localReloadCb,
+                            () => {
+                                selectedKeys.clear();
+                                filtered.forEach(f => f.issues.forEach(it => selectedKeys.add(it.key)));
+                                renderList();
+                            },
+                            () => {
+                                selectedKeys.clear();
+                                renderList();
+                            }
+                        );
                     });
                 });
 

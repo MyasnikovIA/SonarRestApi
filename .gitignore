@@ -41,5 +41,10 @@ build/
 
 
 session.txt
+
+out/artifacts/SonarRestApi_jar/console.properties
+out/artifacts/SonarRestApi_jar/ollama.properties
+out/artifacts/SonarRestApi_jar/session.properties
 console.properties
 ollama.properties
+session.properties

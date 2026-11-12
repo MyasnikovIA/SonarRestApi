@@ -1,0 +1,1 @@
+java -jar SonarRestApi.jar --port=8080

@@ -13,6 +13,19 @@ import {
 } from '../tags.js';
 
 // ============================================================
+// Mapping transition -> SonarQube status.
+// После успешного /api/mark локально ставим SonarQube-статус,
+// чтобы statusBadge и фильтр "скрыть обработанные" работали корректно.
+// ============================================================
+const SONAR_STATUS_MAP = {
+    'accept':        'ACCEPTED',
+    'falsepositive': 'FALSE_POSITIVE',
+    'confirm':       'CONFIRMED',
+    'resolve':       'RESOLVED',
+    'wontfix':       'WONTFIX'
+};
+
+// ============================================================
 // AI не может обработать тысячи issue за раз:
 //   1) URL-сервер отклоняет keys=... длиннее ~8 KB
 //   2) сервер делает 1 запрос SonarQube на каждый ключ
@@ -231,11 +244,14 @@ export function openBulkModal(issues, ctx, reloadCb) {
 
             // Локально обновляем статус/теги у успешных — rawData.files
             // родительской вкладки perfile получит свежие данные.
-            if (result.success > 0) {
+            // При этом it.status проставляем в SonarQube-формате (ACCEPTED и т.п.),
+            // чтобы statusBadge и фильтр "Скрыть обработанные" работали корректно.
+            if (result.success > 0 && !result.cancelled) {
                 const failedKeys = new Set(result.failed.map(f => f.key));
+                const sonarStatus = SONAR_STATUS_MAP[status] || status.toUpperCase();
                 issues.forEach(it => {
                     if (!failedKeys.has(it.key)) {
-                        it.status = status;
+                        it.status = sonarStatus;
                         if (tagsChanged) it.tags = [...selectedTags];
                     }
                 });

@@ -1,0 +1,1 @@
+java -jar SonarRestApi.jar --port=8080 --host=0.0.0.0 --project=MEDMIS-MISmobile.doctor_api_spec

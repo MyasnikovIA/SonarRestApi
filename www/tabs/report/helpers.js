@@ -126,15 +126,15 @@ export function formatConfluence(issue, snippet, projectName, host) {
         const code = snippet.map(line =>
             line.replace(/§HL_START§/g, '>>> ').replace(/§HL_END§/g, ' <<<')
         ).join('\n');
-        html += `<p><strong>Фрагмент кода:</strong></p>\n`;
-        html += `<pre><code>${escapeHtml(code)}</code></pre>\n`;
+        // ИЗМЕНЕНО: Используем <details> и <summary> для аккордеона
+        html += `<details>\n<summary>Показать фрагмент кода</summary>\n<pre><code>${escapeHtml(code)}</code></pre>\n</details>\n`;
     }
 
     html += `<br/><hr/><br/>\n`;
     return html;
 }
 
-// НОВАЯ ФУНКЦИЯ для отдельного файла с аккордеоном
+// Функция для отдельного файла с аккордеоном (используется в html-files)
 export function formatHtmlFile(fileIssues, projectName, host, fileName) {
     const now = new Date().toLocaleString('ru-RU');
     let html = `<!DOCTYPE html>\n<html lang="ru">\n<head>\n<meta charset="UTF-8">\n<title>Отчет: ${escapeHtml(projectName)} - ${escapeHtml(fileName)}</title>\n`;

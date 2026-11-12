@@ -4,18 +4,13 @@ import { formatJira, formatMd, formatTxt, formatConfluence, formatHtmlFile } fro
 // Функция для безопасного формирования имени файла по шаблону:
 // Project_(Path_to_File.ext).html
 function makeFileName(projectName, originalFilePath) {
-    // 1. Убираем имя проекта из пути файла (если оно есть)
     let cleanPath = originalFilePath;
     if (cleanPath.includes(':')) {
         cleanPath = cleanPath.split(':').pop();
     }
-    // 2. Заменяем слэши на подчеркивания
     cleanPath = cleanPath.replace(/[\\/]/g, '_');
-    // 3. Убираем недопустимые символы
     cleanPath = cleanPath.replace(/[^A-Za-z0-9._-]/g, '_');
-    // 4. Очищаем имя проекта
     const safeProject = projectName.replace(/[^A-Za-z0-9._-]/g, '_');
-
     return `${safeProject}_(${cleanPath}).html`;
 }
 

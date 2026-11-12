@@ -1,6 +1,10 @@
 import { esc, toast, highlightCode } from '../../common.js';
 import { showExportModal } from './export-modal.js';
 
+// Специальный ключ для ошибок без тегов
+const NO_TAGS_KEY = '__NO_TAGS__';
+const NO_TAGS_LABEL = '(Без тегов)';
+
 export const report = {
     id: 'report',
     title: 'Отчет (Jira/MD/TXT)',
@@ -36,24 +40,25 @@ export const report = {
                 if (it.rule) allRulesSet.add(it.rule);
             });
 
-            // Сортировка тегов: сначала require-fix и not-require-fix, потом по алфавиту
-            const sortedTags = Array.from(allTagsSet).sort((a, b) => {
-                const priority = ['require-fix', 'not-require-fix'];
-                const idxA = priority.indexOf(a);
-                const idxB = priority.indexOf(b);
-                if (idxA !== -1 && idxB !== -1) return idxA - idxB;
-                if (idxA !== -1) return -1;
-                if (idxB !== -1) return 1;
-                return a.localeCompare(b);
-            });
+            // Формируем список тегов: require-fix, not-require-fix, __NO_TAGS__, потом остальные по алфавиту
+            const baseTags = Array.from(allTagsSet)
+                .filter(t => t !== 'require-fix' && t !== 'not-require-fix')
+                .sort((a, b) => a.localeCompare(b));
+
+            const sortedTags = ['require-fix', 'not-require-fix', NO_TAGS_KEY, ...baseTags];
 
             const sortedRules = Array.from(allRulesSet).sort();
 
             let filterText = '';
             let statusFilter = 'ALL';
+
             let selectedTags = new Set();
+            let excludedTags = new Set();
+
             let selectedRules = new Set();
+
             let tagQuery = '';
+            let excludeTagQuery = '';
             let ruleQuery = '';
 
             let sortField = 'severity';
@@ -80,7 +85,7 @@ export const report = {
                             </select>
                         </label>
 
-                        <!-- Multi-select Теги -->
+                        <!-- Multi-select Включить Теги -->
                         <details id="rep-tag-details" style="position:relative;">
                             <summary class="btn" style="list-style:none; cursor:pointer; user-select:none; display:inline-flex; gap:4px; align-items:center;">
                                 🏷️ Теги (<span id="rep-tag-count">0</span>)
@@ -97,6 +102,27 @@ export const report = {
                                 <div style="display:flex; justify-content:space-between; gap:8px;">
                                     <button id="rep-tag-clear" class="btn" style="flex:1;" type="button">Сбросить</button>
                                     <button id="rep-tag-close" class="btn" style="flex:1;" type="button">Готово</button>
+                                </div>
+                            </div>
+                        </details>
+
+                        <!-- Multi-select ИСКЛЮЧИТЬ Теги -->
+                        <details id="rep-exclude-tag-details" style="position:relative;">
+                            <summary class="btn" style="list-style:none; cursor:pointer; user-select:none; display:inline-flex; gap:4px; align-items:center;">
+                                🚫 Исключить теги (<span id="rep-exclude-tag-count">0</span>)
+                            </summary>
+                            <div style="position:absolute; z-index:100; top:100%; left:0; margin-top:4px;
+                                        background:var(--bg); border:1px solid var(--border);
+                                        border-radius:6px; padding:8px; min-width:260px;
+                                        max-height:340px; box-shadow:0 4px 12px rgba(0,0,0,0.15);">
+                                <input type="text" id="rep-exclude-tag-search" placeholder="Поиск по тегам..."
+                                       style="width:100%; box-sizing:border-box; padding:6px 10px; margin-bottom:8px;
+                                              border-radius:6px; border:1px solid var(--border);
+                                              background:var(--bg3); color:var(--text);">
+                                <div id="rep-exclude-tag-list" style="max-height:220px; overflow-y:auto; display:flex; flex-direction:column; gap:2px; margin-bottom:8px;"></div>
+                                <div style="display:flex; justify-content:space-between; gap:8px;">
+                                    <button id="rep-exclude-tag-clear" class="btn" style="flex:1;" type="button">Сбросить</button>
+                                    <button id="rep-exclude-tag-close" class="btn" style="flex:1;" type="button">Готово</button>
                                 </div>
                             </div>
                         </details>
@@ -134,13 +160,21 @@ export const report = {
             const masterCb = el.querySelector('#rep-master-cb');
             const exportBtn = el.querySelector('#rep-export-btn');
 
-            // Элементы управления тегами
+            // Элементы управления ВКЛЮЧЕННЫМИ тегами
             const tagDetails = el.querySelector('#rep-tag-details');
             const tagSearch = el.querySelector('#rep-tag-search');
             const tagListEl = el.querySelector('#rep-tag-list');
             const tagClear = el.querySelector('#rep-tag-clear');
             const tagClose = el.querySelector('#rep-tag-close');
             const tagCount = el.querySelector('#rep-tag-count');
+
+            // Элементы управления ИСКЛЮЧЕННЫМИ тегами
+            const excludeTagDetails = el.querySelector('#rep-exclude-tag-details');
+            const excludeTagSearch = el.querySelector('#rep-exclude-tag-search');
+            const excludeTagListEl = el.querySelector('#rep-exclude-tag-list');
+            const excludeTagClear = el.querySelector('#rep-exclude-tag-clear');
+            const excludeTagClose = el.querySelector('#rep-exclude-tag-close');
+            const excludeTagCount = el.querySelector('#rep-exclude-tag-count');
 
             // Элементы управления правилами
             const ruleDetails = el.querySelector('#rep-rule-details');
@@ -150,27 +184,36 @@ export const report = {
             const ruleClose = el.querySelector('#rep-rule-close');
             const ruleCount = el.querySelector('#rep-rule-count');
 
-            const renderTagList = () => {
-                const q = tagQuery.toLowerCase();
-                const visible = sortedTags.filter(t => !q || t.toLowerCase().includes(q));
+            // Универсальная функция рендера списка тегов
+            const renderTagListTo = (container, query, selectedSet, updateCountFn) => {
+                const q = query.toLowerCase();
+                const visible = sortedTags.filter(t => {
+                    const label = t === NO_TAGS_KEY ? NO_TAGS_LABEL : t;
+                    return !q || label.toLowerCase().includes(q);
+                });
+
                 if (!visible.length) {
-                    tagListEl.innerHTML = `<div style="color:var(--text-dim); font-size:12px; padding:4px;">Нет тегов</div>`;
+                    container.innerHTML = `<div style="color:var(--text-dim); font-size:12px; padding:4px;">Нет тегов</div>`;
                     return;
                 }
-                tagListEl.innerHTML = visible.map(t => `
+
+                container.innerHTML = visible.map(t => {
+                    const label = t === NO_TAGS_KEY ? NO_TAGS_LABEL : t;
+                    return `
                     <label style="display:flex; align-items:center; gap:6px; font-size:12px;
                                   cursor:pointer; padding:4px 6px; border-radius:4px;
-                                  background:${selectedTags.has(t) ? 'var(--bg3)' : 'transparent'};">
-                        <input type="checkbox" class="rep-tag-cb" value="${esc(t)}" ${selectedTags.has(t) ? 'checked' : ''}>
-                        <span>${esc(t)}</span>
+                                  background:${selectedSet.has(t) ? 'var(--bg3)' : 'transparent'};">
+                        <input type="checkbox" class="tag-cb" value="${esc(t)}" ${selectedSet.has(t) ? 'checked' : ''}>
+                        <span>${esc(label)}</span>
                     </label>
-                `).join('');
-                tagListEl.querySelectorAll('.rep-tag-cb').forEach(cb => {
+                `}).join('');
+
+                container.querySelectorAll('.tag-cb').forEach(cb => {
                     cb.addEventListener('change', (e) => {
-                        if (e.target.checked) selectedTags.add(e.target.value);
-                        else selectedTags.delete(e.target.value);
-                        updateTagCount();
-                        renderList(); // Обновляем список сразу, не перерисовывая чекбоксы
+                        if (e.target.checked) selectedSet.add(e.target.value);
+                        else selectedSet.delete(e.target.value);
+                        updateCountFn();
+                        renderList(); // Обновляем основной список сразу
                     });
                 });
             };
@@ -201,42 +244,53 @@ export const report = {
             };
 
             const updateTagCount = () => { tagCount.textContent = selectedTags.size; };
+            const updateExcludeTagCount = () => { excludeTagCount.textContent = excludedTags.size; };
             const updateRuleCount = () => { ruleCount.textContent = selectedRules.size; };
 
-            renderTagList();
+            // Инициализация списков
+            renderTagListTo(tagListEl, tagQuery, selectedTags, updateTagCount);
             updateTagCount();
+
+            renderTagListTo(excludeTagListEl, excludeTagQuery, excludedTags, updateExcludeTagCount);
+            updateExcludeTagCount();
+
             renderRuleList();
             updateRuleCount();
 
-            tagSearch.addEventListener('input', (e) => { tagQuery = e.target.value; renderTagList(); });
+            // Обработчики поиска
+            tagSearch.addEventListener('input', (e) => { tagQuery = e.target.value; renderTagListTo(tagListEl, tagQuery, selectedTags, updateTagCount); });
+            excludeTagSearch.addEventListener('input', (e) => { excludeTagQuery = e.target.value; renderTagListTo(excludeTagListEl, excludeTagQuery, excludedTags, updateExcludeTagCount); });
             ruleSearch.addEventListener('input', (e) => { ruleQuery = e.target.value; renderRuleList(); });
 
-            // ИСПРАВЛЕНИЕ КНОПОК СБРОСА
+            // Обработчики сброса и закрытия (с preventDefault)
             tagClear.addEventListener('click', (e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                selectedTags.clear();
-                updateTagCount();
-                renderTagList();
+                e.preventDefault(); e.stopPropagation();
+                selectedTags.clear(); updateTagCount();
+                renderTagListTo(tagListEl, tagQuery, selectedTags, updateTagCount);
                 renderList();
             });
             tagClose.addEventListener('click', (e) => {
-                e.preventDefault();
-                e.stopPropagation();
+                e.preventDefault(); e.stopPropagation();
                 tagDetails.removeAttribute('open');
             });
 
-            ruleClear.addEventListener('click', (e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                selectedRules.clear();
-                updateRuleCount();
-                renderRuleList();
+            excludeTagClear.addEventListener('click', (e) => {
+                e.preventDefault(); e.stopPropagation();
+                excludedTags.clear(); updateExcludeTagCount();
+                renderTagListTo(excludeTagListEl, excludeTagQuery, excludedTags, updateExcludeTagCount);
                 renderList();
             });
+            excludeTagClose.addEventListener('click', (e) => {
+                e.preventDefault(); e.stopPropagation();
+                excludeTagDetails.removeAttribute('open');
+            });
+
+            ruleClear.addEventListener('click', (e) => {
+                e.preventDefault(); e.stopPropagation();
+                selectedRules.clear(); updateRuleCount(); renderRuleList(); renderList();
+            });
             ruleClose.addEventListener('click', (e) => {
-                e.preventDefault();
-                e.stopPropagation();
+                e.preventDefault(); e.stopPropagation();
                 ruleDetails.removeAttribute('open');
             });
 
@@ -256,13 +310,25 @@ export const report = {
 
             const applyFilters = () => {
                 const q = filterText.toLowerCase();
-                return allIssues.filter(it => {
+
+                // Шаг 1: Применяем основные фильтры (включая выбранные теги)
+                let filtered = allIssues.filter(it => {
                     if (statusFilter === 'PROCESSED' && !it.isProcessed) return false;
                     if (statusFilter === 'UNPROCESSED' && it.isProcessed) return false;
 
                     if (selectedTags.size > 0) {
                         const itTags = it.tags || [];
-                        const hasMatch = itTags.some(t => selectedTags.has(t));
+                        let hasMatch = false;
+
+                        for (const t of selectedTags) {
+                            if (t === NO_TAGS_KEY) {
+                                if (itTags.length === 0) hasMatch = true;
+                            } else {
+                                if (itTags.includes(t)) hasMatch = true;
+                            }
+                            if (hasMatch) break;
+                        }
+
                         if (!hasMatch) return false;
                     }
 
@@ -275,6 +341,27 @@ export const report = {
                         || (it.message || '').toLowerCase().includes(q)
                         || (it.component || '').toLowerCase().includes(q);
                 });
+
+                // Шаг 2: Применяем исключение тегов к результату
+                if (excludedTags.size > 0) {
+                    filtered = filtered.filter(it => {
+                        const itTags = it.tags || [];
+                        let hasExcluded = false;
+
+                        for (const t of excludedTags) {
+                            if (t === NO_TAGS_KEY) {
+                                if (itTags.length === 0) hasExcluded = true;
+                            } else {
+                                if (itTags.includes(t)) hasExcluded = true;
+                            }
+                            if (hasExcluded) break;
+                        }
+
+                        return !hasExcluded; // Оставляем только те, у которых нет исключаемых тегов
+                    });
+                }
+
+                return filtered;
             };
 
             const applySort = (issues) => {
@@ -371,7 +458,11 @@ export const report = {
                                     </thead>
                                     <tbody>
                                         ${sortedIssues.map(it => {
-                                            const tagsHtml = (it.tags || []).map(t => `<span class="tag" style="margin:1px;">${esc(t)}</span>`).join('');
+                                            // Отрисовка тегов. Если тегов нет, показываем серый бейдж
+                                            const tagsHtml = (it.tags && it.tags.length > 0)
+                                                ? it.tags.map(t => `<span class="tag" style="margin:1px;">${esc(t)}</span>`).join('')
+                                                : `<span class="tag" style="margin:1px; opacity:0.6; font-style:italic;">${NO_TAGS_LABEL}</span>`;
+
                                             const isChecked = selectedKeys.has(it.key) ? 'checked' : '';
                                             return `
                                                 <tr class="rep-row" data-key="${esc(it.key)}" data-file="${esc(fileName)}" style="cursor:pointer;">

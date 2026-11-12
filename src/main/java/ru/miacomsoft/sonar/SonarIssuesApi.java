@@ -16,6 +16,11 @@ public class SonarIssuesApi {
     private final Map<String, String> ruleNameCache;
     private final Map<String, List<String>> snippetCache;
 
+    // Специальное исключение для обработки лимита в 10000 на уровне пачки файлов
+    public static class BatchLimitExceededException extends RuntimeException {
+        public BatchLimitExceededException(String msg) { super(msg); }
+    }
+
     public SonarIssuesApi(SonarClient client, String projectKey) {
         this(client, projectKey, new HashMap<>(), new HashMap<>());
     }
@@ -64,7 +69,6 @@ public class SonarIssuesApi {
                 return countWithStatuses("OPEN", impactSeverity, quality);
             }
             if (msg != null && msg.contains("Can return only the first 10000 results")) {
-                // Если фасеты не могут отдать точное число, считаем через полный сбор
                 return fetchAll(impactSeverity, quality).size();
             }
             throw e;
@@ -87,24 +91,19 @@ public class SonarIssuesApi {
         return fetchAllByStatuses("ACCEPTED", impactSeverity, quality);
     }
 
-    /**
-     * Обертка для получения замечаний с разбивкой, если срабатывает лимит в 10 000.
-     */
     public List<Issue> fetchAllByStatuses(String statuses, String impactSeverity, String quality)
             throws Exception {
         try {
-            // Пытаемся получить всё одним запросом
             return fetchAllByStatusesDirect(statuses, impactSeverity, quality);
         } catch (RuntimeException e) {
             String msg = e.getMessage();
-            // Если ошибка 400 из-за лимита в 10 000, начинаем разбивать запрос
             if (msg != null && msg.contains("Can return only the first 10000 results")) {
                 System.err.println("[SonarIssuesApi] Достигнут лимит 10000. Разбиваем запрос...");
                 return fetchAllByParts(statuses, impactSeverity, quality);
             }
-            // Если ошибка со статусом REOPENED на старых SonarQube, откатываемся на OPEN
             if (msg != null && (msg.contains("REOPENED") || msg.contains("issueStatuses"))) {
-                return fetchAllByStatusesDirect("OPEN", impactSeverity, quality);
+                // ИСПРАВЛЕНИЕ: Рекурсивный вызов, чтобы обработать лимит 10000 для OPEN
+                return fetchAllByStatuses("OPEN", impactSeverity, quality);
             }
             throw e;
         }
@@ -135,19 +134,17 @@ public class SonarIssuesApi {
     private List<Issue> fetchAllByParts(String statuses, String impactSeverity, String quality)
             throws Exception {
         List<Issue> out = new ArrayList<>();
-
         String[] sevs = { "BLOCKER", "HIGH", "MEDIUM", "LOW", "INFO" };
         String[] quals = { "MAINTAINABILITY", "RELIABILITY", "SECURITY" };
 
         boolean sevAll = (impactSeverity == null || "ALL".equalsIgnoreCase(impactSeverity));
         boolean qualAll = (quality == null || "ALL".equalsIgnoreCase(quality));
 
-        // Если фильтры уже заданы жестко, но все равно > 10000, идем по файлам
         if (!sevAll && !qualAll) {
+            System.err.println("[SonarIssuesApi] Лимит 10000 для " + impactSeverity + "/" + quality + ". Разбиваем по файлам...");
             return fetchAllByFiles(statuses, impactSeverity, quality);
         }
 
-        // Разбиваем по severity и quality
         for (String s : sevs) {
             if (!sevAll && !impactSeverity.equalsIgnoreCase(s)) continue;
 
@@ -159,7 +156,7 @@ public class SonarIssuesApi {
                 } catch (RuntimeException e) {
                     String msg = e.getMessage();
                     if (msg != null && msg.contains("Can return only the first 10000 results")) {
-                        System.err.println("[SonarIssuesApi] Достигнут лимит 10000 для " + s + "/" + q + ". Разбиваем по файлам...");
+                        System.err.println("[SonarIssuesApi] Лимит 10000 для " + s + "/" + q + ". Разбиваем по файлам...");
                         out.addAll(fetchAllByFiles(statuses, s, q));
                     } else {
                         throw e;
@@ -174,24 +171,40 @@ public class SonarIssuesApi {
             throws Exception {
         List<String> files = fetchProjectFiles();
         List<Issue> out = new ArrayList<>();
-        int batchSize = 20; // Берем по 20 файлов, чтобы наверняка уложиться в 10000
+        int batchSize = 20;
 
         for (int i = 0; i < files.size(); i += batchSize) {
             List<String> batch = files.subList(i, Math.min(i + batchSize, files.size()));
             String components = String.join(",", batch);
 
-            int page = 1, pageSize = 500, total = -1;
-            while (total < 0 || out.size() < total) {
-                String url = "/api/issues/search?"
-                        + "components=" + enc(components)
-                        + "&s=" + enc("FILE_LINE")
-                        + (impactSeverity != null && !"ALL".equalsIgnoreCase(impactSeverity) ? "&impactSeverities=" + enc(impactSeverity) : "")
-                        + (quality != null && !"ALL".equalsIgnoreCase(quality) ? "&impactSoftwareQualities=" + enc(quality) : "")
-                        + "&issueStatuses=" + enc(statuses)
-                        + "&additionalFields=" + enc("_all")
-                        + "&timeZone=" + enc("Asia/Novosibirsk")
-                        + "&ps=" + pageSize + "&p=" + page;
+            try {
+                out.addAll(fetchAllByComponents(statuses, impactSeverity, quality, components));
+            } catch (BatchLimitExceededException e) {
+                // Если пачка из 20 файлов превысила лимит, грузим по одному
+                for (String singleFile : batch) {
+                    out.addAll(fetchAllByComponents(statuses, impactSeverity, quality, singleFile));
+                }
+            }
+        }
+        return out;
+    }
 
+    private List<Issue> fetchAllByComponents(String statuses, String impactSeverity, String quality, String components) throws Exception {
+        List<Issue> out = new ArrayList<>();
+        int page = 1, pageSize = 500, total = -1;
+
+        while (total < 0 || out.size() < total) {
+            String url = "/api/issues/search?"
+                    + "components=" + enc(components)
+                    + "&s=" + enc("FILE_LINE")
+                    + (impactSeverity != null && !"ALL".equalsIgnoreCase(impactSeverity) ? "&impactSeverities=" + enc(impactSeverity) : "")
+                    + (quality != null && !"ALL".equalsIgnoreCase(quality) ? "&impactSoftwareQualities=" + enc(quality) : "")
+                    + "&issueStatuses=" + enc(statuses)
+                    + "&additionalFields=" + enc("_all")
+                    + "&timeZone=" + enc("Asia/Novosibirsk")
+                    + "&ps=" + pageSize + "&p=" + page;
+
+            try {
                 JSONObject root = new JSONObject(client.get(url));
                 total = root.getInt("total");
                 JSONArray arr = root.getJSONArray("issues");
@@ -201,6 +214,17 @@ public class SonarIssuesApi {
                     out.add(Issue.from(arr.getJSONObject(j), projectKey));
                 }
                 page++;
+            } catch (RuntimeException e) {
+                if (e.getMessage() != null && e.getMessage().contains("Can return only the first 10000 results")) {
+                    if (components.contains(",")) {
+                        throw new BatchLimitExceededException("Batch limit exceeded");
+                    } else {
+                        System.err.println("[SonarIssuesApi] Файл " + components + " содержит >10000 замечаний. Взяты первые " + out.size() + ".");
+                        break;
+                    }
+                } else {
+                    throw e;
+                }
             }
         }
         return out;
@@ -220,6 +244,7 @@ public class SonarIssuesApi {
                 files.add(components.getJSONObject(i).getString("key"));
             }
             page++;
+            if (page > 20) break; // Защита от бесконечного цикла (максимум 10000 файлов)
         }
         return files;
     }
@@ -502,7 +527,7 @@ public class SonarIssuesApi {
                     out.add(issue);
                 }
                 page++;
-                if (page > 100) break;
+                if (page > 20) break;
             }
         }
         return out;

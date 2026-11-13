@@ -18,11 +18,14 @@ public class Main {
         int threads = 8;
         int batchSize = SonarBulkApi.DEFAULT_BATCH_SIZE;
         long delayMs = SonarBulkApi.DEFAULT_DELAY_MS;
-        String sessionFile = "session.properties";     // ← было session.txt
+        String sessionFile = "session.properties";
         String project = System.getenv().getOrDefault("SONAR_PROJECT", "");
-        boolean warmup = true;
+
+        // ИЗМЕНЕНИЕ: Отключаем сборку снимка при старте, так как перешли на прямые запросы к SonarQube
+        boolean warmup = false;
+
         boolean asyncWarmup = false;
-        boolean warmupSnippets = true;
+        boolean warmupSnippets = false; // Сниппеты тоже не кэшируем глобально
         int snippetLimit = 0;
         boolean console = true;
 
@@ -42,8 +45,12 @@ public class Main {
             else if (a.startsWith("--snippet-limit="))  snippetLimit = Integer.parseInt(a.substring("--snippet-limit=".length()));
             else if (a.startsWith("--ollama-config="))  ollamaConfigFile = a.substring("--ollama-config=".length());
             else if (a.startsWith("--console-config=")) consoleConfigFile = a.substring("--console-config=".length());
+
+                // Если пользователь явно захочет собрать снимок, он может передать --warmup
+            else if ("--warmup".equals(a))              warmup = true;
             else if ("--no-warmup".equals(a))           warmup = false;
             else if ("--async-warmup".equals(a))        asyncWarmup = true;
+            else if ("--snippets".equals(a))            warmupSnippets = true;
             else if ("--no-snippets".equals(a))         warmupSnippets = false;
             else if ("--no-console".equals(a))          console = false;
             else if (i == 0)                            sessionFile = a;
@@ -88,7 +95,7 @@ public class Main {
                 }
             }
         } else {
-            System.out.println("[Warmup] отключён (--no-warmup)");
+            System.out.println("[Warmup] отключён (--no-warmup). Работаем напрямую через SonarQube API.");
         }
 
         ApiServer.start(host, port, threads, state);

@@ -1,14 +1,13 @@
 import { esc, toast, highlightCode } from '../../common.js';
 import { showExportModal } from './export-modal.js';
 
-// Специальный ключ для ошибок без тегов
 const NO_TAGS_KEY = '__NO_TAGS__';
 const NO_TAGS_LABEL = '(Без тегов)';
 
 export const report = {
     id: 'report',
     title: 'Отчет (Jira/MD/TXT)',
-    filters: [],
+    filters: ['sev', 'qual'],
 
     async mount(el, ctx) {
         if (!ctx.state.project) {
@@ -19,33 +18,37 @@ export const report = {
         el.innerHTML = '<div class="empty">Загрузка данных...</div>';
 
         try {
-            const [openRes, accRes] = await Promise.all([
-                ctx.api(`/api/issues?project=${ctx.state.project}&sev=ALL&qual=ALL`),
-                ctx.api(`/api/accepted?project=${ctx.state.project}&sev=ALL&qual=ALL`)
-            ]);
+            const d = await ctx.api('/api/issues?' + ctx.qs());
+            if (ctx.updatePagination) ctx.updatePagination(d.total);
 
-            const openIssues = (openRes.issues || []).map(i => ({ ...i, isProcessed: false }));
-            const accIssues = (accRes.issues || []).map(i => ({ ...i, isProcessed: true }));
-            const allIssues = [...openIssues, ...accIssues];
-
-            if (!allIssues.length) {
-                el.innerHTML = '<div class="empty">Нет замечаний</div>';
+            if (!d.issues || d.issues.length === 0) {
+                el.innerHTML = '<div class="empty">Нет замечаний по фильтру</div>';
                 return;
             }
 
-            const allTagsSet = new Set();
-            const allRulesSet = new Set();
-            allIssues.forEach(it => {
-                (it.tags || []).forEach(t => allTagsSet.add(t));
-                if (it.rule) allRulesSet.add(it.rule);
-            });
+            let allRules = [];
+            let allTagsSet = new Set();
+
+            try {
+                const pFacet = new URLSearchParams();
+                if (ctx.state.project) pFacet.set('project', ctx.state.project.trim());
+                pFacet.set('sev', ctx.state.sev);
+                pFacet.set('qual', ctx.state.qual);
+                pFacet.set('hideProcessed', 'true');
+
+                const rulesRes = await ctx.api('/api/facets?' + pFacet.toString() + '&facet=rules');
+                allRules = Object.entries(rulesRes.values || {}).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+
+                d.issues.forEach(it => (it.tags || []).forEach(t => allTagsSet.add(t)));
+            } catch (e) {
+                console.warn('Не удалось загрузить фасеты правил', e);
+            }
 
             const baseTags = Array.from(allTagsSet)
                 .filter(t => t !== 'require-fix' && t !== 'not-require-fix')
                 .sort((a, b) => a.localeCompare(b));
 
             const sortedTags = ['require-fix', 'not-require-fix', NO_TAGS_KEY, ...baseTags];
-            const sortedRules = Array.from(allRulesSet).sort();
 
             let filterText = '';
             let statusFilter = 'ALL';
@@ -58,17 +61,15 @@ export const report = {
             let excludeTagQuery = '';
             let ruleQuery = '';
 
-            let sortField = 'severity';
-            let sortAsc = false;
-
-            const selectedKeys = new Set();
+            let selectedKeys = new Set();
+            let isAllSelected = false;
 
             el.innerHTML = `
                 <div class="pf-header-sticky" style="padding-bottom: 10px;">
                     <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
                         <div style="display:flex; align-items:center; gap:12px;">
                             <input type="checkbox" id="rep-master-cb" style="width:18px; height:18px; cursor:pointer;" title="Выделить всё">
-                            <h3 style="margin:0;" id="rep-header-title">${esc(ctx.state.project)} · Всего: ${allIssues.length}</h3>
+                            <h3 style="margin:0;" id="rep-header-title">${esc(ctx.state.project)} · Всего: ${d.total}</h3>
                         </div>
                         <button id="rep-export-btn" class="btn btn-accent" style="display:none;" type="button">Действия с выбранными (0)</button>
                     </div>
@@ -210,17 +211,18 @@ export const report = {
 
             const renderRuleList = () => {
                 const q = ruleQuery.toLowerCase();
-                const visible = sortedRules.filter(r => !q || r.toLowerCase().includes(q));
+                const visible = allRules.filter(([r]) => !q || r.toLowerCase().includes(q));
                 if (!visible.length) {
                     ruleListEl.innerHTML = `<div style="color:var(--text-dim); font-size:12px; padding:4px;">Нет правил</div>`;
                     return;
                 }
-                ruleListEl.innerHTML = visible.map(r => `
+                ruleListEl.innerHTML = visible.map(([r, count]) => `
                     <label style="display:flex; align-items:center; gap:6px; font-size:12px;
                                   cursor:pointer; padding:4px 6px; border-radius:4px;
                                   background:${selectedRules.has(r) ? 'var(--bg3)' : 'transparent'};">
                         <input type="checkbox" class="rep-rule-cb" value="${esc(r)}" ${selectedRules.has(r) ? 'checked' : ''}>
                         <span style="font-family:var(--mono);">${esc(r)}</span>
+                        <span style="color:var(--text-dim); margin-left:auto;">${count}</span>
                     </label>
                 `).join('');
                 ruleListEl.querySelectorAll('.rep-rule-cb').forEach(cb => {
@@ -250,36 +252,14 @@ export const report = {
             excludeTagSearch.addEventListener('input', (e) => { excludeTagQuery = e.target.value; renderTagListTo(excludeTagListEl, excludeTagQuery, excludedTags, updateExcludeTagCount); });
             ruleSearch.addEventListener('input', (e) => { ruleQuery = e.target.value; renderRuleList(); });
 
-            tagClear.addEventListener('click', (e) => {
-                e.preventDefault(); e.stopPropagation();
-                selectedTags.clear(); updateTagCount();
-                renderTagListTo(tagListEl, tagQuery, selectedTags, updateTagCount);
-                renderList();
-            });
-            tagClose.addEventListener('click', (e) => {
-                e.preventDefault(); e.stopPropagation();
-                tagDetails.removeAttribute('open');
-            });
+            tagClear.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); selectedTags.clear(); updateTagCount(); renderTagListTo(tagListEl, tagQuery, selectedTags, updateTagCount); renderList(); });
+            tagClose.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); tagDetails.removeAttribute('open'); });
 
-            excludeTagClear.addEventListener('click', (e) => {
-                e.preventDefault(); e.stopPropagation();
-                excludedTags.clear(); updateExcludeTagCount();
-                renderTagListTo(excludeTagListEl, excludeTagQuery, excludedTags, updateExcludeTagCount);
-                renderList();
-            });
-            excludeTagClose.addEventListener('click', (e) => {
-                e.preventDefault(); e.stopPropagation();
-                excludeTagDetails.removeAttribute('open');
-            });
+            excludeTagClear.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); excludedTags.clear(); updateExcludeTagCount(); renderTagListTo(excludeTagListEl, excludeTagQuery, excludedTags, updateExcludeTagCount); renderList(); });
+            excludeTagClose.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); excludeTagDetails.removeAttribute('open'); });
 
-            ruleClear.addEventListener('click', (e) => {
-                e.preventDefault(); e.stopPropagation();
-                selectedRules.clear(); updateRuleCount(); renderRuleList(); renderList();
-            });
-            ruleClose.addEventListener('click', (e) => {
-                e.preventDefault(); e.stopPropagation();
-                ruleDetails.removeAttribute('open');
-            });
+            ruleClear.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); selectedRules.clear(); updateRuleCount(); renderRuleList(); renderList(); });
+            ruleClose.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); ruleDetails.removeAttribute('open'); });
 
             const ctxMenu = document.createElement('div');
             ctxMenu.className = 'ctx-menu';
@@ -297,8 +277,7 @@ export const report = {
 
             const applyFilters = () => {
                 const q = filterText.toLowerCase();
-
-                let filtered = allIssues.filter(it => {
+                let filtered = (d.issues || []).filter(it => {
                     if (statusFilter === 'PROCESSED' && !it.isProcessed) return false;
                     if (statusFilter === 'UNPROCESSED' && it.isProcessed) return false;
 
@@ -345,46 +324,26 @@ export const report = {
                 return filtered;
             };
 
-            const applySort = (issues) => {
-                return [...issues].sort((a, b) => {
-                    let valA, valB;
-                    if (sortField === 'severity') {
-                        const order = { 'BLOCKER': 5, 'CRITICAL': 4, 'HIGH': 3, 'MAJOR': 2, 'MEDIUM': 1, 'MINOR': 0, 'LOW': -1, 'INFO': -2 };
-                        valA = order[a.impactSeverity || a.severity] || 0;
-                        valB = order[b.impactSeverity || b.severity] || 0;
-                    } else if (sortField === 'line') {
-                        valA = a.line || 0;
-                        valB = b.line || 0;
-                    } else {
-                        valA = String(a[sortField] || '').toLowerCase();
-                        valB = String(b[sortField] || '').toLowerCase();
-                    }
-
-                    if (valA < valB) return sortAsc ? -1 : 1;
-                    if (valA > valB) return sortAsc ? 1 : -1;
-                    return 0;
-                });
-            };
-
             const updateExportBtn = () => {
-                exportBtn.style.display = selectedKeys.size > 0 ? 'inline-block' : 'none';
-                exportBtn.textContent = `Действия с выбранными (${selectedKeys.size})`;
+                if (isAllSelected) {
+                    exportBtn.style.display = 'inline-block';
+                    exportBtn.textContent = `Действия со всеми (${d.total})`;
+                } else {
+                    exportBtn.style.display = selectedKeys.size > 0 ? 'inline-block' : 'none';
+                    exportBtn.textContent = `Действия с выбранными (${selectedKeys.size})`;
+                }
             };
 
             const syncMasterCheckbox = (filtered) => {
-                const visibleKeys = filtered.map(it => it.key);
-                const allVisible = visibleKeys.length > 0 && visibleKeys.every(k => selectedKeys.has(k));
-                masterCb.checked = allVisible;
-                masterCb.indeterminate = !allVisible && visibleKeys.some(k => selectedKeys.has(k));
-            };
-
-            const syncFileCheckbox = (fileName, fileIssues) => {
-                const cb = listEl.querySelector(`.rep-file-cb[data-file="${fileName.replace(/"/g, '\\"')}"]`);
-                if (!cb) return;
-                const allChecked = fileIssues.length > 0 && fileIssues.every(it => selectedKeys.has(it.key));
-                const someChecked = fileIssues.some(it => selectedKeys.has(it.key));
-                cb.checked = allChecked;
-                cb.indeterminate = someChecked && !allChecked;
+                if (isAllSelected) {
+                    masterCb.checked = true;
+                    masterCb.indeterminate = false;
+                } else {
+                    const visibleKeys = filtered.map(it => it.key);
+                    const allVisible = visibleKeys.length > 0 && visibleKeys.every(k => selectedKeys.has(k));
+                    masterCb.checked = allVisible;
+                    masterCb.indeterminate = !allVisible && visibleKeys.some(k => selectedKeys.has(k));
+                }
             };
 
             const renderList = () => {
@@ -411,13 +370,10 @@ export const report = {
                 let html = '';
 
                 sortedFiles.forEach(([fileName, fileIssues]) => {
-                    const sortedIssues = applySort(fileIssues);
-
                     html += `
                         <div class="card" style="margin-bottom: 16px; padding: 0; overflow: hidden;">
                             <div class="pf-file-header" style="padding: 12px 16px; background: var(--bg3); border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center;">
                                 <div style="display:flex; align-items:center; gap:8px;">
-                                    <input type="checkbox" class="rep-file-cb" data-file="${esc(fileName)}" style="width:16px; height:16px; cursor:pointer;">
                                     <h4 style="margin: 0; text-transform: none;">📁 ${esc(fileName)} <span style="font-weight: normal; color: var(--text-dim); font-size: 13px;">— ${fileIssues.length}</span></h4>
                                 </div>
                             </div>
@@ -427,20 +383,20 @@ export const report = {
                                     <thead>
                                         <tr>
                                             <th style="width:30px; padding-left:16px;"></th>
-                                            <th class="rep-sort" data-field="rule" style="cursor:pointer;">Правило ${sortField === 'rule' ? (sortAsc ? '▲' : '▼') : ''}</th>
-                                            <th class="rep-sort" data-field="severity" style="cursor:pointer;">Severity ${sortField === 'severity' ? (sortAsc ? '▲' : '▼') : ''}</th>
-                                            <th class="rep-sort" data-field="message" style="cursor:pointer;">Сообщение ${sortField === 'message' ? (sortAsc ? '▲' : '▼') : ''}</th>
+                                            <th>Правило</th>
+                                            <th>Severity</th>
+                                            <th>Сообщение</th>
                                             <th>Теги</th>
                                             <th>Код</th>
                                         </tr>
                                     </thead>
                                     <tbody>
-                                        ${sortedIssues.map(it => {
+                                        ${fileIssues.map(it => {
                                             const tagsHtml = (it.tags && it.tags.length > 0)
                                                 ? it.tags.map(t => `<span class="tag" style="margin:1px;">${esc(t)}</span>`).join('')
                                                 : `<span class="tag" style="margin:1px; opacity:0.6; font-style:italic;">${NO_TAGS_LABEL}</span>`;
 
-                                            const isChecked = selectedKeys.has(it.key) ? 'checked' : '';
+                                            const isChecked = selectedKeys.has(it.key) || isAllSelected ? 'checked' : '';
                                             return `
                                                 <tr class="rep-row" data-key="${esc(it.key)}" data-file="${esc(fileName)}" style="cursor:pointer;">
                                                     <td style="padding-left:16px;"><input type="checkbox" class="rep-cb" data-key="${esc(it.key)}" ${isChecked}></td>
@@ -466,45 +422,17 @@ export const report = {
 
                 listEl.innerHTML = html;
 
-                listEl.querySelectorAll('.rep-sort').forEach(th => {
-                    th.addEventListener('click', () => {
-                        const field = th.dataset.field;
-                        if (sortField === field) sortAsc = !sortAsc;
-                        else { sortField = field; sortAsc = true; }
-                        renderList();
-                    });
-                });
-
                 listEl.querySelectorAll('.rep-cb').forEach(cb => {
                     cb.addEventListener('change', (e) => {
-                        if (e.target.checked) selectedKeys.add(e.target.dataset.key);
-                        else selectedKeys.delete(e.target.dataset.key);
-
-                        const file = cb.closest('tr').dataset.file;
-                        const fileIssues = groups.get(file);
-                        syncFileCheckbox(file, fileIssues);
-
-                        updateExportBtn();
-                        syncMasterCheckbox(filtered);
-                    });
-                });
-
-                listEl.querySelectorAll('.rep-file-cb').forEach(cb => {
-                    cb.addEventListener('change', (e) => {
-                        const file = e.target.dataset.file;
-                        const fileIssues = groups.get(file);
-                        const isChecked = e.target.checked;
-
-                        fileIssues.forEach(it => {
-                            if (isChecked) selectedKeys.add(it.key);
-                            else selectedKeys.delete(it.key);
-                        });
-
-                        const card = cb.closest('.card');
-                        card.querySelectorAll('.rep-cb').forEach(rowCb => {
-                            rowCb.checked = isChecked;
-                        });
-
+                        if (isAllSelected) {
+                            isAllSelected = false;
+                            filtered.forEach(it => {
+                                if (it.key !== e.target.dataset.key) selectedKeys.add(it.key);
+                            });
+                        } else {
+                            if (e.target.checked) selectedKeys.add(e.target.dataset.key);
+                            else selectedKeys.delete(e.target.dataset.key);
+                        }
                         updateExportBtn();
                         syncMasterCheckbox(filtered);
                     });
@@ -523,11 +451,8 @@ export const report = {
                             if (!content.dataset.loaded) {
                                 try {
                                     const p = new URLSearchParams({ project: ctx.state.project, issueKey: key });
-                                    const d = await ctx.api('/api/snippet?' + p);
-                                    const snippet = d.snippet || [];
-                                    const issue = allIssues.find(i => i.key === key);
-                                    if (issue) issue._snippet = snippet;
-
+                                    const res = await ctx.api('/api/snippet?' + p);
+                                    const snippet = res.snippet || [];
                                     if (snippet.length > 0) {
                                         content.className = 'code';
                                         content.innerHTML = highlightCode(snippet.join('\n'));
@@ -551,7 +476,6 @@ export const report = {
                 listEl.querySelectorAll('.rep-row').forEach(tr => {
                     tr.addEventListener('click', (e) => {
                         if (e.target.type === 'checkbox' || e.target.closest('.rep-btn-toggle')) return;
-
                         const cb = tr.querySelector('.rep-cb');
                         cb.checked = !cb.checked;
                         cb.dispatchEvent(new Event('change'));
@@ -559,16 +483,10 @@ export const report = {
 
                     tr.addEventListener('contextmenu', (e) => {
                         e.preventDefault();
-                        const key = tr.dataset.key;
-                        if (selectedKeys.size === 0) {
-                            selectedKeys.add(key);
+                        if (selectedKeys.size === 0 && !isAllSelected) {
+                            selectedKeys.add(tr.dataset.key);
                             const cb = tr.querySelector('.rep-cb');
                             if (cb) cb.checked = true;
-
-                            const file = tr.dataset.file;
-                            const fileIssues = groups.get(file);
-                            syncFileCheckbox(file, fileIssues);
-
                             updateExportBtn();
                             syncMasterCheckbox(filtered);
                         }
@@ -581,13 +499,42 @@ export const report = {
             };
 
             const startExport = async (format) => {
-                const selectedIssues = allIssues.filter(it => selectedKeys.has(it.key));
-                if (!selectedIssues.length) { toast('Ничего не выбрано', true); return; }
-                await showExportModal(selectedIssues, format, ctx, ctx.state.project);
+                if (isAllSelected) {
+                    exportBtn.textContent = 'Загрузка...';
+                    exportBtn.disabled = true;
+                    let allIssues = [];
+                    try {
+                        const pageSize = 500;
+                        let page = 1;
+                        let total = d.total;
+                        while (allIssues.length < total) {
+                            const pPage = new URLSearchParams(ctx.qs());
+                            pPage.set('ps', pageSize);
+                            pPage.set('p', page);
+                            const res = await ctx.api('/api/issues?' + pPage.toString());
+                            if (!res.issues || res.issues.length === 0) break;
+                            res.issues.forEach(it => allIssues.push(it));
+                            page++;
+                            exportBtn.textContent = `Загрузка... (${allIssues.length}/${total})`;
+                            if (allIssues.length >= total || page > 100) break;
+                        }
+                    } catch (err) {
+                        toast('Ошибка загрузки всех замечаний: ' + err.message, true);
+                        return;
+                    } finally {
+                        exportBtn.disabled = false;
+                        updateExportBtn();
+                    }
+                    await showExportModal(allIssues, format, ctx, ctx.state.project);
+                } else {
+                    const selectedIssues = (d.issues || []).filter(it => selectedKeys.has(it.key));
+                    if (!selectedIssues.length) { toast('Ничего не выбрано', true); return; }
+                    await showExportModal(selectedIssues, format, ctx, ctx.state.project);
+                }
             };
 
             exportBtn.addEventListener('click', () => {
-                if (selectedKeys.size === 0) return;
+                if (selectedKeys.size === 0 && !isAllSelected) return;
                 const rect = exportBtn.getBoundingClientRect();
                 ctxMenu.style.display = 'block';
                 ctxMenu.style.left = (rect.left + window.scrollX) + 'px';
@@ -602,22 +549,19 @@ export const report = {
             ctxMenu.querySelector('#ctx-html-files-teams').addEventListener('click', () => { ctxMenu.style.display = 'none'; startExport('html-files-teams'); });
 
             masterCb.addEventListener('change', (e) => {
-                let filtered = applyFilters();
-                if (e.target.checked) filtered.forEach(it => selectedKeys.add(it.key));
-                else filtered.forEach(it => selectedKeys.delete(it.key));
+                if (e.target.checked) {
+                    isAllSelected = true;
+                    selectedKeys.clear();
+                } else {
+                    isAllSelected = false;
+                    selectedKeys.clear();
+                }
                 renderList();
                 updateExportBtn();
             });
 
-            statusSel.addEventListener('change', e => {
-                statusFilter = e.target.value;
-                renderList();
-            });
-
-            textInput.addEventListener('input', e => {
-                filterText = e.target.value;
-                renderList();
-            });
+            statusSel.addEventListener('change', e => { statusFilter = e.target.value; renderList(); });
+            textInput.addEventListener('input', e => { filterText = e.target.value; renderList(); });
 
             renderList();
 

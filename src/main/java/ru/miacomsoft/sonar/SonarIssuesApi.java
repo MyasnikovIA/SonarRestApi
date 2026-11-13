@@ -11,6 +11,8 @@ import java.util.regex.Pattern;
 
 public class SonarIssuesApi {
 
+    public static final String ACTIVE_STATUSES = "OPEN,CONFIRMED,REOPENED";
+
     private final SonarClient client;
     private final String projectKey;
     private final Map<String, String> ruleNameCache;
@@ -37,7 +39,8 @@ public class SonarIssuesApi {
     }
 
     private String sanitizeStatuses(String statuses) {
-        if (statuses == null || statuses.isEmpty()) return "OPEN";
+        if (statuses == null) return "";
+        if (statuses.isEmpty()) return "";
         if (!reopenedSupported && statuses.contains("REOPENED")) {
             String st = statuses.replace("REOPENED", "").replace(",,", ",").replaceAll("^,|,$", "");
             return st.isEmpty() ? "OPEN" : st;
@@ -45,7 +48,7 @@ public class SonarIssuesApi {
         return statuses;
     }
 
-    private String buildQueryWithStatuses(String statuses, String impactSeverity, String quality) {
+    private String buildQueryWithStatuses(String statuses, String impactSeverity, String quality, String rule) {
         StringBuilder q = new StringBuilder();
         q.append("components=").append(enc(projectKey));
         q.append("&s=").append(enc("FILE_LINE"));
@@ -55,19 +58,46 @@ public class SonarIssuesApi {
         if (quality != null && !"ALL".equals(quality)) {
             q.append("&impactSoftwareQualities=").append(enc(quality));
         }
+        if (rule != null && !rule.isEmpty()) {
+            q.append("&rules=").append(enc(rule));
+        }
 
         String st = sanitizeStatuses(statuses);
-        q.append("&issueStatuses=").append(enc(st));
+        if (!st.isEmpty()) {
+            q.append("&issueStatuses=").append(enc(st));
+        }
+
         q.append("&additionalFields=").append(enc("_all"));
         q.append("&timeZone=").append(enc("Asia/Novosibirsk"));
         return q.toString();
     }
 
-    /**
-     * Возвращает одну страницу замечаний в виде объектов Issue.
-     */
+    public JSONObject fetchPageRaw(String statuses, String impactSeverity, String quality, String rule, int p, int ps) throws Exception {
+        int validPs = Math.min(ps, 500);
+        String actualStatuses = (statuses == null) ? ACTIVE_STATUSES : statuses;
+        actualStatuses = sanitizeStatuses(actualStatuses);
+
+        String url = "/api/issues/search?"
+                + buildQueryWithStatuses(actualStatuses, impactSeverity, quality, rule)
+                + "&ps=" + validPs + "&p=" + p;
+        try {
+            return new JSONObject(client.get(url));
+        } catch (RuntimeException e) {
+            String msg = e.getMessage();
+            if (msg != null && (msg.contains("REOPENED") || msg.contains("issueStatuses"))) {
+                reopenedSupported = false;
+                System.err.println("[SonarIssuesApi] Сервер не поддерживает статус REOPENED. Переключаемся на OPEN,CONFIRMED.");
+                String fallbackUrl = "/api/issues/search?"
+                        + buildQueryWithStatuses(sanitizeStatuses(actualStatuses), impactSeverity, quality, rule)
+                        + "&ps=" + validPs + "&p=" + p;
+                return new JSONObject(client.get(fallbackUrl));
+            }
+            throw e;
+        }
+    }
+
     public List<Issue> fetchOpenPage(String impactSeverity, String quality, int page, int pageSize) throws Exception {
-        JSONObject raw = fetchPageRaw("OPEN,REOPENED", impactSeverity, quality, page, pageSize);
+        JSONObject raw = fetchPageRaw(ACTIVE_STATUSES, impactSeverity, quality, null, page, pageSize);
         JSONArray arr = raw.optJSONArray("issues");
         List<Issue> out = new ArrayList<>();
         if (arr != null) {
@@ -78,45 +108,14 @@ public class SonarIssuesApi {
         return out;
     }
 
-    public JSONObject fetchPageRaw(String statuses, String impactSeverity, String quality, int p, int ps) throws Exception {
-        int validPs = Math.min(ps, 500);
-        String actualStatuses = sanitizeStatuses(statuses);
-
-        String url = "/api/issues/search?"
-                + buildQueryWithStatuses(actualStatuses, impactSeverity, quality)
-                + "&ps=" + validPs + "&p=" + p;
-        try {
-            return new JSONObject(client.get(url));
-        } catch (RuntimeException e) {
-            String msg = e.getMessage();
-            if (msg != null && (msg.contains("REOPENED") || msg.contains("issueStatuses"))) {
-                reopenedSupported = false;
-                System.err.println("[SonarIssuesApi] Сервер не поддерживает статус REOPENED. Переключаемся на OPEN.");
-                String fallbackUrl = "/api/issues/search?"
-                        + buildQueryWithStatuses("OPEN", impactSeverity, quality)
-                        + "&ps=" + validPs + "&p=" + p;
-                return new JSONObject(client.get(fallbackUrl));
-            }
-            throw e;
-        }
-    }
-
     public int count(String impactSeverity, String quality) throws Exception {
-        try {
-            return countWithStatuses("OPEN,REOPENED", impactSeverity, quality);
-        } catch (RuntimeException e) {
-            String msg = e.getMessage();
-            if (msg != null && (msg.contains("REOPENED") || msg.contains("issueStatuses"))) {
-                return countWithStatuses("OPEN", impactSeverity, quality);
-            }
-            throw e;
-        }
+        return countWithStatuses(ACTIVE_STATUSES, impactSeverity, quality);
     }
 
     public int countWithStatuses(String statuses, String impactSeverity, String quality)
             throws Exception {
         String url = "/api/issues/search?"
-                + buildQueryWithStatuses(statuses, impactSeverity, quality) + "&ps=1";
+                + buildQueryWithStatuses(statuses, impactSeverity, quality, null) + "&ps=1";
         JSONObject root = new JSONObject(client.get(url));
         return root.getInt("total");
     }
@@ -140,7 +139,7 @@ public class SonarIssuesApi {
                 return fetchAllByParts(statuses, impactSeverity, quality);
             }
             if (msg != null && (msg.contains("REOPENED") || msg.contains("issueStatuses"))) {
-                return fetchAllByStatuses("OPEN", impactSeverity, quality);
+                return fetchAllByStatuses(sanitizeStatuses(statuses), impactSeverity, quality);
             }
             throw e;
         }
@@ -153,7 +152,7 @@ public class SonarIssuesApi {
 
         while (total < 0 || out.size() < total) {
             String url = "/api/issues/search?"
-                    + buildQueryWithStatuses(statuses, impactSeverity, quality)
+                    + buildQueryWithStatuses(statuses, impactSeverity, quality, null)
                     + "&ps=" + pageSize + "&p=" + page;
             JSONObject root = new JSONObject(client.get(url));
             total = root.getInt("total");
@@ -194,7 +193,7 @@ public class SonarIssuesApi {
                         System.err.println("[SonarIssuesApi] Лимит 10000 для " + s + "/" + q + ". Разбиваем по файлам...");
                         out.addAll(fetchAllByFiles(statuses, s, q));
                     } else if (msg != null && (msg.contains("REOPENED") || msg.contains("issueStatuses"))) {
-                        out.addAll(fetchAllByStatusesDirect("OPEN", s, q));
+                        out.addAll(fetchAllByStatusesDirect(sanitizeStatuses(statuses), s, q));
                     } else {
                         throw e;
                     }
@@ -288,20 +287,12 @@ public class SonarIssuesApi {
     }
 
     public Map<String, Integer> facet(String impactSeverity, String quality, String facetName) throws Exception {
-        try {
-            return facetWithStatuses("OPEN,REOPENED", impactSeverity, quality, facetName);
-        } catch (RuntimeException e) {
-            String msg = e.getMessage();
-            if (msg != null && (msg.contains("REOPENED") || msg.contains("issueStatuses"))) {
-                return facetWithStatuses("OPEN", impactSeverity, quality, facetName);
-            }
-            throw e;
-        }
+        return facetWithStatuses(ACTIVE_STATUSES, impactSeverity, quality, null, facetName);
     }
 
-    public Map<String, Integer> facetWithStatuses(String statuses, String impactSeverity, String quality, String facetName) throws Exception {
+    public Map<String, Integer> facetWithStatuses(String statuses, String impactSeverity, String quality, String rule, String facetName) throws Exception {
         String url = "/api/issues/search?"
-                + buildQueryWithStatuses(statuses, impactSeverity, quality)
+                + buildQueryWithStatuses(statuses, impactSeverity, quality, rule)
                 + "&ps=1&facets=" + enc(facetName);
         JSONObject root = new JSONObject(client.get(url));
         JSONArray facets = root.getJSONArray("facets");
@@ -528,6 +519,6 @@ public class SonarIssuesApi {
     }
 
     public List<Issue> fetchOpen(String impactSeverity, String quality) throws Exception {
-        return fetchAllByStatuses("OPEN,REOPENED", impactSeverity, quality);
+        return fetchAllByStatuses(ACTIVE_STATUSES, impactSeverity, quality);
     }
 }

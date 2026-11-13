@@ -25,11 +25,13 @@ public class MatrixHandler extends BaseHandler {
         Map<String, String> q = parseQuery(ex);
         String sev = param(q, "sev", "MEDIUM");
         String qual = param(q, "qual", "MAINTAINABILITY");
+        String rule = param(q, "rule", null);
         int page = paramInt(q, "p", 1);
         int ps = paramInt(q, "ps", 50);
 
         SonarIssuesApi api = newApi(project);
-        JSONObject rawResponse = api.fetchPageRaw("OPEN,REOPENED", sev, qual, page, ps);
+        // 6 аргументов
+        JSONObject rawResponse = api.fetchPageRaw(SonarIssuesApi.ACTIVE_STATUSES, sev, qual, rule, page, ps);
         JSONArray rawIssues = rawResponse.optJSONArray("issues");
 
         Set<String> rules = new TreeSet<>();
@@ -64,6 +66,7 @@ public class MatrixHandler extends BaseHandler {
         o.put("project", project);
         o.put("severity", sev);
         o.put("quality", qual);
+        o.put("rule", rule != null ? rule : "");
         o.put("total", rawResponse.optInt("total", 0));
         o.put("p", page);
         o.put("ps", ps);

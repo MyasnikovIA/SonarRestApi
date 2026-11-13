@@ -12,36 +12,39 @@ export const perfile = {
         el.innerHTML = '<div class="empty">loading…</div>';
         try {
             const d = await ctx.api('/api/perfile?' + ctx.qs());
-            const files = d.files || [];
-
-            // ОБНОВЛЯЕМ ПАГИНАЦИЮ
             if (ctx.updatePagination) ctx.updatePagination(d.total);
-
-            if (!files.length) { el.innerHTML = '<div class="empty">Нет данных</div>'; return; }
 
             let rawData = d;
             let filterText = '';
-            let hideProcessed = true; // По умолчанию скрываем
-            let ruleFilter = '';
+            let hideProcessed = ctx.state.hideProcessed;
             let selectedKeys = new Set();
 
             let allRules = [];
             let totalRules = 0;
 
-            const collectRules = () => {
-                const ruleCounts = new Map();
-                rawData.files.forEach(f => {
-                    (f.issues || []).forEach(it => {
-                        const isMarked = it.status && it.status !== 'OPEN' && it.status !== 'REOPENED';
-                        if (it.rule && !isMarked) {
-                            ruleCounts.set(it.rule, (ruleCounts.get(it.rule) || 0) + 1);
-                        }
-                    });
-                });
-                allRules = [...ruleCounts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
-                totalRules = allRules.length;
+            const loadRulesFacet = async () => {
+                try {
+                    // Не передаем rule в фасеты, чтобы видеть все правила
+                    const p = new URLSearchParams();
+                    if (ctx.state.project) p.set('project', ctx.state.project.trim());
+                    p.set('sev', ctx.state.sev);
+                    p.set('qual', ctx.state.qual);
+                    p.set('facet', 'rules');
+                    p.set('hideProcessed', hideProcessed);
+
+                    const res = await ctx.api('/api/facets?' + p.toString());
+                    const rulesObj = res.values || {};
+                    allRules = Object.entries(rulesObj)
+                        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+                    totalRules = allRules.length;
+                } catch (e) {
+                    console.warn('Не удалось загрузить статистику по правилам:', e);
+                    allRules = [];
+                    totalRules = 0;
+                }
             };
-            collectRules();
+
+            await loadRulesFacet();
 
             el.innerHTML = `
                 <div class="pf-header-sticky">
@@ -76,16 +79,8 @@ export const perfile = {
             const ruleSelect = el.querySelector('#pf-rule-filter');
             const headerTitle = el.querySelector('#pf-header-title');
 
-            allRules.forEach(([rule, count]) => {
-                const opt = document.createElement('option');
-                opt.value = rule;
-                opt.textContent = `${rule} (${count})`;
-                ruleSelect.appendChild(opt);
-            });
-
             const rebuildRulesSelect = () => {
-                const prev = ruleFilter;
-                collectRules();
+                const prev = ctx.state.rule || '';
                 ruleSelect.innerHTML = '';
                 const allOpt = document.createElement('option');
                 allOpt.value = '';
@@ -102,21 +97,36 @@ export const perfile = {
                 if (prev && allRules.some(([r]) => r === prev)) {
                     ruleSelect.value = prev;
                 } else {
-                    ruleFilter = '';
+                    ctx.state.rule = '';
+                    localStorage.setItem('rule', '');
                     ruleSelect.value = '';
                 }
+            };
 
-                const totalIssues = rawData.files.reduce((s, f) => s + f.issues.length, 0);
-                const totalFiles = rawData.files.filter(f => f.issues.length > 0).length;
-                headerTitle.textContent = `${d.project} · ${d.severity}/${d.quality} · Всего: ${d.total}`;
+            rebuildRulesSelect();
+
+            const refreshData = async () => {
+                await loadRulesFacet();
+                rebuildRulesSelect();
+
+                try {
+                    const queryParams = new URLSearchParams(ctx.qs());
+                    const res = await ctx.api('/api/perfile?' + queryParams.toString());
+                    rawData = res;
+                    ctx.updatePagination(res.total);
+                } catch (e) {
+                    console.warn('Ошибка обновления данных:', e);
+                }
+
+                renderList();
             };
 
             const applyFilters = () => {
                 const query = filterText.toLowerCase();
+                // Фильтр по правилу (ctx.state.rule) теперь применяется на бэкенде SonarQube,
+                // поэтому локально мы его не проверяем, но оставляем для UI.
                 return rawData.files.map(f => {
                     const matchedIssues = f.issues.filter(it => {
-                        if (ruleFilter && it.rule !== ruleFilter) return false;
-
                         const matchesText =
                             (it.message || '').toLowerCase().includes(query) ||
                             (it.rule || '').toLowerCase().includes(query) ||
@@ -209,7 +219,7 @@ export const perfile = {
                         const key = row.dataset.key;
                         const issue = rawData.files.flatMap(x => x.issues).find(x => x.key === key);
                         openIssueModal(issue, ctx, () => {
-                            document.querySelector('.tab[data-tab="perfile"]').click();
+                            refreshData();
                         });
                     });
                 });
@@ -230,8 +240,7 @@ export const perfile = {
                         const localReloadCb = () => {
                             selectedKeys.clear();
                             updateBulkBtn();
-                            rebuildRulesSelect();
-                            renderList();
+                            refreshData();
                         };
 
                         showIssueContextMenu(
@@ -296,16 +305,20 @@ export const perfile = {
                 renderList();
             });
 
-            hideProcessedCb.addEventListener('change', (e) => {
+            hideProcessedCb.addEventListener('change', async (e) => {
                 hideProcessed = e.target.checked;
+                ctx.state.hideProcessed = hideProcessed;
+                localStorage.setItem('hideProcessed', hideProcessed);
                 selectedKeys.clear();
-                renderList();
+                await refreshData();
             });
 
-            ruleSelect.addEventListener('change', (e) => {
-                ruleFilter = e.target.value;
+            ruleSelect.addEventListener('change', async (e) => {
+                ctx.state.rule = e.target.value;
+                localStorage.setItem('rule', ctx.state.rule);
+                ctx.state.page = 1;
                 selectedKeys.clear();
-                renderList();
+                await refreshData();
             });
 
             masterCb.addEventListener('change', (e) => {
@@ -325,8 +338,7 @@ export const perfile = {
                 openBulkModal(issues, ctx, () => {
                     selectedKeys.clear();
                     updateBulkBtn();
-                    rebuildRulesSelect();
-                    renderList();
+                    refreshData();
                 });
             });
 

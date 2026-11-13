@@ -20,12 +20,13 @@ const state = {
     qual:     localStorage.getItem('qual')     || 'MAINTAINABILITY',
     snippets: Number(localStorage.getItem('snippets') || 5),
     issueKey: localStorage.getItem('issueKey') || '',
-    activeTab: localStorage.getItem('activeTab') || 'summary',
+    rule:     localStorage.getItem('rule')     || '', // НОВОЕ
+    hideProcessed: localStorage.getItem('hideProcessed') !== 'false', // НОВОЕ
     page:     1,
-    pageSize: 50
+    pageSize: 50,
+    activeTab: localStorage.getItem('activeTab') || 'summary',
 };
 
-// Функция очистки имени проекта от случайных дубликатов (например, PROJPROJ)
 function getCleanProject() {
     let p = state.project.trim();
     if (p.length > 0 && p.length % 2 === 0) {
@@ -49,6 +50,7 @@ const ctx = {
         if (proj) p.set('project', proj);
         p.set('sev', state.sev);
         p.set('qual', state.qual);
+        if (state.rule) p.set('rule', state.rule); // НОВОЕ
         p.set('p', state.page);
         p.set('ps', state.pageSize);
         return p.toString();
@@ -157,9 +159,8 @@ async function loadKeysToSelect() {
     const currentVal = input.value;
 
     try {
-        // Для ключей тоже используем пагинацию, но берем большую страницу (например, 1000)
         const p = new URLSearchParams(ctx.qs());
-        p.set('ps', 1000);
+        p.set('ps', 500); // Для ключей запрашиваем больше
         const d = await api('/api/keys?' + p.toString());
         const keys = d.keys || [];
 
@@ -198,7 +199,6 @@ async function downloadKeys() {
     btn.disabled = true;
 
     try {
-        // Скачиваем все ключи (ставим лимит 10000)
         const p = new URLSearchParams(ctx.qs());
         p.set('ps', 10000);
         const d = await api('/api/keys?' + p.toString());
@@ -447,7 +447,7 @@ function initUI() {
 
     $('project').addEventListener('change', e => {
         state.project = e.target.value.trim();
-        state.page = 1; // Сбрасываем страницу при смене проекта
+        state.page = 1;
         localStorage.setItem('project', state.project);
         loadKeysToSelect();
         loadMeasures();

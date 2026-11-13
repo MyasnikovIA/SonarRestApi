@@ -24,12 +24,14 @@ public class OpenIssuesHandler extends BaseHandler {
 
         String sev      = param(q, "sev",  "ALL");
         String qual     = param(q, "qual", "ALL");
+        String rule     = param(q, "rule", null);
         boolean withCode = paramBool(q, "snippets", true);
         int page = paramInt(q, "p", 1);
         int ps = paramInt(q, "ps", 50);
 
         SonarIssuesApi api = newApi(project);
-        JSONObject rawResponse = api.fetchPageRaw("OPEN,REOPENED", sev, qual, page, ps);
+        // 6 аргументов
+        JSONObject rawResponse = api.fetchPageRaw(SonarIssuesApi.ACTIVE_STATUSES, sev, qual, rule, page, ps);
         JSONArray rawIssues = rawResponse.optJSONArray("issues");
 
         JSONArray arr = new JSONArray();
@@ -64,10 +66,11 @@ public class OpenIssuesHandler extends BaseHandler {
         o.put("project", project);
         o.put("severity", sev);
         o.put("quality", qual);
+        o.put("rule", rule != null ? rule : "");
         o.put("total", rawResponse.optInt("total", 0));
         o.put("p", page);
         o.put("ps", ps);
-        o.put("statuses", new JSONArray(new String[]{"OPEN", "REOPENED"}));
+        o.put("statuses", new JSONArray(new String[]{"OPEN", "CONFIRMED", "REOPENED"}));
         o.put("snippetsIncluded", withCode);
         o.put("issues", arr);
         putSource(o, project);

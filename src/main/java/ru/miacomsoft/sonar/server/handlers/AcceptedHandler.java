@@ -8,7 +8,6 @@ import ru.miacomsoft.sonar.SonarIssuesApi;
 import ru.miacomsoft.sonar.server.BaseHandler;
 import ru.miacomsoft.sonar.server.ServerState;
 
-import java.util.List;
 import java.util.Map;
 
 public class AcceptedHandler extends BaseHandler {
@@ -24,12 +23,14 @@ public class AcceptedHandler extends BaseHandler {
 
         String sev            = param(q, "sev",  "ALL");
         String qual           = param(q, "qual", "ALL");
+        String rule           = param(q, "rule", null);
         boolean includeFacets = paramBool(q, "facets", true);
         int page = paramInt(q, "p", 1);
         int ps = paramInt(q, "ps", 50);
 
         SonarIssuesApi api = newApi(project);
-        JSONObject rawResponse = api.fetchPageRaw("ACCEPTED", sev, qual, page, ps);
+        // 6 аргументов
+        JSONObject rawResponse = api.fetchPageRaw("ACCEPTED", sev, qual, rule, page, ps);
         JSONArray rawIssues = rawResponse.optJSONArray("issues");
 
         JSONArray arr = new JSONArray();
@@ -46,6 +47,7 @@ public class AcceptedHandler extends BaseHandler {
         o.put("project", project);
         o.put("severity", sev);
         o.put("quality", qual);
+        o.put("rule", rule != null ? rule : "");
         o.put("total", rawResponse.optInt("total", 0));
         o.put("p", page);
         o.put("ps", ps);

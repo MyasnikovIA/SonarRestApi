@@ -20,18 +20,15 @@ public class IssuesHandler extends BaseHandler {
         Map<String, String> q = parseQuery(ex);
         String sev = param(q, "sev", "MEDIUM");
         String qual = param(q, "qual", "MAINTAINABILITY");
+        String rule = param(q, "rule", null);
         int page = paramInt(q, "p", 1);
-        int ps = paramInt(q, "ps", 50); // По умолчанию 50 элементов на страницу
+        int ps = paramInt(q, "ps", 50);
 
         SonarIssuesApi api = newApi(project);
+        // 6 аргументов
+        JSONObject rawResponse = api.fetchPageRaw(SonarIssuesApi.ACTIVE_STATUSES, sev, qual, rule, page, ps);
 
-        // Прокси-запрос напрямую, без парсинга в объекты
-        JSONObject rawResponse = api.fetchPageRaw("OPEN,REOPENED", sev, qual, page, ps);
-
-        // Опционально: добавляем source для отладки
         putSource(rawResponse, project);
-
-        // Отдаем ответ как есть (в нем уже есть fields: total, p, ps, issues)
         sendJson(ex, 200, rawResponse);
     }
 }

@@ -163,8 +163,8 @@ public class BuildPromptHandler extends BaseHandler {
         List<Issue> issues = new ArrayList<>();
 
         try {
-            // Используем fetchPageRaw с ограничением страницы, чтобы не зависнуть на 10000
-            JSONObject raw = api.fetchPageRaw("OPEN,REOPENED", sev, qual, 1, 500);
+            // 6 аргументов (добавлен null для rule)
+            JSONObject raw = api.fetchPageRaw(SonarIssuesApi.ACTIVE_STATUSES, sev, qual, null, 1, 500);
             JSONArray arr = raw.optJSONArray("issues");
             if (arr != null) {
                 for (int i = 0; i < arr.length(); i++) {
@@ -172,7 +172,6 @@ public class BuildPromptHandler extends BaseHandler {
                 }
             }
         } catch (Exception e) {
-            // fallback, если что-то пошло не так
             issues = newApi(project).fetchAll(sev, qual);
         }
 

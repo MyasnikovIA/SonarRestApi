@@ -63,6 +63,8 @@ public final class ApiServer {
 
         server.createContext("/api/prompt/build", new BuildPromptHandler(state, template));
         server.createContext("/api/prompt/list",  new ListPromptsHandler(state, template));
+        // ... в методе start добавьте:
+        server.createContext("/api/facets",       new FacetsHandler(state));
 
         Path www = resolveWwwDir();
         if (www != null) {

@@ -18,7 +18,6 @@ export const report = {
         el.innerHTML = '<div class="empty">Загрузка данных...</div>';
 
         try {
-            // Базовый запрос для текущей страницы (только sev и qual)
             const pBase = new URLSearchParams();
             if (ctx.state.project) pBase.set('project', ctx.state.project.trim());
             pBase.set('sev', ctx.state.sev);
@@ -34,7 +33,6 @@ export const report = {
                 return;
             }
 
-            // Загружаем список правил для фильтра (через фасеты)
             let allRules = [];
             try {
                 const pFacet = new URLSearchParams();
@@ -284,8 +282,9 @@ export const report = {
             document.addEventListener('click', () => { ctxMenu.style.display = 'none'; }, { once: true });
 
             const applyFilters = () => {
+                if (!d.issues) return [];
                 const q = filterText.toLowerCase();
-                let filtered = (d.issues || []).filter(it => {
+                let filtered = d.issues.filter(it => {
                     if (statusFilter === 'PROCESSED' && !it.isProcessed) return false;
                     if (statusFilter === 'UNPROCESSED' && it.isProcessed) return false;
 
@@ -507,20 +506,35 @@ export const report = {
             };
 
             const startExport = async (format) => {
-                // Передаем ЛОКАЛЬНЫЕ фильтры вкладки "Отчет", а не глобальные
+                let keys = null;
+
+                if (!isAllSelected) {
+                    const filtered = applyFilters();
+                    const list = [];
+                    filtered.forEach(it => {
+                        if (selectedKeys.has(it.key)) {
+                            list.push(it.key);
+                        }
+                    });
+                    if (list.length === 0) {
+                        toast('Ничего не выбрано', true);
+                        return;
+                    }
+                    keys = list;
+                }
+
+                // Всегда передаем ВСЕ локальные фильтры
                 const filters = {
                     sev: ctx.state.sev,
                     qual: ctx.state.qual,
-                    rule: null, // Не используем глобальное правило вкладки Per-File
-                    hideProcessed: false, // Не используем глобальный флаг вкладки Per-File
-                    selectedTags: Array.from(selectedTags),
+                    tags: Array.from(selectedTags),
                     excludedTags: Array.from(excludedTags),
-                    selectedRules: Array.from(selectedRules),
+                    rules: Array.from(selectedRules),
                     filterText: filterText,
                     statusFilter: statusFilter
                 };
 
-                await showExportModal(filters, format, ctx, ctx.state.project);
+                await showExportModal(keys, format, ctx, ctx.state.project, filters);
             };
 
             exportBtn.addEventListener('click', () => {

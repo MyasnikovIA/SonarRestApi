@@ -23,6 +23,11 @@ public class ExportStreamHandler extends BaseHandler {
     }
 
     @Override
+    protected boolean allowedMethod(String method) {
+        return "POST".equalsIgnoreCase(method) || "GET".equalsIgnoreCase(method);
+    }
+
+    @Override
     protected void handleRequest(HttpExchange ex) throws Exception {
         String project = resolveProject(ex);
         Map<String, String> q = parseQuery(ex);
@@ -38,10 +43,28 @@ public class ExportStreamHandler extends BaseHandler {
         String filterText = param(q, "filterText", "");
         String statusFilter = param(q, "statusFilter", "ALL");
 
+        List<String> keys = null;
+        if ("POST".equalsIgnoreCase(ex.getRequestMethod())) {
+            byte[] body = ex.getRequestBody().readAllBytes();
+            if (body.length > 0) {
+                try {
+                    JSONObject req = new JSONObject(new String(body, StandardCharsets.UTF_8));
+                    if (req.has("keys")) {
+                        JSONArray arr = req.getJSONArray("keys");
+                        keys = new ArrayList<>();
+                        for (int i = 0; i < arr.length(); i++) keys.add(arr.getString(i));
+                    }
+                } catch (Exception e) {
+                    System.err.println("[ExportStream] Ошибка парсинга POST тела: " + e.getMessage());
+                }
+            }
+        }
+
         System.out.println("[ExportStream] Запрос на экспорт: project=" + project +
                 ", format=" + format + ", sev=" + sev + ", qual=" + qual +
                 ", rule=" + (rule == null ? "нет" : rule) +
-                ", hideProcessed=" + hideProcessed);
+                ", hideProcessed=" + hideProcessed +
+                ", keys=" + (keys == null ? "нет" : keys.size()));
 
         ex.getResponseHeaders().set("Content-Type", "text/event-stream; charset=utf-8");
         ex.getResponseHeaders().set("Cache-Control", "no-cache");
@@ -51,8 +74,12 @@ public class ExportStreamHandler extends BaseHandler {
 
         OutputStream os = ex.getResponseBody();
         try {
-            runExport(os, project, format, sev, qual, rule, hideProcessed,
-                    tagsParam, excludedTagsParam, selectedRulesParam, filterText, statusFilter);
+            if (keys != null && !keys.isEmpty()) {
+                runExportByKeys(os, project, format, keys, sev, qual);
+            } else {
+                runExport(os, project, format, sev, qual, rule, hideProcessed,
+                        tagsParam, excludedTagsParam, selectedRulesParam, filterText, statusFilter);
+            }
         } catch (Exception e) {
             System.err.println("[ExportStream] ОШИБКА: " + e.getMessage());
             e.printStackTrace();
@@ -69,7 +96,6 @@ public class ExportStreamHandler extends BaseHandler {
             String msg = "event: " + event + "\ndata: " + data.toString() + "\n\n";
             os.write(msg.getBytes(StandardCharsets.UTF_8));
             os.flush();
-
             if (!"complete".equals(event)) {
                 System.out.println("[ExportStream] Событие: " + event + " -> " + data.toString());
             }
@@ -78,12 +104,100 @@ public class ExportStreamHandler extends BaseHandler {
         }
     }
 
+    // =========================================================
+    // Выгрузка по ключам (переданным с клиента)
+    // =========================================================
+    private void runExportByKeys(OutputStream os, String project, String format, List<String> keys, String sev, String qual) throws Exception {
+        SonarIssuesApi api = state.newApi(project);
+        String host = state.getSession() != null ? state.getSession().getHost() : "sonar.bars.group";
+
+        int total = keys.size();
+        sendEvent(os, "progress", new JSONObject()
+                .put("stage", "start")
+                .put("total", total)
+                .put("current", 0)
+                .put("message", "Начинаем сбор данных по " + total + " ключам..."));
+
+        StringBuilder reportContent = new StringBuilder();
+        int loadedCount = 0;
+
+        if ("jira".equals(format)) reportContent.append("h3. Проект: ").append(project).append("\n\n");
+        else if ("md".equals(format)) reportContent.append("# Отчет по проекту: ").append(project).append("\n\n");
+        else if ("txt".equals(format)) reportContent.append("=== Отчет по проекту: ").append(project).append(" ===\n\n");
+        else if ("html".equals(format) || "html-files".equals(format) || "html-files-teams".equals(format)) {
+            reportContent.append("<!DOCTYPE html><html><head><meta charset='utf-8'></head><body>\n");
+            reportContent.append("<h1>Проект: ").append(project).append("</h1>\n");
+        } else if ("confluence".equals(format)) reportContent.append("<h2>Проект: ").append(project).append("</h2>\n");
+
+        int batchSize = 100;
+        for (int i = 0; i < keys.size(); i += batchSize) {
+            List<String> batch = keys.subList(i, Math.min(i + batchSize, keys.size()));
+            String keysCsv = String.join(",", batch);
+
+            try {
+                JSONObject raw = api.fetchIssuesByKeys(keysCsv);
+                JSONArray arr = raw.optJSONArray("issues");
+                if (arr != null) {
+                    for (int j = 0; j < arr.length(); j++) {
+                        Issue it = Issue.from(arr.getJSONObject(j), project);
+                        if ("jira".equals(format)) reportContent.append(JiraExporter.exportSingle(it, project, host));
+                        else if ("md".equals(format)) reportContent.append(MdExporter.exportSingle(it, project, host));
+                        else if ("txt".equals(format)) reportContent.append(TxtExporter.exportSingle(it, project, host));
+                        else if ("html".equals(format) || "html-files".equals(format) || "html-files-teams".equals(format)) {
+                            reportContent.append(HtmlExporter.exportSingle(it, project, host));
+                        } else if ("confluence".equals(format)) reportContent.append(ConfluenceExporter.exportSingle(it, project, host));
+                        loadedCount++;
+                    }
+                }
+            } catch (Exception e) {
+                System.err.println("[ExportStream] Ошибка при запросе пачки ключей: " + e.getMessage());
+            }
+
+            sendEvent(os, "progress", new JSONObject()
+                    .put("stage", "fetching")
+                    .put("total", total)
+                    .put("current", loadedCount)
+                    .put("message", "Загружено " + loadedCount + " из " + total));
+        }
+
+        if ("html".equals(format) || "html-files".equals(format) || "html-files-teams".equals(format)) {
+            reportContent.append("</body></html>");
+        }
+
+        String ext = "html";
+        if ("jira".equals(format)) ext = "txt";
+        if ("md".equals(format)) ext = "md";
+        if ("txt".equals(format)) ext = "txt";
+
+        Path tempFile = Files.createTempFile("sonar_report_", "." + ext);
+        Files.writeString(tempFile, reportContent.toString(), StandardCharsets.UTF_8);
+        System.out.println("[ExportStream] Файл сформирован: " + tempFile.toAbsolutePath());
+
+        sendEvent(os, "complete", new JSONObject()
+                .put("file", tempFile.toAbsolutePath().toString())
+                .put("total", loadedCount)
+                .put("message", "Файл успешно сформирован"));
+    }
+
+    // =========================================================
+    // Старый режим выгрузки (по фильтрам)
+    // =========================================================
     private void runExport(OutputStream os, String project, String format, String sev, String qual, String rule, boolean hideProcessed,
                            String tagsParam, String excludedTagsParam, String selectedRulesParam, String filterText, String statusFilter) throws Exception {
         SonarIssuesApi api = state.newApi(project);
         String host = state.getSession() != null ? state.getSession().getHost() : "sonar.bars.group";
 
         String statuses = hideProcessed ? SonarIssuesApi.ACTIVE_STATUSES : null;
+
+        // Логируем фильтры
+        System.out.println("[ExportStream] Фильтры: sev=" + sev + ", qual=" + qual +
+                ", rule=" + (rule == null ? "нет" : rule) +
+                ", hideProcessed=" + hideProcessed +
+                ", tags=" + tagsParam +
+                ", excludedTags=" + excludedTagsParam +
+                ", selectedRules=" + selectedRulesParam +
+                ", filterText=" + filterText +
+                ", statusFilter=" + statusFilter);
 
         sendEvent(os, "progress", new JSONObject()
                 .put("stage", "start")
@@ -111,18 +225,13 @@ public class ExportStreamHandler extends BaseHandler {
         StringBuilder reportContent = new StringBuilder();
         int loadedCount = 0;
 
-        if ("jira".equals(format)) {
-            reportContent.append("h3. Проект: ").append(project).append("\n\n");
-        } else if ("md".equals(format)) {
-            reportContent.append("# Отчет по проекту: ").append(project).append("\n\n");
-        } else if ("txt".equals(format)) {
-            reportContent.append("=== Отчет по проекту: ").append(project).append(" ===\n\n");
-        } else if ("html".equals(format) || "html-files".equals(format) || "html-files-teams".equals(format)) {
+        if ("jira".equals(format)) reportContent.append("h3. Проект: ").append(project).append("\n\n");
+        else if ("md".equals(format)) reportContent.append("# Отчет по проекту: ").append(project).append("\n\n");
+        else if ("txt".equals(format)) reportContent.append("=== Отчет по проекту: ").append(project).append(" ===\n\n");
+        else if ("html".equals(format) || "html-files".equals(format) || "html-files-teams".equals(format)) {
             reportContent.append("<!DOCTYPE html><html><head><meta charset='utf-8'></head><body>\n");
             reportContent.append("<h1>Проект: ").append(project).append("</h1>\n");
-        } else if ("confluence".equals(format)) {
-            reportContent.append("<h2>Проект: ").append(project).append("</h2>\n");
-        }
+        } else if ("confluence".equals(format)) reportContent.append("<h2>Проект: ").append(project).append("</h2>\n");
 
         Set<String> selectedTags = new HashSet<>();
         if (!tagsParam.isEmpty()) {
@@ -141,7 +250,6 @@ public class ExportStreamHandler extends BaseHandler {
 
         String qText = filterText == null ? "" : filterText.toLowerCase();
 
-        // Получаем список всех правил (если не задано конкретное)
         Set<String> rulesToProcess = new HashSet<>();
         if (rule != null && !rule.isEmpty()) {
             rulesToProcess.add(rule);
@@ -160,7 +268,6 @@ public class ExportStreamHandler extends BaseHandler {
             }
         }
 
-        // Заранее получаем список всех файлов проекта (нужен для разбивки правил с >10000)
         List<String> projectFiles = null;
 
         for (String currentRule : rulesToProcess) {
@@ -233,17 +340,12 @@ public class ExportStreamHandler extends BaseHandler {
                             if (hasExcluded) continue;
                         }
 
-                        if ("jira".equals(format)) {
-                            reportContent.append(JiraExporter.exportSingle(it, project, host));
-                        } else if ("md".equals(format)) {
-                            reportContent.append(MdExporter.exportSingle(it, project, host));
-                        } else if ("txt".equals(format)) {
-                            reportContent.append(TxtExporter.exportSingle(it, project, host));
-                        } else if ("html".equals(format) || "html-files".equals(format) || "html-files-teams".equals(format)) {
+                        if ("jira".equals(format)) reportContent.append(JiraExporter.exportSingle(it, project, host));
+                        else if ("md".equals(format)) reportContent.append(MdExporter.exportSingle(it, project, host));
+                        else if ("txt".equals(format)) reportContent.append(TxtExporter.exportSingle(it, project, host));
+                        else if ("html".equals(format) || "html-files".equals(format) || "html-files-teams".equals(format)) {
                             reportContent.append(HtmlExporter.exportSingle(it, project, host));
-                        } else if ("confluence".equals(format)) {
-                            reportContent.append(ConfluenceExporter.exportSingle(it, project, host));
-                        }
+                        } else if ("confluence".equals(format)) reportContent.append(ConfluenceExporter.exportSingle(it, project, host));
 
                         loadedCount++;
                         ruleLoaded++;
@@ -272,11 +374,10 @@ public class ExportStreamHandler extends BaseHandler {
                 }
             }
 
-            // Если нужно разбиение по файлам
             if (needFileSplit) {
                 if (projectFiles == null) {
                     try {
-                        projectFiles = api.fetchProjectFilesList(); // Нужен новый метод в SonarIssuesApi
+                        projectFiles = api.fetchProjectFilesList();
                         System.out.println("[ExportStream] Получен список файлов: " + projectFiles.size());
                     } catch (Exception e) {
                         System.err.println("[ExportStream] Не удалось получить список файлов: " + e.getMessage());
@@ -285,28 +386,20 @@ public class ExportStreamHandler extends BaseHandler {
                     }
                 }
 
-                // Для каждого файла запрашиваем замечания по правилу
                 for (String file : projectFiles) {
                     int filePage = 1;
                     while (true) {
                         try {
-                            // Запрос по одному файлу и правилу
                             JSONObject raw = api.fetchPageRawForComponent(statuses, sev, qual, currentRule, file, filePage, pageSize);
                             JSONArray arr = raw.optJSONArray("issues");
                             if (arr == null || arr.length() == 0) break;
 
                             for (int i = 0; i < arr.length(); i++) {
                                 Issue it = Issue.from(arr.getJSONObject(i), project);
-                                // Фильтры те же (для краткости пропущены, но должны быть)
-                                if ("jira".equals(format)) {
-                                    reportContent.append(JiraExporter.exportSingle(it, project, host));
-                                } else if ("md".equals(format)) {
-                                    reportContent.append(MdExporter.exportSingle(it, project, host));
-                                } else if ("txt".equals(format)) {
-                                    reportContent.append(TxtExporter.exportSingle(it, project, host));
-                                } else if ("html".equals(format)) {
-                                    reportContent.append(HtmlExporter.exportSingle(it, project, host));
-                                }
+                                if ("jira".equals(format)) reportContent.append(JiraExporter.exportSingle(it, project, host));
+                                else if ("md".equals(format)) reportContent.append(MdExporter.exportSingle(it, project, host));
+                                else if ("txt".equals(format)) reportContent.append(TxtExporter.exportSingle(it, project, host));
+                                else if ("html".equals(format)) reportContent.append(HtmlExporter.exportSingle(it, project, host));
                                 loadedCount++;
                             }
                             filePage++;
@@ -319,7 +412,7 @@ public class ExportStreamHandler extends BaseHandler {
 
                         } catch (Exception e) {
                             System.err.println("[ExportStream] Ошибка при запросе файла " + file + ": " + e.getMessage());
-                            break; // Пропускаем файл
+                            break;
                         }
                     }
                 }

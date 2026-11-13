@@ -579,5 +579,9 @@ public class SonarIssuesApi {
         String url = "/api/issues/search?" + q.toString() + "&ps=" + validPs + "&p=" + p;
         return new JSONObject(client.get(url));
     }
-
+    public JSONObject fetchIssuesByKeys(String keysCsv) throws Exception {
+        String url = "/api/issues/search?issues=" + enc(keysCsv)
+                + "&additionalFields=" + enc("_all");
+        return new JSONObject(client.get(url));
+    }
 }

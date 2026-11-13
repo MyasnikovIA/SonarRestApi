@@ -1,7 +1,8 @@
 import { toast } from '../../common.js';
 
-export async function showExportModal(filters, formatType, ctx, projectName) {
-    // filters содержит: sev, qual, rule, hideProcessed, selectedTags, excludedTags, selectedRules, filterText, statusFilter
+export async function showExportModal(keys, formatType, ctx, projectName, filters) {
+    const isAllSelected = (keys === null);
+    const f = filters || {};
 
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
@@ -34,21 +35,21 @@ export async function showExportModal(filters, formatType, ctx, projectName) {
     const currentEl = overlay.querySelector('#exp-current');
     const cancelBtn = overlay.querySelector('#exp-cancel');
 
-    let eventSource = null;
+    let abortController = null;
 
     const close = () => {
-        if (eventSource) {
-            eventSource.close();
-            eventSource = null;
+        if (abortController) {
+            abortController.abort();
+            abortController = null;
         }
         overlay.remove();
     };
 
     cancelBtn.addEventListener('click', () => {
-        if (eventSource) {
+        if (abortController) {
             statusEl.textContent = 'Остановка...';
-            eventSource.close();
-            eventSource = null;
+            abortController.abort();
+            abortController = null;
         }
         close();
         toast('Генерация остановлена', true);
@@ -56,74 +57,94 @@ export async function showExportModal(filters, formatType, ctx, projectName) {
 
     const p = new URLSearchParams();
     if (ctx.state.project) p.set('project', ctx.state.project.trim());
-    // Используем ТОЛЬКО те фильтры, которые пришли из вкладки "Отчет"
-    p.set('sev', filters.sev);
-    p.set('qual', filters.qual);
+    p.set('sev', f.sev || ctx.state.sev);
+    p.set('qual', f.qual || ctx.state.qual);
     p.set('format', formatType);
-    if (filters.rule) p.set('rule', filters.rule);
-    if (filters.hideProcessed) p.set('hideProcessed', 'true');
-    if (filters.selectedTags && filters.selectedTags.length > 0) p.set('tags', filters.selectedTags.join(','));
-    if (filters.excludedTags && filters.excludedTags.length > 0) p.set('excludedTags', filters.excludedTags.join(','));
-    if (filters.selectedRules && filters.selectedRules.length > 0) p.set('selectedRules', filters.selectedRules.join(','));
-    if (filters.filterText) p.set('filterText', filters.filterText);
-    if (filters.statusFilter) p.set('statusFilter', filters.statusFilter);
+    if (f.tags && f.tags.length > 0) p.set('tags', f.tags.join(','));
+    if (f.excludedTags && f.excludedTags.length > 0) p.set('excludedTags', f.excludedTags.join(','));
+    if (f.rules && f.rules.length > 0) p.set('selectedRules', f.rules.join(','));
+    if (f.filterText) p.set('filterText', f.filterText);
+    if (f.statusFilter) p.set('statusFilter', f.statusFilter);
 
-    const sseUrl = '/api/export-stream?' + p.toString();
-    console.log('[SSE] Подключение к', sseUrl);
+    const url = '/api/export-stream?' + p.toString();
+    console.log('[SSE] ' + (isAllSelected ? 'GET (все)' : 'POST (' + keys.length + ' ключей)') + ' на ' + url);
 
-    eventSource = new EventSource(sseUrl);
+    abortController = new AbortController();
 
-    eventSource.addEventListener('progress', (e) => {
-        const data = JSON.parse(e.data);
-        statusEl.textContent = data.message || 'Загрузка...';
-        if (data.total) {
-            counterEl.textContent = `${data.current} / ${data.total}`;
-            const pct = Math.min(100, Math.round((data.current / data.total) * 100));
-            fillEl.style.width = pct + '%';
+    try {
+        let response;
+        if (isAllSelected) {
+            response = await fetch(url, { method: 'GET', signal: abortController.signal });
+        } else {
+            response = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ keys: keys }),
+                signal: abortController.signal
+            });
         }
-        if (data.page) {
-            currentEl.textContent = `Страница ${data.page}...`;
+
+        if (!response.ok) throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder('utf-8');
+        let buffer = '';
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+
+            let nl;
+            while ((nl = buffer.indexOf('\n\n')) !== -1) {
+                const chunk = buffer.slice(0, nl);
+                buffer = buffer.slice(nl + 2);
+                if (!chunk.trim()) continue;
+
+                let event = 'message';
+                let data = '';
+                for (const line of chunk.split('\n')) {
+                    if (line.startsWith('event: ')) event = line.substring(7).trim();
+                    else if (line.startsWith('data: ')) data += line.substring(6).trim();
+                }
+
+                if (event === 'progress') {
+                    const d = JSON.parse(data);
+                    statusEl.textContent = d.message || 'Загрузка...';
+                    if (d.total) {
+                        counterEl.textContent = `${d.current} / ${d.total}`;
+                        fillEl.style.width = Math.min(100, Math.round((d.current / d.total) * 100)) + '%';
+                    }
+                    if (d.page) currentEl.textContent = `Страница ${d.page}...`;
+                } else if (event === 'complete') {
+                    const d = JSON.parse(data);
+                    statusEl.textContent = 'Готово! Скачивание файла...';
+                    fillEl.style.width = '100%';
+                    const downloadUrl = '/api/export-download?file=' + encodeURIComponent(d.file);
+                    const a = document.createElement('a');
+                    a.href = downloadUrl;
+                    a.download = '';
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    toast('Отчет успешно сформирован и скачан!');
+                    setTimeout(() => close(), 2000);
+                } else if (event === 'error') {
+                    const d = JSON.parse(data);
+                    throw new Error(d.message || 'Ошибка генерации');
+                }
+            }
         }
-    });
-
-    eventSource.addEventListener('complete', (e) => {
-        const data = JSON.parse(e.data);
-        statusEl.textContent = 'Готово! Скачивание файла...';
-        fillEl.style.width = '100%';
-
-        // Скачиваем файл по ссылке
-        const downloadUrl = '/api/export-download?file=' + encodeURIComponent(data.file);
-
-        const a = document.createElement('a');
-        a.href = downloadUrl;
-        a.download = '';
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-
-        toast('Отчет успешно сформирован и скачан!');
-        setTimeout(() => close(), 2000);
-    });
-
-    eventSource.addEventListener('error', (e) => {
-        let msg = 'Ошибка генерации отчета';
-        try {
-            const data = JSON.parse(e.data);
-            msg = data.message || msg;
-        } catch (err) { }
-        statusEl.textContent = msg;
-        statusEl.style.color = 'var(--err)';
-        toast(msg, true);
-        if (eventSource) {
-            eventSource.close();
-            eventSource = null;
-        }
-    });
-
-    eventSource.onerror = (e) => {
-        if (eventSource && eventSource.readyState === EventSource.CLOSED) {
-            statusEl.textContent = 'Соединение с сервером закрыто.';
+    } catch (err) {
+        if (err.name === 'AbortError') {
+            console.log('[SSE] Прервано пользователем');
+        } else {
+            console.error('[SSE] Ошибка:', err);
+            statusEl.textContent = 'Ошибка: ' + err.message;
             statusEl.style.color = 'var(--err)';
+            toast('Ошибка генерации: ' + err.message, true);
         }
-    };
+    } finally {
+        abortController = null;
+    }
 }

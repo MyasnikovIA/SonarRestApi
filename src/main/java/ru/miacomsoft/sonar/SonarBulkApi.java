@@ -64,9 +64,16 @@ public class SonarBulkApi {
 
             String resp = client.postForm("/api/issues/bulk_change", form);
             results.add(resp);
+
             if (!silent) {
-                System.out.printf("Батч %d/%d (%d): OK%n",
-                        (i / batchSize + 1), batchCount(issues.size()), batch.size());
+                // Выводим список ключей текущего батча
+                StringBuilder keysList = new StringBuilder();
+                for (int j = 0; j < batch.size(); j++) {
+                    if (j > 0) keysList.append(", ");
+                    keysList.append(batch.get(j).key);
+                }
+                System.out.printf("Батч %d/%d (%d): OK [%s]%n",
+                        (i / batchSize + 1), batchCount(issues.size()), batch.size(), keysList.toString());
             }
 
             if (i + batchSize < issues.size() && delayMs > 0) {

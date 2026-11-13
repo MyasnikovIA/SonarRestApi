@@ -18,13 +18,13 @@ export const perfile = {
             let filterText = '';
             let hideProcessed = ctx.state.hideProcessed;
             let selectedKeys = new Set();
+            let isAllSelected = false;
 
             let allRules = [];
             let totalRules = 0;
 
             const loadRulesFacet = async () => {
                 try {
-                    // Не передаем rule в фасеты, чтобы видеть все правила
                     const p = new URLSearchParams();
                     if (ctx.state.project) p.set('project', ctx.state.project.trim());
                     p.set('sev', ctx.state.sev);
@@ -77,7 +77,6 @@ export const perfile = {
             const bulkBtn = el.querySelector('#pf-bulk-btn');
             const masterCb = el.querySelector('#pf-master-checkbox');
             const ruleSelect = el.querySelector('#pf-rule-filter');
-            const headerTitle = el.querySelector('#pf-header-title');
 
             const rebuildRulesSelect = () => {
                 const prev = ctx.state.rule || '';
@@ -117,14 +116,13 @@ export const perfile = {
                 } catch (e) {
                     console.warn('Ошибка обновления данных:', e);
                 }
-
+                isAllSelected = false;
+                selectedKeys.clear();
                 renderList();
             };
 
             const applyFilters = () => {
                 const query = filterText.toLowerCase();
-                // Фильтр по правилу (ctx.state.rule) теперь применяется на бэкенде SonarQube,
-                // поэтому локально мы его не проверяем, но оставляем для UI.
                 return rawData.files.map(f => {
                     const matchedIssues = f.issues.filter(it => {
                         const matchesText =
@@ -144,11 +142,13 @@ export const perfile = {
             };
 
             const updateBulkBtn = () => {
-                bulkBtn.style.display = selectedKeys.size > 0 ? 'inline-block' : 'none';
-                bulkBtn.textContent = `Действия с выбранными (${selectedKeys.size})`;
-                const visibleIssues = applyFilters().flatMap(f => f.issues);
-                const allVisibleChecked = visibleIssues.length > 0 && visibleIssues.every(it => selectedKeys.has(it.key));
-                masterCb.checked = allVisibleChecked;
+                if (isAllSelected) {
+                    bulkBtn.style.display = 'inline-block';
+                    bulkBtn.textContent = `Действия со всеми (${rawData.total})`;
+                } else {
+                    bulkBtn.style.display = selectedKeys.size > 0 ? 'inline-block' : 'none';
+                    bulkBtn.textContent = `Действия с выбранными (${selectedKeys.size})`;
+                }
             };
 
             const renderList = () => {
@@ -176,7 +176,7 @@ export const perfile = {
                                 const isMarked = it.status && it.status !== 'OPEN' && it.status !== 'REOPENED';
                                 return `
                                 <tr class="pf-issue-row" data-key="${esc(it.key)}" data-file="${esc(f.file)}" style="cursor:pointer; ${isMarked ? 'background: rgba(46, 160, 67, 0.08);' : ''}">
-                                    <td style="padding-left:16px;"><input type="checkbox" class="pf-issue-checkbox" data-key="${esc(it.key)}" ${selectedKeys.has(it.key) ? 'checked' : ''}></td>
+                                    <td style="padding-left:16px;"><input type="checkbox" class="pf-issue-checkbox" data-key="${esc(it.key)}" ${(isAllSelected || selectedKeys.has(it.key)) ? 'checked' : ''}></td>
                                     <td class="num">${it.line}</td>
                                     <td>${esc(it.rule)}</td>
                                     <td class="sev-${esc(it.impactSeverity || it.severity || '')}">${esc(it.impactSeverity || it.severity)}</td>
@@ -191,8 +191,15 @@ export const perfile = {
 
                 listEl.querySelectorAll('.pf-issue-checkbox').forEach(cb => {
                     cb.addEventListener('change', (e) => {
-                        if (e.target.checked) selectedKeys.add(e.target.dataset.key);
-                        else                  selectedKeys.delete(e.target.dataset.key);
+                        if (isAllSelected) {
+                            isAllSelected = false;
+                            filtered.forEach(f => f.issues.forEach(it => {
+                                if (it.key !== e.target.dataset.key) selectedKeys.add(it.key);
+                            }));
+                        } else {
+                            if (e.target.checked) selectedKeys.add(e.target.dataset.key);
+                            else                  selectedKeys.delete(e.target.dataset.key);
+                        }
                         updateBulkBtn();
                         syncFileCheckbox(cb.closest('.pf-file-card').dataset.file, filtered);
                     });
@@ -203,6 +210,8 @@ export const perfile = {
                         const file = cb.dataset.file;
                         const fileIssues = filtered.find(x => x.file === file).issues;
                         const isChecked = e.target.checked;
+                        if (isChecked) isAllSelected = false;
+
                         fileIssues.forEach(it => {
                             if (isChecked) selectedKeys.add(it.key);
                             else           selectedKeys.delete(it.key);
@@ -218,20 +227,18 @@ export const perfile = {
                         if (e.target.type === 'checkbox') return;
                         const key = row.dataset.key;
                         const issue = rawData.files.flatMap(x => x.issues).find(x => x.key === key);
-                        openIssueModal(issue, ctx, () => {
-                            refreshData();
-                        });
+                        openIssueModal(issue, ctx, () => refreshData());
                     });
-                });
 
-                listEl.querySelectorAll('.pf-issue-row').forEach(row => {
                     row.addEventListener('contextmenu', (e) => {
                         e.preventDefault();
                         const key = row.dataset.key;
                         const issue = rawData.files.flatMap(x => x.issues).find(x => x.key === key);
 
                         let targetIssues = [];
-                        if (selectedKeys.size > 0) {
+                        if (isAllSelected) {
+                            targetIssues = filtered.flatMap(f => f.issues);
+                        } else if (selectedKeys.size > 0) {
                             targetIssues = rawData.files.flatMap(f => f.issues).filter(it => selectedKeys.has(it.key));
                         } else {
                             targetIssues = [issue];
@@ -239,23 +246,30 @@ export const perfile = {
 
                         const localReloadCb = () => {
                             selectedKeys.clear();
+                            isAllSelected = false;
                             updateBulkBtn();
                             refreshData();
                         };
 
+                        // ИСПРАВЛЕНИЕ: Передаем флаг isAllSelected и общее количество (total)
                         showIssueContextMenu(
                             e.pageX, e.pageY,
                             issue, targetIssues, filtered, ctx,
                             localReloadCb,
                             () => {
                                 selectedKeys.clear();
-                                filtered.forEach(f => f.issues.forEach(it => selectedKeys.add(it.key)));
+                                isAllSelected = true;
+                                updateBulkBtn();
                                 renderList();
                             },
                             () => {
                                 selectedKeys.clear();
+                                isAllSelected = false;
                                 renderList();
-                            }
+                                updateBulkBtn();
+                            },
+                            isAllSelected,
+                            rawData.total
                         );
                     });
                 });
@@ -265,23 +279,28 @@ export const perfile = {
 
             const syncCheckboxes = (filtered) => {
                 listEl.querySelectorAll('.pf-issue-checkbox').forEach(cb => {
-                    cb.checked = selectedKeys.has(cb.dataset.key);
+                    cb.checked = isAllSelected || selectedKeys.has(cb.dataset.key);
                 });
 
                 filtered.forEach(f => {
                     syncFileCheckbox(f.file, filtered);
                 });
 
-                const allFilteredKeys = filtered.flatMap(f => f.issues.map(it => it.key));
-                if (allFilteredKeys.length > 0 && allFilteredKeys.every(k => selectedKeys.has(k))) {
+                if (isAllSelected) {
                     masterCb.checked = true;
                     masterCb.indeterminate = false;
-                } else if (allFilteredKeys.some(k => selectedKeys.has(k))) {
-                    masterCb.checked = false;
-                    masterCb.indeterminate = true;
                 } else {
-                    masterCb.checked = false;
-                    masterCb.indeterminate = false;
+                    const allFilteredKeys = filtered.flatMap(f => f.issues.map(it => it.key));
+                    if (allFilteredKeys.length > 0 && allFilteredKeys.every(k => selectedKeys.has(k))) {
+                        masterCb.checked = true;
+                        masterCb.indeterminate = false;
+                    } else if (allFilteredKeys.some(k => selectedKeys.has(k))) {
+                        masterCb.checked = false;
+                        masterCb.indeterminate = true;
+                    } else {
+                        masterCb.checked = false;
+                        masterCb.indeterminate = false;
+                    }
                 }
             };
 
@@ -292,8 +311,8 @@ export const perfile = {
                 const rows = fileCard.querySelectorAll('.pf-issue-checkbox');
                 if (!rows.length) return;
 
-                const allChecked = Array.from(rows).every(r => selectedKeys.has(r.dataset.key));
-                const someChecked = Array.from(rows).some(r => selectedKeys.has(r.dataset.key));
+                const allChecked = Array.from(rows).every(r => isAllSelected || selectedKeys.has(r.dataset.key));
+                const someChecked = Array.from(rows).some(r => isAllSelected || selectedKeys.has(r.dataset.key));
 
                 fileCb.checked = allChecked;
                 fileCb.indeterminate = someChecked && !allChecked;
@@ -301,6 +320,7 @@ export const perfile = {
 
             filterInput.addEventListener('input', (e) => {
                 filterText = e.target.value;
+                isAllSelected = false;
                 selectedKeys.clear();
                 renderList();
             });
@@ -309,6 +329,7 @@ export const perfile = {
                 hideProcessed = e.target.checked;
                 ctx.state.hideProcessed = hideProcessed;
                 localStorage.setItem('hideProcessed', hideProcessed);
+                isAllSelected = false;
                 selectedKeys.clear();
                 await refreshData();
             });
@@ -317,25 +338,68 @@ export const perfile = {
                 ctx.state.rule = e.target.value;
                 localStorage.setItem('rule', ctx.state.rule);
                 ctx.state.page = 1;
+                isAllSelected = false;
                 selectedKeys.clear();
                 await refreshData();
             });
 
             masterCb.addEventListener('change', (e) => {
-                const filtered = applyFilters();
-                const keys = filtered.flatMap(f => f.issues.map(it => it.key));
                 if (e.target.checked) {
-                    keys.forEach(k => selectedKeys.add(k));
+                    isAllSelected = true;
+                    selectedKeys.clear();
                 } else {
-                    keys.forEach(k => selectedKeys.delete(k));
+                    isAllSelected = false;
+                    selectedKeys.clear();
                 }
                 renderList();
                 updateBulkBtn();
             });
 
-            bulkBtn.addEventListener('click', () => {
-                const issues = rawData.files.flatMap(x => x.issues).filter(i => selectedKeys.has(i.key));
+            bulkBtn.addEventListener('click', async () => {
+                let issues = [];
+
+                if (isAllSelected) {
+                    bulkBtn.textContent = 'Загрузка...';
+                    bulkBtn.disabled = true;
+                    try {
+                        const pageSize = 500;
+                        let page = 1;
+                        let total = rawData.total;
+
+                        while (issues.length < total) {
+                            const pPage = new URLSearchParams(ctx.qs());
+                            pPage.set('ps', pageSize);
+                            pPage.set('p', page);
+                            const res = await ctx.api('/api/perfile?' + pPage.toString());
+                            if (!res.files || res.files.length === 0) break;
+
+                            res.files.forEach(f => {
+                                f.issues.forEach(it => issues.push(it));
+                            });
+
+                            page++;
+                            bulkBtn.textContent = `Загрузка... (${issues.length}/${total})`;
+
+                            if (issues.length >= total || page > 100) break;
+                        }
+                    } catch (err) {
+                        ctx.toast('Ошибка загрузки всех замечаний: ' + err.message, true);
+                        return;
+                    } finally {
+                        bulkBtn.disabled = false;
+                        updateBulkBtn();
+                    }
+                } else {
+                    issues = rawData.files.flatMap(x => x.issues).filter(i => selectedKeys.has(i.key));
+                }
+
+                if (issues.length === 0) {
+                    ctx.toast('Нет выбранных замечаний', true);
+                    return;
+                }
+
                 openBulkModal(issues, ctx, () => {
+                    isAllSelected = false;
                     selectedKeys.clear();
                     updateBulkBtn();
                     refreshData();

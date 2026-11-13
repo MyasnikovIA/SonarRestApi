@@ -20,8 +20,8 @@ const state = {
     qual:     localStorage.getItem('qual')     || 'MAINTAINABILITY',
     snippets: Number(localStorage.getItem('snippets') || 5),
     issueKey: localStorage.getItem('issueKey') || '',
-    rule:     localStorage.getItem('rule')     || '', // НОВОЕ
-    hideProcessed: localStorage.getItem('hideProcessed') !== 'false', // НОВОЕ
+    rule:     localStorage.getItem('rule')     || '',
+    hideProcessed: localStorage.getItem('hideProcessed') !== 'false',
     page:     1,
     pageSize: 50,
     activeTab: localStorage.getItem('activeTab') || 'summary',
@@ -50,7 +50,8 @@ const ctx = {
         if (proj) p.set('project', proj);
         p.set('sev', state.sev);
         p.set('qual', state.qual);
-        if (state.rule) p.set('rule', state.rule); // НОВОЕ
+        if (state.rule) p.set('rule', state.rule);
+        if (state.hideProcessed) p.set('hideProcessed', 'true');
         p.set('p', state.page);
         p.set('ps', state.pageSize);
         return p.toString();
@@ -160,7 +161,7 @@ async function loadKeysToSelect() {
 
     try {
         const p = new URLSearchParams(ctx.qs());
-        p.set('ps', 500); // Для ключей запрашиваем больше
+        p.set('ps', 500);
         const d = await api('/api/keys?' + p.toString());
         const keys = d.keys || [];
 

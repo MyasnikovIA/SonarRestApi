@@ -74,8 +74,7 @@ public class SonarIssuesApi {
 
     public JSONObject fetchPageRaw(String statuses, String impactSeverity, String quality, String rule, int p, int ps) throws Exception {
         int validPs = Math.min(ps, 500);
-        String actualStatuses = (statuses == null) ? ACTIVE_STATUSES : statuses;
-        actualStatuses = sanitizeStatuses(actualStatuses);
+        String actualStatuses = sanitizeStatuses(statuses);
 
         String url = "/api/issues/search?"
                 + buildQueryWithStatuses(actualStatuses, impactSeverity, quality, rule)

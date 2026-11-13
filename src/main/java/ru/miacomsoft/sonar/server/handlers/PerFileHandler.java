@@ -26,12 +26,16 @@ public class PerFileHandler extends BaseHandler {
         String sev = param(q, "sev", "MEDIUM");
         String qual = param(q, "qual", "MAINTAINABILITY");
         String rule = param(q, "rule", null);
+        boolean hideProcessed = paramBool(q, "hideProcessed", false);
         int page = paramInt(q, "p", 1);
         int ps = paramInt(q, "ps", 50);
 
+        // ИСПРАВЛЕНИЕ: Если hideProcessed = false, то statuses = null (все статусы).
+        // Если true, то только активные.
+        String statuses = hideProcessed ? SonarIssuesApi.ACTIVE_STATUSES : null;
+
         SonarIssuesApi api = newApi(project);
-        // 6 аргументов
-        JSONObject rawResponse = api.fetchPageRaw(SonarIssuesApi.ACTIVE_STATUSES, sev, qual, rule, page, ps);
+        JSONObject rawResponse = api.fetchPageRaw(statuses, sev, qual, rule, page, ps);
         JSONArray rawIssues = rawResponse.optJSONArray("issues");
 
         Map<String, List<Issue>> byFile = new TreeMap<>();

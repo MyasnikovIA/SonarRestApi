@@ -53,18 +53,11 @@
         </span>
     </div>
 
-    <div class="progress-container hidden" id="progress-container">
-        <div class="progress-bar-bg">
-            <div class="progress-bar-fill" id="progress-bar-fill" style="width: 0%;"></div>
-        </div>
-        <span class="progress-text" id="progress-text">...</span>
-    </div>
-
     <div class="status">
-        <span class="dot building" id="status-dot"></span>
-        <span id="status-text">building snapshot…</span>
+        <span class="dot" id="status-dot"></span>
+        <span id="status-text">Подключение...</span>
     </div>
-    <button id="btn-refresh" class="btn btn-accent">↻ Refresh snapshot</button>
+    <button id="btn-refresh" class="btn btn-accent">↻ Обновить</button>
     <button id="btn-ollama-settings" class="btn" title="Настройки Ollama">⚙ Ollama</button>
 </header>
 
@@ -106,7 +99,6 @@
         </label>
         <button id="btn-load" class="btn">Загрузить</button>
 
-        <!-- БЛОК ПАГИНАЦИИ -->
         <div id="pagination-controls" style="display:flex; gap:8px; align-items:center; margin-left:auto;">
             <button id="btn-prev-page" class="btn" disabled>← Назад</button>
             <span id="page-info" style="font-size:13px; font-weight:bold; min-width:80px; text-align:center;">Стр. 1</span>

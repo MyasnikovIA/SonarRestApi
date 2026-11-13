@@ -1,13 +1,7 @@
 import { toast } from '../../common.js';
-import { exportJira } from './exporters/exportJira.js';
-import { exportMd } from './exporters/exportMd.js';
-import { exportTxt } from './exporters/exportTxt.js';
-import { exportConfluence } from './exporters/exportConfluence.js';
-import { exportHtmlZip } from './exporters/exportHtmlZip.js';
-import { exportHtmlZipTeams } from './exporters/exportHtmlZipTeams.js';
 
-export async function showExportModal(issues, formatType, ctx, projectName) {
-    if (!issues.length) return;
+export async function showExportModal(filters, formatType, ctx, projectName) {
+    // filters содержит: sev, qual, rule, hideProcessed, selectedTags, excludedTags, selectedRules, filterText, statusFilter
 
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
@@ -15,12 +9,12 @@ export async function showExportModal(issues, formatType, ctx, projectName) {
     overlay.innerHTML = `
         <div class="modal-content" style="max-width: 520px;">
             <div class="modal-header">
-                <h3 style="margin:0;">Генерация отчета (${formatType === 'confluence' ? 'Confluence' : (formatType === 'html-files' ? 'HTML в ZIP' : (formatType === 'html-files-teams' ? 'HTML с командами' : formatType.toUpperCase()))})</h3>
+                <h3 style="margin:0;">Генерация отчета на сервере</h3>
             </div>
             <div class="modal-body">
                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; font-size:12px;">
-                    <span>Прогресс: <b id="exp-counter">0 / ${issues.length}</b></span>
-                    <span id="exp-status" style="color:var(--text-dim);">подготовка...</span>
+                    <span>Статус: <b id="exp-status">Инициализация...</b></span>
+                    <span id="exp-counter">0 / 0</span>
                 </div>
                 <div style="height:8px; background:var(--bg3); border-radius:4px; overflow:hidden; border:1px solid var(--border);">
                     <div id="exp-fill" style="height:100%; width:0%; background:var(--accent); transition: width 0.15s;"></div>
@@ -34,94 +28,102 @@ export async function showExportModal(issues, formatType, ctx, projectName) {
     `;
     document.body.appendChild(overlay);
 
-    const counterEl = overlay.querySelector('#exp-counter');
     const statusEl = overlay.querySelector('#exp-status');
+    const counterEl = overlay.querySelector('#exp-counter');
     const fillEl = overlay.querySelector('#exp-fill');
     const currentEl = overlay.querySelector('#exp-current');
     const cancelBtn = overlay.querySelector('#exp-cancel');
 
-    let cancelled = false;
-    const controller = new AbortController();
+    let eventSource = null;
+
+    const close = () => {
+        if (eventSource) {
+            eventSource.close();
+            eventSource = null;
+        }
+        overlay.remove();
+    };
 
     cancelBtn.addEventListener('click', () => {
-        cancelled = true;
-        controller.abort();
-        statusEl.textContent = 'Остановка...';
+        if (eventSource) {
+            statusEl.textContent = 'Остановка...';
+            eventSource.close();
+            eventSource = null;
+        }
+        close();
+        toast('Генерация остановлена', true);
     });
 
-    const total = issues.length;
+    const p = new URLSearchParams();
+    if (ctx.state.project) p.set('project', ctx.state.project.trim());
+    // Используем ТОЛЬКО те фильтры, которые пришли из вкладки "Отчет"
+    p.set('sev', filters.sev);
+    p.set('qual', filters.qual);
+    p.set('format', formatType);
+    if (filters.rule) p.set('rule', filters.rule);
+    if (filters.hideProcessed) p.set('hideProcessed', 'true');
+    if (filters.selectedTags && filters.selectedTags.length > 0) p.set('tags', filters.selectedTags.join(','));
+    if (filters.excludedTags && filters.excludedTags.length > 0) p.set('excludedTags', filters.excludedTags.join(','));
+    if (filters.selectedRules && filters.selectedRules.length > 0) p.set('selectedRules', filters.selectedRules.join(','));
+    if (filters.filterText) p.set('filterText', filters.filterText);
+    if (filters.statusFilter) p.set('statusFilter', filters.statusFilter);
 
-    let host = 'sonar.bars.group';
-    try {
-        const status = await ctx.api('/api/status');
-        if (status.session && status.session.host) {
-            host = status.session.host;
+    const sseUrl = '/api/export-stream?' + p.toString();
+    console.log('[SSE] Подключение к', sseUrl);
+
+    eventSource = new EventSource(sseUrl);
+
+    eventSource.addEventListener('progress', (e) => {
+        const data = JSON.parse(e.data);
+        statusEl.textContent = data.message || 'Загрузка...';
+        if (data.total) {
+            counterEl.textContent = `${data.current} / ${data.total}`;
+            const pct = Math.min(100, Math.round((data.current / data.total) * 100));
+            fillEl.style.width = pct + '%';
         }
-    } catch (e) {
-        console.warn('Не удалось получить host для ссылок', e);
-    }
-
-    // ЭТАП 1: Загрузка всех сниппетов
-    for (let i = 0; i < total; i++) {
-        if (cancelled) break;
-        const it = issues[i];
-
-        counterEl.textContent = `${i + 1} / ${total}`;
-        currentEl.textContent = it.key + ' — ' + it.component;
-        statusEl.textContent = 'загрузка кода...';
-        fillEl.style.width = `${Math.round(((i) / total) * 100)}%`;
-
-        if (!it._snippet) {
-            try {
-                const p = new URLSearchParams({ project: ctx.state.project, issueKey: it.key });
-                const d = await ctx.api('/api/snippet?' + p, { signal: controller.signal });
-                it._snippet = d.snippet || [];
-                if (d.issue && d.issue.comments) {
-                    it.comments = d.issue.comments;
-                }
-            } catch (e) {
-                if (e.name === 'AbortError') break;
-                console.warn('Failed to fetch snippet for ' + it.key, e);
-                it._snippet = [];
-            }
+        if (data.page) {
+            currentEl.textContent = `Страница ${data.page}...`;
         }
-    }
+    });
 
-    // ЭТАП 2: Генерация и скачивание
-    if (!cancelled) {
+    eventSource.addEventListener('complete', (e) => {
+        const data = JSON.parse(e.data);
+        statusEl.textContent = 'Готово! Скачивание файла...';
         fillEl.style.width = '100%';
-        statusEl.textContent = 'формирование файлов...';
-        currentEl.textContent = 'Пожалуйста, подождите...';
 
+        // Скачиваем файл по ссылке
+        const downloadUrl = '/api/export-download?file=' + encodeURIComponent(data.file);
+
+        const a = document.createElement('a');
+        a.href = downloadUrl;
+        a.download = '';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+
+        toast('Отчет успешно сформирован и скачан!');
+        setTimeout(() => close(), 2000);
+    });
+
+    eventSource.addEventListener('error', (e) => {
+        let msg = 'Ошибка генерации отчета';
         try {
-            if (formatType === 'jira') {
-                await exportJira(issues, projectName, host);
-            } else if (formatType === 'md') {
-                await exportMd(issues, projectName, host);
-            } else if (formatType === 'txt') {
-                await exportTxt(issues, projectName, host);
-            } else if (formatType === 'confluence') {
-                await exportConfluence(issues, projectName, host);
-            } else if (formatType === 'html-files') {
-                statusEl.textContent = 'упаковка в ZIP-архив...';
-                await exportHtmlZip(issues, projectName, host);
-            } else if (formatType === 'html-files-teams') {
-                statusEl.textContent = 'упаковка в ZIP-архив (с командами)...';
-                await exportHtmlZipTeams(issues, projectName, host);
-            }
-            statusEl.textContent = 'Готово! Файл успешно скачан.';
-        } catch (err) {
-            console.error('Ошибка экспорта:', err);
-            statusEl.textContent = 'Ошибка экспорта';
-            toast('Не удалось создать файл: ' + err.message, true);
+            const data = JSON.parse(e.data);
+            msg = data.message || msg;
+        } catch (err) { }
+        statusEl.textContent = msg;
+        statusEl.style.color = 'var(--err)';
+        toast(msg, true);
+        if (eventSource) {
+            eventSource.close();
+            eventSource = null;
         }
-    } else {
-        statusEl.textContent = 'Отменено пользователем';
-    }
+    });
 
-    cancelBtn.textContent = 'Закрыть';
-    cancelBtn.classList.remove('btn-danger');
-    cancelBtn.classList.add('btn-accent');
-    cancelBtn.replaceWith(cancelBtn.cloneNode(true));
-    overlay.querySelector('#exp-cancel').addEventListener('click', () => overlay.remove());
+    eventSource.onerror = (e) => {
+        if (eventSource && eventSource.readyState === EventSource.CLOSED) {
+            statusEl.textContent = 'Соединение с сервером закрыто.';
+            statusEl.style.color = 'var(--err)';
+        }
+    };
 }

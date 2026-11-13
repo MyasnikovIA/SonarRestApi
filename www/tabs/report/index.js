@@ -18,7 +18,15 @@ export const report = {
         el.innerHTML = '<div class="empty">Загрузка данных...</div>';
 
         try {
-            const d = await ctx.api('/api/issues?' + ctx.qs());
+            // Базовый запрос для текущей страницы (только sev и qual)
+            const pBase = new URLSearchParams();
+            if (ctx.state.project) pBase.set('project', ctx.state.project.trim());
+            pBase.set('sev', ctx.state.sev);
+            pBase.set('qual', ctx.state.qual);
+            pBase.set('p', ctx.state.page || 1);
+            pBase.set('ps', 50);
+
+            const d = await ctx.api('/api/issues?' + pBase.toString());
             if (ctx.updatePagination) ctx.updatePagination(d.total);
 
             if (!d.issues || d.issues.length === 0) {
@@ -26,9 +34,8 @@ export const report = {
                 return;
             }
 
+            // Загружаем список правил для фильтра (через фасеты)
             let allRules = [];
-            let allTagsSet = new Set();
-
             try {
                 const pFacet = new URLSearchParams();
                 if (ctx.state.project) pFacet.set('project', ctx.state.project.trim());
@@ -38,11 +45,12 @@ export const report = {
 
                 const rulesRes = await ctx.api('/api/facets?' + pFacet.toString() + '&facet=rules');
                 allRules = Object.entries(rulesRes.values || {}).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
-
-                d.issues.forEach(it => (it.tags || []).forEach(t => allTagsSet.add(t)));
             } catch (e) {
                 console.warn('Не удалось загрузить фасеты правил', e);
             }
+
+            const allTagsSet = new Set();
+            d.issues.forEach(it => (it.tags || []).forEach(t => allTagsSet.add(t)));
 
             const baseTags = Array.from(allTagsSet)
                 .filter(t => t !== 'require-fix' && t !== 'not-require-fix')
@@ -499,38 +507,20 @@ export const report = {
             };
 
             const startExport = async (format) => {
-                if (isAllSelected) {
-                    exportBtn.textContent = 'Загрузка...';
-                    exportBtn.disabled = true;
-                    let allIssues = [];
-                    try {
-                        const pageSize = 500;
-                        let page = 1;
-                        let total = d.total;
-                        while (allIssues.length < total) {
-                            const pPage = new URLSearchParams(ctx.qs());
-                            pPage.set('ps', pageSize);
-                            pPage.set('p', page);
-                            const res = await ctx.api('/api/issues?' + pPage.toString());
-                            if (!res.issues || res.issues.length === 0) break;
-                            res.issues.forEach(it => allIssues.push(it));
-                            page++;
-                            exportBtn.textContent = `Загрузка... (${allIssues.length}/${total})`;
-                            if (allIssues.length >= total || page > 100) break;
-                        }
-                    } catch (err) {
-                        toast('Ошибка загрузки всех замечаний: ' + err.message, true);
-                        return;
-                    } finally {
-                        exportBtn.disabled = false;
-                        updateExportBtn();
-                    }
-                    await showExportModal(allIssues, format, ctx, ctx.state.project);
-                } else {
-                    const selectedIssues = (d.issues || []).filter(it => selectedKeys.has(it.key));
-                    if (!selectedIssues.length) { toast('Ничего не выбрано', true); return; }
-                    await showExportModal(selectedIssues, format, ctx, ctx.state.project);
-                }
+                // Передаем ЛОКАЛЬНЫЕ фильтры вкладки "Отчет", а не глобальные
+                const filters = {
+                    sev: ctx.state.sev,
+                    qual: ctx.state.qual,
+                    rule: null, // Не используем глобальное правило вкладки Per-File
+                    hideProcessed: false, // Не используем глобальный флаг вкладки Per-File
+                    selectedTags: Array.from(selectedTags),
+                    excludedTags: Array.from(excludedTags),
+                    selectedRules: Array.from(selectedRules),
+                    filterText: filterText,
+                    statusFilter: statusFilter
+                };
+
+                await showExportModal(filters, format, ctx, ctx.state.project);
             };
 
             exportBtn.addEventListener('click', () => {

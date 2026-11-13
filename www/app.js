@@ -231,55 +231,22 @@ async function downloadKeys() {
     }
 }
 
-// ============ status bar & progress ============
+// ============ status bar ============
 
 async function refreshStatusBar() {
     try {
         const h = await api('/api/health');
         const dot = document.getElementById('status-dot');
         const txt = document.getElementById('status-text');
-        const progContainer = document.getElementById('progress-container');
-        const progFill = document.getElementById('progress-bar-fill');
-        const progText = document.getElementById('progress-text');
 
         dot.className = 'dot';
 
         if (!h.sessionReady) {
             dot.classList.add('err');
             txt.textContent = 'session not ready';
-            progContainer.classList.add('hidden');
-        }
-        else if (h.snapshotStatus === 'BUILDING') {
-            dot.classList.add('building');
-            txt.textContent = 'building snapshot…';
-
-            progContainer.classList.remove('hidden');
-
-            const cur = h.snapshotProgress || 0;
-            const tot = h.snapshotProgressTotal || 0;
-            const phase = h.snapshotPhase || 'starting';
-
-            if (tot > 0) {
-                progFill.classList.remove('indeterminate');
-                const pct = Math.min(100, Math.round((cur / tot) * 100));
-                progFill.style.width = pct + '%';
-                progText.textContent = `${phase} (${cur}/${tot})`;
-            } else {
-                progFill.classList.add('indeterminate');
-                progText.textContent = phase;
-            }
-        }
-        else if (h.snapshotReady) {
+        } else {
             dot.classList.add('ok');
-            const at = h.snapshotBuiltAt
-                ? new Date(h.snapshotBuiltAt).toLocaleTimeString() : '';
-            txt.textContent = `ready · ${h.snapshotIssuesCount} issues · ${at}`;
-            progContainer.classList.add('hidden');
-        }
-        else {
-            dot.classList.add('err');
-            txt.textContent = 'snapshot empty';
-            progContainer.classList.add('hidden');
+            txt.textContent = 'Готов к работе';
         }
 
         if (!state.project && h.defaultProject) {
@@ -292,7 +259,6 @@ async function refreshStatusBar() {
     } catch {
         document.getElementById('status-dot').className = 'dot err';
         document.getElementById('status-text').textContent = 'API unreachable';
-        document.getElementById('progress-container').classList.add('hidden');
     }
 }
 
@@ -396,18 +362,16 @@ function renderMeasures(d) {
     setText('measure-dup', Number.isFinite(dup) ? dup.toFixed(1) + '%' : '—');
 }
 
-// ============ refreshSnapshot ============
+// ============ refresh ============
 
 async function refreshSnapshot() {
     const proj = getCleanProject();
     if (!proj) { toast('Сначала задайте project', true); return; }
-    const p = new URLSearchParams({ project: proj });
-    try {
-        const d = await api('/api/refresh?' + p, { method: 'POST' });
-        toast(d.message || d.status);
-        refreshStatusBar();
-        loadMeasures();
-    } catch (e) { toast(e.message, true); }
+
+    // Просто перезагружаем текущую вкладку
+    toast('Обновление данных...');
+    activateTab(state.activeTab);
+    loadMeasures();
 }
 
 // ============ init ============

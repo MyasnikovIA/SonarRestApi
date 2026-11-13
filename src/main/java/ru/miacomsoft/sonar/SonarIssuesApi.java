@@ -207,7 +207,10 @@ public class SonarIssuesApi {
     }
 
     private List<Issue> fetchAllByFiles(String statuses, String impactSeverity, String quality) throws Exception {
+        System.out.println("[SonarIssuesApi] Получаем список всех файлов проекта...");
         List<String> files = fetchProjectFiles();
+        System.out.println("[SonarIssuesApi] Найдено файлов: " + files.size() + ". Начинаем обход пачками по 20...");
+
         List<Issue> out = new ArrayList<>();
         int batchSize = 20;
 
@@ -215,14 +218,19 @@ public class SonarIssuesApi {
             List<String> batch = files.subList(i, Math.min(i + batchSize, files.size()));
             String components = String.join(",", batch);
 
+            System.out.printf("[SonarIssuesApi] Обработка файлов %d - %d из %d...\n",
+                    i + 1, Math.min(i + batchSize, files.size()), files.size());
+
             try {
                 out.addAll(fetchAllByComponents(statuses, impactSeverity, quality, components));
             } catch (BatchLimitExceededException e) {
+                System.out.println("[SonarIssuesApi] Пачка превысила лимит. Разбиваем на отдельные файлы...");
                 for (String singleFile : batch) {
                     out.addAll(fetchAllByComponents(statuses, impactSeverity, quality, singleFile));
                 }
             }
         }
+        System.out.println("[SonarIssuesApi] Обход файлов завершен. Собрано: " + out.size() + " замечаний.");
         return out;
     }
 
@@ -520,4 +528,56 @@ public class SonarIssuesApi {
     public List<Issue> fetchOpen(String impactSeverity, String quality) throws Exception {
         return fetchAllByStatuses(ACTIVE_STATUSES, impactSeverity, quality);
     }
+    /**
+     * Возвращает плоский список всех файлов проекта.
+     */
+    public List<String> fetchProjectFilesList() throws Exception {
+        List<String> files = new ArrayList<>();
+        int page = 1, pageSize = 500;
+        while (true) {
+            String url = "/api/components/tree?component=" + enc(projectKey)
+                    + "&qualifiers=FIL&ps=" + pageSize + "&p=" + page;
+            JSONObject root = new JSONObject(client.get(url));
+            JSONArray components = root.optJSONArray("components");
+            if (components == null || components.isEmpty()) break;
+            for (int i = 0; i < components.length(); i++) {
+                files.add(components.getJSONObject(i).getString("key"));
+            }
+            page++;
+            if (page > 50) break; // защита
+        }
+        return files;
+    }
+
+    /**
+     * Запрос с фильтром по конкретному компоненту (файлу).
+     */
+    public JSONObject fetchPageRawForComponent(String statuses, String impactSeverity, String quality,
+                                               String rule, String component, int p, int ps) throws Exception {
+        int validPs = Math.min(ps, 500);
+        StringBuilder q = new StringBuilder();
+        q.append("components=").append(enc(component));
+        q.append("&s=").append(enc("FILE_LINE"));
+        if (impactSeverity != null && !"ALL".equals(impactSeverity)) {
+            q.append("&impactSeverities=").append(enc(impactSeverity));
+        }
+        if (quality != null && !"ALL".equals(quality)) {
+            q.append("&impactSoftwareQualities=").append(enc(quality));
+        }
+        if (rule != null && !rule.isEmpty()) {
+            q.append("&rules=").append(enc(rule));
+        }
+
+        String st = sanitizeStatuses(statuses);
+        if (!st.isEmpty()) {
+            q.append("&issueStatuses=").append(enc(st));
+        }
+
+        q.append("&additionalFields=").append(enc("_all"));
+        q.append("&timeZone=").append(enc("Asia/Novosibirsk"));
+
+        String url = "/api/issues/search?" + q.toString() + "&ps=" + validPs + "&p=" + p;
+        return new JSONObject(client.get(url));
+    }
+
 }

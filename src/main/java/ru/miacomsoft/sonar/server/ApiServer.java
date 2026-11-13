@@ -66,6 +66,8 @@ public final class ApiServer {
         // ... в методе start добавьте:
         server.createContext("/api/facets",       new FacetsHandler(state));
 
+        server.createContext("/api/export-stream",   new ExportStreamHandler(state));
+
         Path www = resolveWwwDir();
         if (www != null) {
             server.createContext("/", new StaticHandler(www));

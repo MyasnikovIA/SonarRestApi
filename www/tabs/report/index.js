@@ -1,5 +1,6 @@
 import { esc, toast, highlightCode } from '../../common.js';
 import { showExportModal } from './export-modal.js';
+import { openReportIssueModal } from './modals/issue-modal.js';
 
 const NO_TAGS_KEY = '__NO_TAGS__';
 const NO_TAGS_LABEL = '(Без тегов)';
@@ -18,8 +19,8 @@ export const report = {
         el.innerHTML = '<div class="empty">Загрузка данных...</div>';
 
         try {
-            // ФИКС: запрашиваем ВСЕ статусы (hideProcessed=false),
-            // иначе total = 56305 (только активные), а не 95167 (реальное).
+            // Запрашиваем ВСЕ статусы (hideProcessed=false),
+            // иначе total показывает только активные.
             const pBase = new URLSearchParams();
             if (ctx.state.project) pBase.set('project', ctx.state.project.trim());
             pBase.set('sev', ctx.state.sev);
@@ -29,7 +30,6 @@ export const report = {
             pBase.set('hideProcessed', 'false');
 
             const d = await ctx.api('/api/issues?' + pBase.toString());
-            // ФИКС: передаём total в pagination, чтобы «Вперёд» деактивировалась корректно
             if (ctx.updatePagination) ctx.updatePagination(d.total);
 
             if (!d.issues || d.issues.length === 0) {
@@ -46,7 +46,8 @@ export const report = {
                 pFacet.set('hideProcessed', 'false');
 
                 const rulesRes = await ctx.api('/api/facets?' + pFacet.toString() + '&facet=rules');
-                allRules = Object.entries(rulesRes.values || {}).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+                allRules = Object.entries(rulesRes.values || {})
+                    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
             } catch (e) {
                 console.warn('Не удалось загрузить фасеты правил', e);
             }
@@ -159,32 +160,32 @@ export const report = {
                 <div id="rep-list"></div>
             `;
 
-            const listEl = el.querySelector('#rep-list');
-            const statusSel = el.querySelector('#rep-status');
-            const textInput = el.querySelector('#rep-text');
-            const masterCb = el.querySelector('#rep-master-cb');
-            const exportBtn = el.querySelector('#rep-export-btn');
+            const listEl     = el.querySelector('#rep-list');
+            const statusSel  = el.querySelector('#rep-status');
+            const textInput  = el.querySelector('#rep-text');
+            const masterCb   = el.querySelector('#rep-master-cb');
+            const exportBtn  = el.querySelector('#rep-export-btn');
 
-            const tagDetails = el.querySelector('#rep-tag-details');
-            const tagSearch = el.querySelector('#rep-tag-search');
-            const tagListEl = el.querySelector('#rep-tag-list');
-            const tagClear = el.querySelector('#rep-tag-clear');
-            const tagClose = el.querySelector('#rep-tag-close');
-            const tagCount = el.querySelector('#rep-tag-count');
+            const tagDetails        = el.querySelector('#rep-tag-details');
+            const tagSearch         = el.querySelector('#rep-tag-search');
+            const tagListEl         = el.querySelector('#rep-tag-list');
+            const tagClear          = el.querySelector('#rep-tag-clear');
+            const tagClose          = el.querySelector('#rep-tag-close');
+            const tagCount          = el.querySelector('#rep-tag-count');
 
             const excludeTagDetails = el.querySelector('#rep-exclude-tag-details');
-            const excludeTagSearch = el.querySelector('#rep-exclude-tag-search');
-            const excludeTagListEl = el.querySelector('#rep-exclude-tag-list');
-            const excludeTagClear = el.querySelector('#rep-exclude-tag-clear');
-            const excludeTagClose = el.querySelector('#rep-exclude-tag-close');
-            const excludeTagCount = el.querySelector('#rep-exclude-tag-count');
+            const excludeTagSearch  = el.querySelector('#rep-exclude-tag-search');
+            const excludeTagListEl  = el.querySelector('#rep-exclude-tag-list');
+            const excludeTagClear   = el.querySelector('#rep-exclude-tag-clear');
+            const excludeTagClose   = el.querySelector('#rep-exclude-tag-close');
+            const excludeTagCount   = el.querySelector('#rep-exclude-tag-count');
 
-            const ruleDetails = el.querySelector('#rep-rule-details');
-            const ruleSearch = el.querySelector('#rep-rule-search');
-            const ruleListEl = el.querySelector('#rep-rule-list');
-            const ruleClear = el.querySelector('#rep-rule-clear');
-            const ruleClose = el.querySelector('#rep-rule-close');
-            const ruleCount = el.querySelector('#rep-rule-count');
+            const ruleDetails       = el.querySelector('#rep-rule-details');
+            const ruleSearch        = el.querySelector('#rep-rule-search');
+            const ruleListEl        = el.querySelector('#rep-rule-list');
+            const ruleClear         = el.querySelector('#rep-rule-clear');
+            const ruleClose         = el.querySelector('#rep-rule-close');
+            const ruleCount         = el.querySelector('#rep-rule-count');
 
             const renderTagListTo = (container, query, selectedSet, updateCountFn) => {
                 const q = query.toLowerCase();
@@ -245,9 +246,9 @@ export const report = {
                 });
             };
 
-            const updateTagCount = () => { tagCount.textContent = selectedTags.size; };
+            const updateTagCount        = () => { tagCount.textContent = selectedTags.size; };
             const updateExcludeTagCount = () => { excludeTagCount.textContent = excludedTags.size; };
-            const updateRuleCount = () => { ruleCount.textContent = selectedRules.size; };
+            const updateRuleCount       = () => { ruleCount.textContent = selectedRules.size; };
 
             renderTagListTo(tagListEl, tagQuery, selectedTags, updateTagCount);
             updateTagCount();
@@ -289,8 +290,7 @@ export const report = {
                 if (!d.issues) return [];
                 const q = filterText.toLowerCase();
                 let filtered = d.issues.filter(it => {
-                    // ФИКС: it.isProcessed никогда не существовало в Issue.toJson().
-                    // Используем реальное поле status (OPEN / REOPENED = не обработано).
+                    // isProcessed: OPEN/REOPENED = не обработано
                     const isProcessed = it.status && it.status !== 'OPEN' && it.status !== 'REOPENED';
                     if (statusFilter === 'PROCESSED' && !isProcessed) return false;
                     if (statusFilter === 'UNPROCESSED' && isProcessed) return false;
@@ -436,6 +436,7 @@ export const report = {
 
                 listEl.innerHTML = html;
 
+                // --- Чекбоксы строк ---
                 listEl.querySelectorAll('.rep-cb').forEach(cb => {
                     cb.addEventListener('change', (e) => {
                         if (isAllSelected) {
@@ -452,6 +453,7 @@ export const report = {
                     });
                 });
 
+                // --- Кнопка "Показать/Скрыть" сниппета ---
                 listEl.querySelectorAll('.rep-btn-toggle').forEach(btn => {
                     btn.addEventListener('click', async (e) => {
                         e.stopPropagation();
@@ -487,14 +489,40 @@ export const report = {
                     });
                 });
 
+                // --- Клик / двойной клик / правый клик по строке ---
                 listEl.querySelectorAll('.rep-row').forEach(tr => {
+                    // Одиночный клик — переключает чекбокс, но с debounce 250мс,
+                    // чтобы dblclick (открытие модалки) не привёл к двойному переключению.
+                    let clickTimeout = null;
+
                     tr.addEventListener('click', (e) => {
                         if (e.target.type === 'checkbox' || e.target.closest('.rep-btn-toggle')) return;
-                        const cb = tr.querySelector('.rep-cb');
-                        cb.checked = !cb.checked;
-                        cb.dispatchEvent(new Event('change'));
+                        if (clickTimeout) return; // второй клик из серии dblclick — игнорируем
+
+                        clickTimeout = setTimeout(() => {
+                            clickTimeout = null;
+                            const cb = tr.querySelector('.rep-cb');
+                            cb.checked = !cb.checked;
+                            cb.dispatchEvent(new Event('change'));
+                        }, 250);
                     });
 
+                    // Двойной клик — открывает модалку
+                    tr.addEventListener('dblclick', (e) => {
+                        if (e.target.type === 'checkbox' || e.target.closest('.rep-btn-toggle')) return;
+                        if (clickTimeout) { clearTimeout(clickTimeout); clickTimeout = null; }
+
+                        const key = tr.dataset.key;
+                        const issue = rawDataSafe(d).issues.find(x => x.key === key);
+                        if (!issue) return;
+
+                        openReportIssueModal(issue, ctx, () => {
+                            // Пере-рендер вкладки «Отчет» после сохранения
+                            document.querySelector('.tab[data-tab="report"]')?.click();
+                        });
+                    });
+
+                    // Правый клик — контекстное меню экспорта
                     tr.addEventListener('contextmenu', (e) => {
                         e.preventDefault();
                         if (selectedKeys.size === 0 && !isAllSelected) {
@@ -511,6 +539,9 @@ export const report = {
                     });
                 });
             };
+
+            // Вспомогательная обёртка: d - результат /api/issues, у него есть .issues
+            const rawDataSafe = (obj) => obj || { issues: [] };
 
             const startExport = async (format) => {
                 let keys = null;
@@ -548,7 +579,7 @@ export const report = {
                 const rect = exportBtn.getBoundingClientRect();
                 ctxMenu.style.display = 'block';
                 ctxMenu.style.left = (rect.left + window.scrollX) + 'px';
-                ctxMenu.style.top = (rect.bottom + window.scrollY) + 'px';
+                ctxMenu.style.top  = (rect.bottom + window.scrollY) + 'px';
             });
 
             ctxMenu.querySelector('#ctx-jira').addEventListener('click', () => { ctxMenu.style.display = 'none'; startExport('jira'); });

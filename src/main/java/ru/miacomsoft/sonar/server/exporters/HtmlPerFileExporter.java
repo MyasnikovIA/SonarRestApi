@@ -16,22 +16,10 @@ import java.util.zip.ZipOutputStream;
 
 public final class HtmlPerFileExporter {
 
-    /** Имя manifest-файла в ZIP (ведущий '_' — сортируется первым). */
     public static final String MANIFEST_NAME = "!files.csv";
 
     private HtmlPerFileExporter() {}
 
-    /**
-     * @param issueSnippets — Map issue.key → список строк фрагмента
-     *                        (формат "%4d | code", может содержать §HL_START§ / §HL_END§).
-     *                        null → без сниппетов.
-     *
-     * В архив попадают:
-     *   - per-file HTML (по одному на компонент);
-     *   - _files.txt с manifest:
-     *       строка 1: projectName
-     *       строки 2..N: "<original/file/path>;<entry_name_in_zip>"
-     */
     public static int writeZip(Path target,
                                Map<String, List<Issue>> issuesByFile,
                                Map<String, List<String>> issueSnippets,
@@ -42,7 +30,6 @@ public final class HtmlPerFileExporter {
             zos.setLevel(6);
             int written = 0;
 
-            // Manifest: первая строка — ID проекта, потом "path;entryName"
             StringBuilder manifest = new StringBuilder(1024);
             manifest.append(projectName != null ? projectName : "").append('\n');
 
@@ -58,17 +45,40 @@ public final class HtmlPerFileExporter {
                 zos.closeEntry();
                 written++;
 
-                // "<original component path>;<entry name in zip>"
-                manifest.append(fileName).append(';').append(entryName).append('\n');
+                // Третье поле — ссылка на SonarQube для этого файла:
+                //   - если есть хотя бы один issue — ссылка на ПЕРВОЕ issue
+                //     (Sonar откроет его в контексте, оттуда 1 клик до "все замечания файла");
+                //   - если issues нет — file-фильтр "все замечания этого файла".
+                String sonarLink = buildSonarLink(projectName, host, fileName, issues);
+                manifest.append(fileName).append(';')
+                        .append(entryName).append(';')
+                        .append(sonarLink).append('\n');
             }
 
-            // _files.txt — манифест
             zos.putNextEntry(new ZipEntry(MANIFEST_NAME));
             zos.write(manifest.toString().getBytes(StandardCharsets.UTF_8));
             zos.closeEntry();
 
             return written;
         }
+    }
+
+    /**
+     * Ссылка на SonarQube:
+     *   - есть issues    → ?id=<project>&open=<firstIssueKey>
+     *   - нет issues     → ?id=<project>&files=<path>
+     */
+    private static String buildSonarLink(String projectName, String host,
+                                         String fileName, List<Issue> issues) {
+        String base = "https://" + host + "/project/issues?id=" + urlEnc(projectName);
+        if (issues != null && !issues.isEmpty()) {
+            Issue first = issues.get(0);
+            if (first != null && first.key != null && !first.key.isEmpty()) {
+                return base + "&open=" + urlEnc(first.key);
+            }
+        }
+        // fallback: показать все issues этого файла
+        return base + "&files=" + urlEnc(fileName);
     }
 
     private static String makeEntryName(String component, boolean useTeams, TeamMapping mapping) {
@@ -106,6 +116,7 @@ public final class HtmlPerFileExporter {
         html.append("summary:hover{background:#ebecf0;}\n");
         html.append("pre{margin:0;padding:12px;background:#fff;overflow-x:auto;border-top:1px solid #dfe1e6;border-radius:0 0 4px 4px;font-family:monospace;font-size:13px;white-space:pre-wrap;}\n");
         html.append("mark.sonar-issue-mark{background-color:rgba(248,81,73,0.25);border-bottom:2px solid #f85149;color:inherit;padding:0 2px;border-radius:2px;}\n");
+        html.append(".line-meta{color:#8b949e;font-size:11px;margin-left:6px;}\n");
         html.append("</style>\n</head>\n<body>\n");
         html.append("<h1>Проект: ").append(escapeHtml(projectName)).append("</h1>\n");
         html.append("<h2>Файл: ").append(escapeHtml(fileName)).append("</h2>\n");
@@ -122,8 +133,15 @@ public final class HtmlPerFileExporter {
             String lastComment = getLastComment(it);
 
             html.append("<div class=\"issue\">\n");
-            html.append("<p><strong>Идентификатор ошибки:</strong> ").append(escapeHtml(it.key))
-                    .append(" (Строка: ").append(it.line).append(")</p>\n");
+
+            html.append("<p><strong>Идентификатор ошибки:</strong> ").append(escapeHtml(it.key));
+            if (it.line > 0) {
+                html.append(" (Строка: ").append(it.line).append(")");
+            } else {
+                html.append(" <span class=\"line-meta\">(issue на весь файл)</span>");
+            }
+            html.append("</p>\n");
+
             html.append("<p><strong>Ссылка:</strong> <a href=\"").append(escapeHtml(link))
                     .append("\" target=\"_blank\">").append(escapeHtml(link)).append("</a></p>\n");
             html.append("<p><strong>Правило:</strong> ")
@@ -135,7 +153,14 @@ public final class HtmlPerFileExporter {
 
             List<String> snippet = (issueSnippets != null) ? issueSnippets.get(it.key) : null;
             if (snippet != null && !snippet.isEmpty()) {
-                html.append("<details>\n<summary>Показать фрагмент кода</summary>\n<pre><code>");
+                boolean snippetIsFileHead =
+                        it.line <= 0 && (it.textRange == null || it.textRange.startLine <= 0);
+
+                html.append("<details>\n<summary>Показать фрагмент кода");
+                if (snippetIsFileHead) {
+                    html.append(" (первые ").append(snippet.size()).append(" строк файла)");
+                }
+                html.append("</summary>\n<pre><code>");
                 for (int i = 0; i < snippet.size(); i++) {
                     if (i > 0) html.append('\n');
                     html.append(renderSnippetLine(snippet.get(i)));
@@ -152,9 +177,11 @@ public final class HtmlPerFileExporter {
 
     private static String renderSnippetLine(String line) {
         if (line == null) return "";
-        return escapeHtml(line)
+        String result = escapeHtml(line)
                 .replace("§HL_START§", "<mark class=\"sonar-issue-mark\">")
                 .replace("§HL_END§", "</mark>");
+        result = result.replace("<mark class=\"sonar-issue-mark\"></mark>", "");
+        return result;
     }
 
     private static String getLastComment(Issue issue) {

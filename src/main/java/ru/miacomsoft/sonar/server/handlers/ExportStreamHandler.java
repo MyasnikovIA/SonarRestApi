@@ -15,6 +15,7 @@ import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -108,7 +109,24 @@ public class ExportStreamHandler extends BaseHandler {
         return String.format("%d мин %d с", sec / 60, sec % 60);
     }
 
-    /** Потокобезопасная отправка SSE-события. */
+    /** Имя скачиваемого файла: <projectId>_<yyyyMMdd_HHmmss>.<ext>. */
+    private static String buildDownloadName(String project, String format, long nowMs) {
+        String safeProject = (project == null ? "project" : project)
+                .replaceAll("[^A-Za-z0-9._-]", "_");
+        if (safeProject.isEmpty()) safeProject = "project";
+
+        String ext = "html";
+        if ("jira".equals(format)) ext = "txt";
+        else if ("md".equals(format)) ext = "md";
+        else if ("txt".equals(format)) ext = "txt";
+        else if ("confluence".equals(format)) ext = "html";
+        else if ("html".equals(format)) ext = "html";
+        else if ("html-files".equals(format) || "html-files-teams".equals(format)) ext = "zip";
+
+        String stamp = new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date(nowMs));
+        return safeProject + "_" + stamp + "." + ext;
+    }
+
     private void sendEvent(OutputStream os, String event, JSONObject data) {
         try {
             String msg = "event: " + event + "\ndata: " + data.toString() + "\n\n";
@@ -154,6 +172,24 @@ public class ExportStreamHandler extends BaseHandler {
         return "html-files".equals(format) || "html-files-teams".equals(format);
     }
 
+    /**
+     * Форматы, для которых нужен фрагмент кода (fetchSnippetsParallel).
+     * ZIP-форматы используют его для сборки per-file HTML,
+     * confluence — для inline-вставки в блок <details>.
+     */
+    private static boolean needsSnippets(String format) {
+        return isZipFormat(format) || "confluence".equals(format);
+    }
+
+    /**
+     * Форматы, которые собираются в "буфер", а рендерятся одним проходом после
+     * fetchSnippetsParallel. Для zip — issuesByFile (группировка по компонентам),
+     * для confluence — плоский список (порядок сохраняется).
+     */
+    private static boolean isBufferedFormat(String format) {
+        return isZipFormat(format) || "confluence".equals(format);
+    }
+
     private static boolean hasPostFilters(Set<String> selectedTags,
                                           Set<String> excludedTags,
                                           Set<String> selectedRules,
@@ -167,16 +203,16 @@ public class ExportStreamHandler extends BaseHandler {
     }
 
     /**
-     * Фаза загрузки сниппетов (только ZIP-режим). Параллельно до 8 потоков.
-     * Пополняет issueSnippets. Шлёт SSE progress каждые 25 issues.
+     * Параллельная загрузка сниппетов. Работает по произвольной Map<String, List<Issue>>.
+     * Для zip — issuesByFile; для confluence — Collections.singletonMap("all", bufferedIssues).
      */
     private void fetchSnippetsParallel(OutputStream os, long startMs, String project,
-                                       Map<String, List<Issue>> issuesByFile,
+                                       Map<String, List<Issue>> source,
                                        Map<String, List<String>> issueSnippets,
                                        int snippetCurrent, int snippetTotal) {
-        if (issuesByFile == null || issuesByFile.isEmpty()) return;
+        if (source == null || source.isEmpty()) return;
         int totalForSnippets = 0;
-        for (List<Issue> lst : issuesByFile.values()) totalForSnippets += lst.size();
+        for (List<Issue> lst : source.values()) totalForSnippets += lst.size();
         if (totalForSnippets == 0) return;
 
         final int totalSnip = totalForSnippets;
@@ -191,7 +227,7 @@ public class ExportStreamHandler extends BaseHandler {
         AtomicInteger doneCount = new AtomicInteger(0);
         List<Future<?>> futures = new ArrayList<>();
 
-        for (List<Issue> lst : issuesByFile.values()) {
+        for (List<Issue> lst : source.values()) {
             for (Issue it : lst) {
                 final Issue issue = it;
                 futures.add(pool.submit(() -> {
@@ -220,18 +256,13 @@ public class ExportStreamHandler extends BaseHandler {
                 + "/" + totalSnip + " за " + formatDuration(phaseMs));
     }
 
-    private static void appendIssue(boolean zipMode,
-                                    StringBuilder reportContent,
-                                    Map<String, List<Issue>> issuesByFile,
-                                    String format, Issue it, String project, String host) {
-        if (zipMode) {
-            String comp = it.component != null ? it.component : "(unknown)";
-            issuesByFile.computeIfAbsent(comp, k -> new ArrayList<>()).add(it);
-        } else if ("jira".equals(format)) reportContent.append(JiraExporter.exportSingle(it, project, host));
+    /** Inline-рендер для форматов без буферизации (jira/md/txt/html). */
+    private static void appendIssueInline(StringBuilder reportContent, String format,
+                                          Issue it, String project, String host) {
+        if ("jira".equals(format)) reportContent.append(JiraExporter.exportSingle(it, project, host));
         else if ("md".equals(format)) reportContent.append(MdExporter.exportSingle(it, project, host));
         else if ("txt".equals(format)) reportContent.append(TxtExporter.exportSingle(it, project, host));
         else if ("html".equals(format)) reportContent.append(HtmlExporter.exportSingle(it, project, host));
-        else if ("confluence".equals(format)) reportContent.append(ConfluenceExporter.exportSingle(it, project, host));
     }
 
     private static boolean shouldSkip(Issue it,
@@ -276,6 +307,24 @@ public class ExportStreamHandler extends BaseHandler {
         return false;
     }
 
+    /**
+     * Шапка фрагмента для confluence. Добавляет <style> с правилами подсветки,
+     * чтобы <mark class="sonar-issue-mark"> рендерился одинаково при вставке
+     * в Confluence и при открытии как standalone HTML.
+     */
+    private static void appendConfluenceHeader(StringBuilder reportContent, String project) {
+        reportContent.append("<style>")
+                .append("mark.sonar-issue-mark{background-color:rgba(248,81,73,0.25);")
+                .append("border-bottom:2px solid #f85149;padding:0 2px;border-radius:2px;}")
+                .append("details{margin-top:12px;border:1px solid #dfe1e6;border-radius:4px;background:#f4f5f7;}")
+                .append("summary{cursor:pointer;padding:8px 12px;font-weight:600;color:#42526e;user-select:none;}")
+                .append("summary:hover{background:#ebecf0;}")
+                .append("pre{margin:0;padding:12px;background:#fff;overflow-x:auto;")
+                .append("border-top:1px solid #dfe1e6;font-family:monospace;font-size:13px;white-space:pre-wrap;}")
+                .append("</style>\n");
+        reportContent.append("<h2>Проект: ").append(project).append("</h2>\n");
+    }
+
     // =========================================================
     // runExportByKeys
     // =========================================================
@@ -292,11 +341,15 @@ public class ExportStreamHandler extends BaseHandler {
 
         int total = uniqueKeys.size();
         boolean zipMode = isZipFormat(format);
+        boolean isConfluence = "confluence".equals(format);
+        boolean snippetsNeeded = needsSnippets(format);
+
         sendProgress(os, startMs, "start", 0, total, "Начинаем сбор по " + total + " ключам…");
 
         StringBuilder reportContent = new StringBuilder();
         Map<String, List<Issue>> issuesByFile = zipMode ? new TreeMap<>() : null;
-        Map<String, List<String>> issueSnippets = zipMode ? new HashMap<>() : null;
+        List<Issue> bufferedIssues = isConfluence ? new ArrayList<>() : null;
+        Map<String, List<String>> issueSnippets = snippetsNeeded ? new HashMap<>() : null;
         int loadedCount = 0;
         Set<String> seenKeys = new HashSet<>();
 
@@ -307,8 +360,8 @@ public class ExportStreamHandler extends BaseHandler {
             else if ("html".equals(format)) {
                 reportContent.append("<!DOCTYPE html><html><head><meta charset='utf-8'></head><body>\n");
                 reportContent.append("<h1>Проект: ").append(project).append("</h1>\n");
-            } else if ("confluence".equals(format)) {
-                reportContent.append("<h2>Проект: ").append(project).append("</h2>\n");
+            } else if (isConfluence) {
+                appendConfluenceHeader(reportContent, project);
             }
         }
 
@@ -323,7 +376,15 @@ public class ExportStreamHandler extends BaseHandler {
                     for (int j = 0; j < arr.length(); j++) {
                         Issue it = Issue.from(arr.getJSONObject(j), project);
                         if (!seenKeys.add(it.key)) continue;
-                        appendIssue(zipMode, reportContent, issuesByFile, format, it, project, host);
+
+                        if (zipMode) {
+                            String comp = it.component != null ? it.component : "(unknown)";
+                            issuesByFile.computeIfAbsent(comp, k -> new ArrayList<>()).add(it);
+                        } else if (isConfluence) {
+                            bufferedIssues.add(it);
+                        } else {
+                            appendIssueInline(reportContent, format, it, project, host);
+                        }
                         loadedCount++;
                     }
                 }
@@ -334,9 +395,18 @@ public class ExportStreamHandler extends BaseHandler {
                     "Пакет " + (i / batchSize + 1) + " из " + ((uniqueKeys.size() + batchSize - 1) / batchSize));
         }
 
-        // ZIP: фаза сниппетов
-        if (zipMode) {
-            fetchSnippetsParallel(os, startMs, project, issuesByFile, issueSnippets, loadedCount, total);
+        if (snippetsNeeded) {
+            Map<String, List<Issue>> source = zipMode
+                    ? issuesByFile
+                    : Collections.singletonMap("all", bufferedIssues);
+            fetchSnippetsParallel(os, startMs, project, source, issueSnippets, loadedCount, total);
+        }
+
+        if (isConfluence) {
+            for (Issue it : bufferedIssues) {
+                reportContent.append(ConfluenceExporter.exportSingle(
+                        it, project, host, issueSnippets.get(it.key)));
+            }
         }
 
         long totalMs = System.currentTimeMillis() - startMs;
@@ -366,8 +436,12 @@ public class ExportStreamHandler extends BaseHandler {
         sendProgress(os, startMs, "done", loadedCount, loadedCount,
                 "Готово: " + loadedCount + " issues");
 
+        String downloadName = buildDownloadName(project, format, System.currentTimeMillis());
+        System.out.println("[ExportStream] Имя скачиваемого файла: " + downloadName);
+
         sendEvent(os, "complete", new JSONObject()
                 .put("file", tempFile.toAbsolutePath().toString())
+                .put("downloadName", downloadName)
                 .put("total", loadedCount)
                 .put("expectedTotal", total)
                 .put("elapsedMs", totalMs)
@@ -389,6 +463,8 @@ public class ExportStreamHandler extends BaseHandler {
 
         String statuses = hideProcessed ? SonarIssuesApi.ACTIVE_STATUSES : null;
         boolean zipMode = isZipFormat(format);
+        boolean isConfluence = "confluence".equals(format);
+        boolean snippetsNeeded = needsSnippets(format);
 
         System.out.println("[ExportStream] Фильтры: sev=" + sev + ", qual=" + qual
                 + ", rule=" + (rule == null ? "нет" : rule)
@@ -396,7 +472,8 @@ public class ExportStreamHandler extends BaseHandler {
                 + ", tags=" + tagsParam + ", excludedTags=" + excludedTagsParam
                 + ", selectedRules=" + selectedRulesParam
                 + ", filterText=" + filterText + ", statusFilter=" + statusFilter
-                + (zipMode ? " [ZIP MODE]" : ""));
+                + (zipMode ? " [ZIP MODE]" : "")
+                + (isConfluence ? " [CONFLUENCE MODE]" : ""));
 
         sendProgress(os, startMs, "count", 0, 0, "Подсчет общего количества замечаний…");
 
@@ -415,7 +492,8 @@ public class ExportStreamHandler extends BaseHandler {
 
         StringBuilder reportContent = new StringBuilder();
         Map<String, List<Issue>> issuesByFile = zipMode ? new TreeMap<>() : null;
-        Map<String, List<String>> issueSnippets = zipMode ? new HashMap<>() : null;
+        List<Issue> bufferedIssues = isConfluence ? new ArrayList<>() : null;
+        Map<String, List<String>> issueSnippets = snippetsNeeded ? new HashMap<>() : null;
         int loadedCount = 0;
         Set<String> seenKeys = new HashSet<>();
 
@@ -426,8 +504,8 @@ public class ExportStreamHandler extends BaseHandler {
             else if ("html".equals(format)) {
                 reportContent.append("<!DOCTYPE html><html><head><meta charset='utf-8'></head><body>\n");
                 reportContent.append("<h1>Проект: ").append(project).append("</h1>\n");
-            } else if ("confluence".equals(format)) {
-                reportContent.append("<h2>Проект: ").append(project).append("</h2>\n");
+            } else if (isConfluence) {
+                appendConfluenceHeader(reportContent, project);
             }
         }
 
@@ -502,7 +580,15 @@ public class ExportStreamHandler extends BaseHandler {
                             Issue it = Issue.from(arr.getJSONObject(i), project);
                             if (shouldSkip(it, selectedTags, excludedTags, selectedRules, qText, statusFilter)) continue;
                             if (!seenKeys.add(it.key)) continue;
-                            appendIssue(zipMode, reportContent, issuesByFile, format, it, project, host);
+
+                            if (zipMode) {
+                                String comp = it.component != null ? it.component : "(unknown)";
+                                issuesByFile.computeIfAbsent(comp, k -> new ArrayList<>()).add(it);
+                            } else if (isConfluence) {
+                                bufferedIssues.add(it);
+                            } else {
+                                appendIssueInline(reportContent, format, it, project, host);
+                            }
                             loadedCount++;
                             ruleLoaded++;
                         }
@@ -587,7 +673,15 @@ public class ExportStreamHandler extends BaseHandler {
                                 Issue it = Issue.from(arr.getJSONObject(i), project);
                                 if (shouldSkip(it, selectedTags, excludedTags, selectedRules, qText, statusFilter)) continue;
                                 if (!seenKeys.add(it.key)) continue;
-                                appendIssue(zipMode, reportContent, issuesByFile, format, it, project, host);
+
+                                if (zipMode) {
+                                    String comp = it.component != null ? it.component : "(unknown)";
+                                    issuesByFile.computeIfAbsent(comp, k -> new ArrayList<>()).add(it);
+                                } else if (isConfluence) {
+                                    bufferedIssues.add(it);
+                                } else {
+                                    appendIssueInline(reportContent, format, it, project, host);
+                                }
                                 loadedCount++;
                                 ruleLoaded++;
                             }
@@ -619,9 +713,18 @@ public class ExportStreamHandler extends BaseHandler {
                     + " issues за " + formatDuration(ruleMs));
         }
 
-        // ZIP: фаза сниппетов
-        if (zipMode) {
-            fetchSnippetsParallel(os, startMs, project, issuesByFile, issueSnippets, loadedCount, total);
+        if (snippetsNeeded) {
+            Map<String, List<Issue>> source = zipMode
+                    ? issuesByFile
+                    : Collections.singletonMap("all", bufferedIssues);
+            fetchSnippetsParallel(os, startMs, project, source, issueSnippets, loadedCount, total);
+        }
+
+        if (isConfluence) {
+            for (Issue it : bufferedIssues) {
+                reportContent.append(ConfluenceExporter.exportSingle(
+                        it, project, host, issueSnippets.get(it.key)));
+            }
         }
 
         long totalMs = System.currentTimeMillis() - startMs;
@@ -668,8 +771,12 @@ public class ExportStreamHandler extends BaseHandler {
                         ? " (отфильтровано " + (total - loadedCount) + " post-фильтрами)"
                         : ""));
 
+        String downloadName = buildDownloadName(project, format, System.currentTimeMillis());
+        System.out.println("[ExportStream] Имя скачиваемого файла: " + downloadName);
+
         sendEvent(os, "complete", new JSONObject()
                 .put("file", tempFile.toAbsolutePath().toString())
+                .put("downloadName", downloadName)
                 .put("total", loadedCount)
                 .put("expectedTotal", total)
                 .put("elapsedMs", totalMs)

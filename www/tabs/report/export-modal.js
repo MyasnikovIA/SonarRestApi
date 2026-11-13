@@ -1,11 +1,48 @@
 import { toast } from '../../common.js';
 
+/** Маппинг format → расширение. */
+function extForFormat(formatType) {
+    switch (formatType) {
+        case 'html-files':
+        case 'html-files-teams': return 'zip';
+        case 'md':               return 'md';
+        case 'jira':
+        case 'txt':              return 'txt';
+        case 'html':
+        case 'confluence':       return 'html';
+        default:                 return 'dat';
+    }
+}
+
+/** yyyyMMdd_HHmmss — как на сервере. */
+function timestampNow() {
+    const n = new Date();
+    const pad = (x) => String(x).padStart(2, '0');
+    return `${n.getFullYear()}${pad(n.getMonth() + 1)}${pad(n.getDate())}`
+         + `_${pad(n.getHours())}${pad(n.getMinutes())}${pad(n.getSeconds())}`;
+}
+
 /**
  * Скачивает файл по URL через fetch+blob.
- * Устойчиво к mixed-content и к cross-origin <a download>.
+ * downloadName (опц.) — имя, которое увидит пользователь.
+ * Если сервер его не прислал — строим локально из projectName + formatType + timestamp.
  */
-async function triggerDownload(filePath) {
-    const downloadUrl = '/api/export-download?file=' + encodeURIComponent(filePath);
+async function triggerDownload(filePath, downloadName, projectName, formatType) {
+    if (!downloadName) {
+        const safeProject = String(projectName || 'report')
+            .replace(/[^A-Za-z0-9._-]/g, '_') || 'report';
+        downloadName = `${safeProject}_${timestampNow()}.${extForFormat(formatType)}`;
+        console.warn('[SSE] downloadName не пришёл в complete-событии — сгенерирован локально:',
+            downloadName);
+    }
+
+    const qp = new URLSearchParams();
+    qp.set('file', filePath);
+    qp.set('name', downloadName);
+
+    const downloadUrl = '/api/export-download?' + qp.toString();
+    console.log(`[SSE] Скачивание: url=${downloadUrl}`);
+
     try {
         const response = await fetch(downloadUrl, { method: 'GET' });
         if (!response.ok) {
@@ -15,12 +52,17 @@ async function triggerDownload(filePath) {
         const blob = await response.blob();
         const blobUrl = URL.createObjectURL(blob);
 
-        let filename = (filePath.split(/[\\/]/).pop() || 'report');
+        // Итоговое имя: downloadName (уже построен выше), либо из Content-Disposition
+        let filename = downloadName;
         const cd = response.headers.get('Content-Disposition');
         if (cd) {
-            const m = cd.match(/filename="?([^";]+)"?/);
-            if (m) filename = m[1];
+            const mStar = cd.match(/filename\*=UTF-8''([^;]+)/i);
+            if (mStar) {
+                try { filename = decodeURIComponent(mStar[1]); } catch (_) {}
+            }
         }
+
+        console.log(`[SSE] Сохраняем как: "${filename}"`);
 
         const a = document.createElement('a');
         a.href = blobUrl;
@@ -173,10 +215,14 @@ export async function showExportModal(keys, formatType, ctx, projectName, filter
                     const d = JSON.parse(data);
                     stopTimer();
 
+                    // ДИАГНОСТИКА: видно, что реально прислал сервер
+                    console.log('[SSE] complete event:', JSON.stringify(d));
+
                     const elapsedMs = performance.now() - startMs;
                     console.log(`[SSE] ✅ ГОТОВО за ${(elapsedMs / 1000).toFixed(2)} с`
                         + ` | сервер: ${d.elapsedText || '—'}`
                         + ` | файл: ${d.file}`
+                        + ` | downloadName: ${d.downloadName || '(нет)'}`
                         + ` | issues: ${d.total}`);
 
                     statusEl.textContent = `Готово за ${(elapsedMs / 1000).toFixed(2)} с — скачивание…`;
@@ -184,7 +230,12 @@ export async function showExportModal(keys, formatType, ctx, projectName, filter
                     stageEl.textContent = 'Завершено';
                     fillEl.style.width = '100%';
 
-                    await triggerDownload(d.file);
+                    await triggerDownload(
+                        d.file,
+                        d.downloadName,
+                        ctx.state.project || projectName,
+                        formatType
+                    );
 
                     toast(`Отчет готов за ${(elapsedMs / 1000).toFixed(2)} с — скачивание...`);
                     setTimeout(() => close(), 2000);

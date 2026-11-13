@@ -18,14 +18,18 @@ export const report = {
         el.innerHTML = '<div class="empty">Загрузка данных...</div>';
 
         try {
+            // ФИКС: запрашиваем ВСЕ статусы (hideProcessed=false),
+            // иначе total = 56305 (только активные), а не 95167 (реальное).
             const pBase = new URLSearchParams();
             if (ctx.state.project) pBase.set('project', ctx.state.project.trim());
             pBase.set('sev', ctx.state.sev);
             pBase.set('qual', ctx.state.qual);
             pBase.set('p', ctx.state.page || 1);
             pBase.set('ps', 50);
+            pBase.set('hideProcessed', 'false');
 
             const d = await ctx.api('/api/issues?' + pBase.toString());
+            // ФИКС: передаём total в pagination, чтобы «Вперёд» деактивировалась корректно
             if (ctx.updatePagination) ctx.updatePagination(d.total);
 
             if (!d.issues || d.issues.length === 0) {
@@ -39,7 +43,7 @@ export const report = {
                 if (ctx.state.project) pFacet.set('project', ctx.state.project.trim());
                 pFacet.set('sev', ctx.state.sev);
                 pFacet.set('qual', ctx.state.qual);
-                pFacet.set('hideProcessed', 'true');
+                pFacet.set('hideProcessed', 'false');
 
                 const rulesRes = await ctx.api('/api/facets?' + pFacet.toString() + '&facet=rules');
                 allRules = Object.entries(rulesRes.values || {}).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
@@ -285,8 +289,11 @@ export const report = {
                 if (!d.issues) return [];
                 const q = filterText.toLowerCase();
                 let filtered = d.issues.filter(it => {
-                    if (statusFilter === 'PROCESSED' && !it.isProcessed) return false;
-                    if (statusFilter === 'UNPROCESSED' && it.isProcessed) return false;
+                    // ФИКС: it.isProcessed никогда не существовало в Issue.toJson().
+                    // Используем реальное поле status (OPEN / REOPENED = не обработано).
+                    const isProcessed = it.status && it.status !== 'OPEN' && it.status !== 'REOPENED';
+                    if (statusFilter === 'PROCESSED' && !isProcessed) return false;
+                    if (statusFilter === 'UNPROCESSED' && isProcessed) return false;
 
                     if (selectedTags.size > 0) {
                         const itTags = it.tags || [];
@@ -523,7 +530,6 @@ export const report = {
                     keys = list;
                 }
 
-                // Всегда передаем ВСЕ локальные фильтры
                 const filters = {
                     sev: ctx.state.sev,
                     qual: ctx.state.qual,

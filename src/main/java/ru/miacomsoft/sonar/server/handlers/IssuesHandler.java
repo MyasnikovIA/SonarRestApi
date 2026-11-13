@@ -27,14 +27,20 @@ public class IssuesHandler extends BaseHandler {
         int page = paramInt(q, "p", 1);
         int ps = paramInt(q, "ps", 50);
 
+        // hideProcessed: true — только OPEN/CONFIRMED/REOPENED
+        //               false — все статусы (включая ACCEPTED/RESOLVED/WONTFIX/...)
+        // По умолчанию false, чтобы вкладка «Отчет» с фильтром statusFilter=ALL
+        // видела реальное общее количество (а не только активные).
+        boolean hideProcessed = paramBool(q, "hideProcessed", false);
+        String statuses = hideProcessed ? SonarIssuesApi.ACTIVE_STATUSES : null;
+
         SonarIssuesApi api = newApi(project);
 
-        // Если фронтенд запрашивает сразу всё (ps >= 10000) или мы хотим выгрузить всё разом
+        // Фронт запрашивает сразу ВСЁ (ps >= 10000)
         if (ps >= 10000) {
-            System.out.println("[IssuesHandler] Запрос на выгрузку ВСЕХ замечаний. Запускаем сбор...");
+            System.out.println("[IssuesHandler] Запрос на выгрузку ВСЕХ замечаний (hideProcessed=" + hideProcessed + "). Запускаем сбор...");
 
-            // Используем метод fetchAll, который умеет обходить лимит 10000
-            List<Issue> allIssues = api.fetchAll(sev, qual);
+            List<Issue> allIssues = api.fetchAllByStatuses(statuses, sev, qual);
 
             System.out.println("[IssuesHandler] Сбор завершен. Всего собрано: " + allIssues.size());
 
@@ -50,8 +56,8 @@ public class IssuesHandler extends BaseHandler {
         }
 
         // Обычный прокси-запрос для постраничного вывода
-        int validPs = Math.min(ps, 500);
-        JSONObject rawResponse = api.fetchPageRaw(SonarIssuesApi.ACTIVE_STATUSES, sev, qual, rule, page, validPs);
+        int validPs = Math.min(ps, SonarIssuesApi.FETCH_PAGE_SIZE);
+        JSONObject rawResponse = api.fetchPageRaw(statuses, sev, qual, rule, page, validPs);
 
         putSource(rawResponse, project);
         sendJson(ex, 200, rawResponse);

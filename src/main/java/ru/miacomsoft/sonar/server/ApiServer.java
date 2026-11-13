@@ -52,7 +52,6 @@ public final class ApiServer {
         server.createContext("/api/changelog", new ChangelogHandler(state));
         server.createContext("/api/projects",  new ProjectsHandler(state));
 
-        // НОВЫЙ ЭНДПОИНТ
         server.createContext("/api/team_mapping", new TeamMappingHandler(state));
 
         server.createContext("/api/tags",      new TagsHandler(state));
@@ -63,10 +62,11 @@ public final class ApiServer {
 
         server.createContext("/api/prompt/build", new BuildPromptHandler(state, template));
         server.createContext("/api/prompt/list",  new ListPromptsHandler(state, template));
-        // ... в методе start добавьте:
         server.createContext("/api/facets",       new FacetsHandler(state));
 
         server.createContext("/api/export-stream",   new ExportStreamHandler(state));
+        // ✅ ДОБАВЛЕНО: скачивание сформированного файла
+        server.createContext("/api/export-download", new ExportDownloadHandler(state));
 
         Path www = resolveWwwDir();
         if (www != null) {
@@ -86,6 +86,8 @@ public final class ApiServer {
         System.out.println(" Endpoints:");
         System.out.println("   GET  /api/prompt/build?name=<n>&project=<p>&issueKey=<k>");
         System.out.println("   GET  /api/prompt/list");
+        System.out.println("   GET  /api/export-stream?format=<f>&project=<p>...");
+        System.out.println("   GET  /api/export-download?file=<path>");
         System.out.println("===================================================");
     }
 

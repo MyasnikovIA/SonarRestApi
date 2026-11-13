@@ -34,11 +34,13 @@ public class ExportDownloadHandler extends BaseHandler {
         byte[] bytes = Files.readAllBytes(file);
 
         String fileName = file.getFileName().toString();
-        String ext = fileName.substring(fileName.lastIndexOf('.') + 1);
+        int dot = fileName.lastIndexOf('.');
+        String ext = dot >= 0 ? fileName.substring(dot + 1).toLowerCase() : "";
         String mime = "application/octet-stream";
-        if ("txt".equals(ext)) mime = "text/plain";
-        if ("md".equals(ext)) mime = "text/markdown";
+        if ("txt".equals(ext))  mime = "text/plain";
+        if ("md".equals(ext))   mime = "text/markdown";
         if ("html".equals(ext)) mime = "text/html";
+        if ("zip".equals(ext))  mime = "application/zip";
 
         ex.getResponseHeaders().set("Content-Type", mime + "; charset=utf-8");
         ex.getResponseHeaders().set("Content-Disposition", "attachment; filename=\"" + fileName + "\"");
@@ -48,11 +50,14 @@ public class ExportDownloadHandler extends BaseHandler {
             os.write(bytes);
         }
 
+        // НЕ удаляем сразу — даём возможность перекачать файл.
+        // Реальная очистка произойдёт при остановке JVM.
         try {
-            Files.delete(file);
-            System.out.println("[ExportDownload] Временный файл удален: " + file.toAbsolutePath());
+            file.toFile().deleteOnExit();
+            System.out.println("[ExportDownload] Отдан файл: " + file.toAbsolutePath()
+                    + " (" + bytes.length + " байт, удалится при остановке JVM)");
         } catch (Exception e) {
-            System.err.println("[ExportDownload] Ошибка удаления файла: " + e.getMessage());
+            System.err.println("[ExportDownload] Не удалось запланировать удаление: " + e.getMessage());
         }
     }
 }

@@ -3,7 +3,6 @@ package ru.miacomsoft.sonar.server;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import org.json.JSONObject;
-import ru.miacomsoft.sonar.Issue;
 import ru.miacomsoft.sonar.SonarBulkApi;
 import ru.miacomsoft.sonar.SonarIssuesApi;
 
@@ -11,7 +10,9 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
-import java.util.*;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 public abstract class BaseHandler implements HttpHandler {
 
@@ -65,7 +66,7 @@ public abstract class BaseHandler implements HttpHandler {
                     "Проект не задан. Укажите ?project=KEY, " +
                             "либо задайте SONAR_PROJECT / --project=KEY при старте сервера.");
         }
-        return p;
+        return p.trim();
     }
 
     // ================= snapshot-aware helpers =================
@@ -76,26 +77,6 @@ public abstract class BaseHandler implements HttpHandler {
 
     protected SonarBulkApi newBulk() {
         return state.newBulk();
-    }
-
-    protected Snapshot snapshotFor(String projectKey) {
-        Snapshot s = state.getSnapshot();
-        if (s != null && s.projectKey.equals(projectKey)) return s;
-        return null;
-    }
-
-    protected Map<String, Integer> fetchFacet(String project, String sev, String qual, String facet)
-            throws Exception {
-        Snapshot s = snapshotFor(project);
-        if (s != null) {
-            switch (facet) {
-                case "rules":      return s.facetRules(sev, qual);
-                case "files":      return s.facetFiles(sev, qual);
-                case "severities": return s.facetSeverities(sev, qual);
-                default:           break;
-            }
-        }
-        return newApi(project).facet(sev, qual, facet);
     }
 
     protected List<String> fetchSnippetCached(String project, String issueKey) throws Exception {
@@ -181,60 +162,9 @@ public abstract class BaseHandler implements HttpHandler {
         ex.getResponseHeaders().set("Access-Control-Max-Age", "86400");
     }
 
-    protected boolean isHotspotQuery(String qual) {
-        return "SECURITY_HOTSPOT".equalsIgnoreCase(qual);
-    }
-
-    protected List<Issue> fetchIssues(String project, String sev, String qual) throws Exception {
-        if (isHotspotQuery(qual)) {
-            return newApi(project).fetchHotspots(sev);
-        }
-        Snapshot s = snapshotFor(project);
-        if (s != null) {
-            List<Issue> issues = s.filter(sev, qual);
-            // ИСПРАВЛЕНИЕ: Создаем новый ArrayList, так как Snapshot.filter() может вернуть unmodifiableList
-            List<Issue> filtered = new ArrayList<>();
-            for (Issue it : issues) {
-                if ("OPEN".equals(it.status) || "REOPENED".equals(it.status)) {
-                    filtered.add(it);
-                }
-            }
-            return filtered;
-        }
-        return newApi(project).fetchAll(sev, qual);
-    }
-
-    protected Map<String, List<Issue>> fetchIssuesByFile(String project, String sev, String qual)
-            throws Exception {
-        if (isHotspotQuery(qual)) {
-            List<Issue> all = newApi(project).fetchHotspots(sev);
-            Map<String, List<Issue>> byFile = new TreeMap<>();
-            for (Issue it : all) {
-                byFile.computeIfAbsent(it.component, k -> new ArrayList<>()).add(it);
-            }
-            for (List<Issue> list : byFile.values()) {
-                list.sort(Comparator.comparingInt(i -> i.line));
-            }
-            return byFile;
-        }
-        Snapshot s = snapshotFor(project);
-        if (s != null) {
-            Map<String, List<Issue>> byFile = s.filterByFile(sev, qual);
-            // ИСПРАВЛЕНИЕ: Создаем новый TreeMap и новые списки, чтобы не модифицировать unmodifiableList
-            Map<String, List<Issue>> res = new TreeMap<>();
-            for (Map.Entry<String, List<Issue>> entry : byFile.entrySet()) {
-                List<Issue> filtered = new ArrayList<>();
-                for (Issue it : entry.getValue()) {
-                    if ("OPEN".equals(it.status) || "REOPENED".equals(it.status)) {
-                        filtered.add(it);
-                    }
-                }
-                if (!filtered.isEmpty()) {
-                    res.put(entry.getKey(), filtered);
-                }
-            }
-            return res;
-        }
-        return newApi(project).issuesByFile(sev, qual);
+    protected Snapshot snapshotFor(String projectKey) {
+        Snapshot s = state.getSnapshot();
+        if (s != null && s.projectKey.equals(projectKey)) return s;
+        return null;
     }
 }

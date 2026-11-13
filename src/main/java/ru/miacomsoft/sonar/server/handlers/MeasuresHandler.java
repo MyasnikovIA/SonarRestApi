@@ -35,6 +35,9 @@ public class MeasuresHandler extends BaseHandler {
         Map<String, String> q = parseQuery(ex);
         String metricKeys = param(q, "metricKeys", null);
 
+        // Убеждаемся, что project - это одна строка (без лишних пробелов)
+        project = project.trim();
+
         SonarMeasuresApi api = (metricKeys == null)
                 ? new SonarMeasuresApi(state.getClient())
                 : new SonarMeasuresApi(state.getClient(), metricKeys);

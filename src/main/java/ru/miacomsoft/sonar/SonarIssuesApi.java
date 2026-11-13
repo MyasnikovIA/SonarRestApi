@@ -16,10 +16,7 @@ public class SonarIssuesApi {
     private final Map<String, String> ruleNameCache;
     private final Map<String, List<String>> snippetCache;
 
-    // Специальное исключение для обработки лимита в 10000 на уровне пачки файлов
-    public static class BatchLimitExceededException extends RuntimeException {
-        public BatchLimitExceededException(String msg) { super(msg); }
-    }
+    private static boolean reopenedSupported = true;
 
     public SonarIssuesApi(SonarClient client, String projectKey) {
         this(client, projectKey, new HashMap<>(), new HashMap<>());
@@ -39,8 +36,13 @@ public class SonarIssuesApi {
         return URLEncoder.encode(s, StandardCharsets.UTF_8);
     }
 
-    private String buildQuery(String impactSeverity, String quality) {
-        return buildQueryWithStatuses("OPEN,REOPENED", impactSeverity, quality);
+    private String sanitizeStatuses(String statuses) {
+        if (statuses == null || statuses.isEmpty()) return "OPEN";
+        if (!reopenedSupported && statuses.contains("REOPENED")) {
+            String st = statuses.replace("REOPENED", "").replace(",,", ",").replaceAll("^,|,$", "");
+            return st.isEmpty() ? "OPEN" : st;
+        }
+        return statuses;
     }
 
     private String buildQueryWithStatuses(String statuses, String impactSeverity, String quality) {
@@ -53,11 +55,50 @@ public class SonarIssuesApi {
         if (quality != null && !"ALL".equals(quality)) {
             q.append("&impactSoftwareQualities=").append(enc(quality));
         }
-        String st = (statuses == null || statuses.isEmpty()) ? "OPEN,REOPENED" : statuses;
+
+        String st = sanitizeStatuses(statuses);
         q.append("&issueStatuses=").append(enc(st));
         q.append("&additionalFields=").append(enc("_all"));
         q.append("&timeZone=").append(enc("Asia/Novosibirsk"));
         return q.toString();
+    }
+
+    /**
+     * Возвращает одну страницу замечаний в виде объектов Issue.
+     */
+    public List<Issue> fetchOpenPage(String impactSeverity, String quality, int page, int pageSize) throws Exception {
+        JSONObject raw = fetchPageRaw("OPEN,REOPENED", impactSeverity, quality, page, pageSize);
+        JSONArray arr = raw.optJSONArray("issues");
+        List<Issue> out = new ArrayList<>();
+        if (arr != null) {
+            for (int i = 0; i < arr.length(); i++) {
+                out.add(Issue.from(arr.getJSONObject(i), projectKey));
+            }
+        }
+        return out;
+    }
+
+    public JSONObject fetchPageRaw(String statuses, String impactSeverity, String quality, int p, int ps) throws Exception {
+        int validPs = Math.min(ps, 500);
+        String actualStatuses = sanitizeStatuses(statuses);
+
+        String url = "/api/issues/search?"
+                + buildQueryWithStatuses(actualStatuses, impactSeverity, quality)
+                + "&ps=" + validPs + "&p=" + p;
+        try {
+            return new JSONObject(client.get(url));
+        } catch (RuntimeException e) {
+            String msg = e.getMessage();
+            if (msg != null && (msg.contains("REOPENED") || msg.contains("issueStatuses"))) {
+                reopenedSupported = false;
+                System.err.println("[SonarIssuesApi] Сервер не поддерживает статус REOPENED. Переключаемся на OPEN.");
+                String fallbackUrl = "/api/issues/search?"
+                        + buildQueryWithStatuses("OPEN", impactSeverity, quality)
+                        + "&ps=" + validPs + "&p=" + p;
+                return new JSONObject(client.get(fallbackUrl));
+            }
+            throw e;
+        }
     }
 
     public int count(String impactSeverity, String quality) throws Exception {
@@ -67,9 +108,6 @@ public class SonarIssuesApi {
             String msg = e.getMessage();
             if (msg != null && (msg.contains("REOPENED") || msg.contains("issueStatuses"))) {
                 return countWithStatuses("OPEN", impactSeverity, quality);
-            }
-            if (msg != null && msg.contains("Can return only the first 10000 results")) {
-                return fetchAll(impactSeverity, quality).size();
             }
             throw e;
         }
@@ -102,7 +140,6 @@ public class SonarIssuesApi {
                 return fetchAllByParts(statuses, impactSeverity, quality);
             }
             if (msg != null && (msg.contains("REOPENED") || msg.contains("issueStatuses"))) {
-                // ИСПРАВЛЕНИЕ: Рекурсивный вызов, чтобы обработать лимит 10000 для OPEN
                 return fetchAllByStatuses("OPEN", impactSeverity, quality);
             }
             throw e;
@@ -147,10 +184,8 @@ public class SonarIssuesApi {
 
         for (String s : sevs) {
             if (!sevAll && !impactSeverity.equalsIgnoreCase(s)) continue;
-
             for (String q : quals) {
                 if (!qualAll && !quality.equalsIgnoreCase(q)) continue;
-
                 try {
                     out.addAll(fetchAllByStatusesDirect(statuses, s, q));
                 } catch (RuntimeException e) {
@@ -158,6 +193,8 @@ public class SonarIssuesApi {
                     if (msg != null && msg.contains("Can return only the first 10000 results")) {
                         System.err.println("[SonarIssuesApi] Лимит 10000 для " + s + "/" + q + ". Разбиваем по файлам...");
                         out.addAll(fetchAllByFiles(statuses, s, q));
+                    } else if (msg != null && (msg.contains("REOPENED") || msg.contains("issueStatuses"))) {
+                        out.addAll(fetchAllByStatusesDirect("OPEN", s, q));
                     } else {
                         throw e;
                     }
@@ -167,8 +204,11 @@ public class SonarIssuesApi {
         return out;
     }
 
-    private List<Issue> fetchAllByFiles(String statuses, String impactSeverity, String quality)
-            throws Exception {
+    public static class BatchLimitExceededException extends RuntimeException {
+        public BatchLimitExceededException(String msg) { super(msg); }
+    }
+
+    private List<Issue> fetchAllByFiles(String statuses, String impactSeverity, String quality) throws Exception {
         List<String> files = fetchProjectFiles();
         List<Issue> out = new ArrayList<>();
         int batchSize = 20;
@@ -180,7 +220,6 @@ public class SonarIssuesApi {
             try {
                 out.addAll(fetchAllByComponents(statuses, impactSeverity, quality, components));
             } catch (BatchLimitExceededException e) {
-                // Если пачка из 20 файлов превысила лимит, грузим по одному
                 for (String singleFile : batch) {
                     out.addAll(fetchAllByComponents(statuses, impactSeverity, quality, singleFile));
                 }
@@ -193,23 +232,23 @@ public class SonarIssuesApi {
         List<Issue> out = new ArrayList<>();
         int page = 1, pageSize = 500, total = -1;
 
+        String actualStatuses = sanitizeStatuses(statuses);
+
         while (total < 0 || out.size() < total) {
             String url = "/api/issues/search?"
                     + "components=" + enc(components)
                     + "&s=" + enc("FILE_LINE")
                     + (impactSeverity != null && !"ALL".equalsIgnoreCase(impactSeverity) ? "&impactSeverities=" + enc(impactSeverity) : "")
                     + (quality != null && !"ALL".equalsIgnoreCase(quality) ? "&impactSoftwareQualities=" + enc(quality) : "")
-                    + "&issueStatuses=" + enc(statuses)
+                    + "&issueStatuses=" + enc(actualStatuses)
                     + "&additionalFields=" + enc("_all")
                     + "&timeZone=" + enc("Asia/Novosibirsk")
                     + "&ps=" + pageSize + "&p=" + page;
-
             try {
                 JSONObject root = new JSONObject(client.get(url));
                 total = root.getInt("total");
                 JSONArray arr = root.getJSONArray("issues");
                 if (arr.isEmpty()) break;
-
                 for (int j = 0; j < arr.length(); j++) {
                     out.add(Issue.from(arr.getJSONObject(j), projectKey));
                 }
@@ -239,18 +278,16 @@ public class SonarIssuesApi {
             JSONObject root = new JSONObject(client.get(url));
             JSONArray components = root.optJSONArray("components");
             if (components == null || components.isEmpty()) break;
-
             for (int i = 0; i < components.length(); i++) {
                 files.add(components.getJSONObject(i).getString("key"));
             }
             page++;
-            if (page > 20) break; // Защита от бесконечного цикла (максимум 10000 файлов)
+            if (page > 20) break;
         }
         return files;
     }
 
-    public Map<String, Integer> facet(String impactSeverity, String quality, String facetName)
-            throws Exception {
+    public Map<String, Integer> facet(String impactSeverity, String quality, String facetName) throws Exception {
         try {
             return facetWithStatuses("OPEN,REOPENED", impactSeverity, quality, facetName);
         } catch (RuntimeException e) {
@@ -262,15 +299,12 @@ public class SonarIssuesApi {
         }
     }
 
-    public Map<String, Integer> facetWithStatuses(String statuses, String impactSeverity,
-                                                  String quality, String facetName)
-            throws Exception {
+    public Map<String, Integer> facetWithStatuses(String statuses, String impactSeverity, String quality, String facetName) throws Exception {
         String url = "/api/issues/search?"
                 + buildQueryWithStatuses(statuses, impactSeverity, quality)
                 + "&ps=1&facets=" + enc(facetName);
         JSONObject root = new JSONObject(client.get(url));
         JSONArray facets = root.getJSONArray("facets");
-
         Map<String, Integer> result = new TreeMap<>();
         for (int i = 0; i < facets.length(); i++) {
             JSONObject f = facets.getJSONObject(i);
@@ -357,13 +391,11 @@ public class SonarIssuesApi {
         if (snippetCache.containsKey(issueKey)) {
             return snippetCache.get(issueKey);
         }
-
         Issue issue = fetchIssue(issueKey);
         if (issue == null) {
             snippetCache.put(issueKey, Collections.emptyList());
             return Collections.emptyList();
         }
-
         String url = "/api/sources/issue_snippets?issueKey=" + enc(issueKey);
         String json = client.get(url);
         JSONObject root = new JSONObject(json);
@@ -371,21 +403,17 @@ public class SonarIssuesApi {
             snippetCache.put(issueKey, Collections.emptyList());
             return Collections.emptyList();
         }
-
         String fileKey = root.keys().next();
         JSONObject fileObj = root.getJSONObject(fileKey);
         JSONArray sources = fileObj.getJSONArray("sources");
-
         List<String> lines = new ArrayList<>();
         for (int i = 0; i < sources.length(); i++) {
             JSONObject src = sources.getJSONObject(i);
             int lineNum = src.getInt("line");
             String code = src.optString("code");
-
             if (issue.textRange != null) {
                 code = applyHighlight(code, lineNum, issue.textRange);
             }
-
             code = cleanHtml(code);
             lines.add(String.format("%4d | %s", lineNum, code));
         }
@@ -400,20 +428,16 @@ public class SonarIssuesApi {
     private String applyHighlight(String html, int lineNum, Issue.TextRange range) {
         if (range == null) return html;
         if (lineNum < range.startLine || lineNum > range.endLine) return html;
-
         StringBuilder sb = new StringBuilder();
         int visibleCount = 0;
         boolean startInserted = false;
         boolean endInserted = false;
-
         if (lineNum > range.startLine) {
             sb.append("<mark class=\"sonar-issue-mark\">");
             startInserted = true;
         }
-
         for (int i = 0; i < html.length(); i++) {
             char c = html.charAt(i);
-
             if (c == '<') {
                 int endTag = html.indexOf('>', i);
                 if (endTag != -1) {
@@ -422,7 +446,6 @@ public class SonarIssuesApi {
                     continue;
                 }
             }
-
             if (c == '&') {
                 int endEntity = html.indexOf(';', i);
                 if (endEntity != -1 && endEntity - i < 10) {
@@ -436,21 +459,17 @@ public class SonarIssuesApi {
                     continue;
                 }
             }
-
             if (lineNum == range.startLine && visibleCount == range.startOffset && !startInserted) {
                 sb.append("<mark class=\"sonar-issue-mark\">");
                 startInserted = true;
             }
-
             sb.append(c);
             visibleCount++;
-
             if (lineNum == range.endLine && visibleCount == range.endOffset && !endInserted) {
                 sb.append("</mark>");
                 endInserted = true;
             }
         }
-
         if (lineNum == range.startLine && !startInserted) {
             sb.insert(0, "<mark class=\"sonar-issue-mark\">");
         }
@@ -459,69 +478,44 @@ public class SonarIssuesApi {
         } else if (lineNum < range.endLine && !endInserted) {
             sb.append("</mark>");
         }
-
         return sb.toString();
     }
 
     private String cleanHtml(String html) {
         if (html == null) return "";
-
-        Pattern pattern = Pattern.compile(
-                "<mark class=\"sonar-issue-mark\">(.*?)</mark>",
-                Pattern.DOTALL
-        );
+        Pattern pattern = Pattern.compile("<mark class=\"sonar-issue-mark\">(.*?)</mark>", Pattern.DOTALL);
         Matcher matcher = pattern.matcher(html);
         StringBuffer sb = new StringBuffer();
-
         while (matcher.find()) {
-            String content = matcher.group(1);
-            matcher.appendReplacement(sb,
-                    "§HL_START§" + Matcher.quoteReplacement(content) + "§HL_END§");
+            matcher.appendReplacement(sb, "§HL_START§" + Matcher.quoteReplacement(matcher.group(1)) + "§HL_END§");
         }
         matcher.appendTail(sb);
         String res = sb.toString();
-
         res = res.replaceAll("<[^>]+>", "");
-        return res.replace("&gt;", ">")
-                .replace("&lt;", "<")
-                .replace("&amp;", "&")
-                .replace("&quot;", "\"")
-                .replace("&#39;", "'")
-                .replace("&nbsp;", " ");
+        return res.replace("&gt;", ">").replace("&lt;", "<").replace("&amp;", "&")
+                .replace("&quot;", "\"").replace("&#39;", "'").replace("&nbsp;", " ");
     }
 
     public List<Issue> fetchHotspots(String vulnerabilityProbability) throws Exception {
         List<Issue> out = new ArrayList<>();
         String[] statuses = { "TO_REVIEW", "REVIEWED" };
-
         for (String status : statuses) {
             int page = 1, pageSize = 500, total = -1, fetched = 0;
-
             while (total < 0 || fetched < total) {
                 String url = "/api/hotspots/search?project=" + enc(projectKey)
-                        + "&status=" + enc(status)
-                        + "&ps=" + pageSize
-                        + "&p=" + page;
-
+                        + "&status=" + enc(status) + "&ps=" + pageSize + "&p=" + page;
                 JSONObject root = new JSONObject(client.get(url));
-
                 int rootTotal = root.optInt("total", -1);
                 JSONObject paging = root.optJSONObject("paging");
                 if (paging != null) rootTotal = paging.optInt("total", rootTotal);
                 total = rootTotal;
-
                 JSONArray arr = root.optJSONArray("hotspots");
                 if (arr == null || arr.isEmpty()) break;
-
                 fetched += arr.length();
-
                 for (int i = 0; i < arr.length(); i++) {
                     Issue issue = Issue.fromHotspot(arr.getJSONObject(i), projectKey);
-
-                    if (vulnerabilityProbability != null
-                            && !"ALL".equalsIgnoreCase(vulnerabilityProbability)
-                            && !vulnerabilityProbability.isEmpty()
-                            && !vulnerabilityProbability.equalsIgnoreCase(issue.severity)) {
+                    if (vulnerabilityProbability != null && !"ALL".equalsIgnoreCase(vulnerabilityProbability)
+                            && !vulnerabilityProbability.isEmpty() && !vulnerabilityProbability.equalsIgnoreCase(issue.severity)) {
                         continue;
                     }
                     out.add(issue);

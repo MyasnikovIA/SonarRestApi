@@ -59,6 +59,10 @@ public class SonarMeasuresApi {
         if (projectKey == null || projectKey.isEmpty()) {
             throw new IllegalArgumentException("projectKey не задан");
         }
+
+        // Принудительно обрезаем пробелы, если они затесались
+        projectKey = projectKey.trim();
+
         String url = "/api/measures/component"
                 + "?additionalFields=" + enc("period,metrics")
                 + "&component=" + enc(projectKey)

@@ -5,13 +5,12 @@ import { perfile } from './tabs/perfile.js';
 import { details } from './tabs/details.js';
 import { issues }  from './tabs/issues.js';
 import { accepted } from './tabs/accepted.js';
-import { report }   from './tabs/report/index.js'; // <-- ИМПОРТ НОВОЙ ВКЛАДКИ
+import { report }   from './tabs/report/index.js';
 import { snippet } from './tabs/snippet.js';
 import { session } from './tabs/session.js';
 import { status }  from './tabs/status.js';
 import { openOllamaSettingsModal } from './ollama.js';
 
-// <-- ДОБАВЛЕНА В МАССИВ
 const TABS = [summary, matrix, perfile, details, issues, accepted, report, snippet, session, status];
 const TAB_BY_ID = Object.fromEntries(TABS.map(t => [t.id, t]));
 
@@ -22,7 +21,21 @@ const state = {
     snippets: Number(localStorage.getItem('snippets') || 5),
     issueKey: localStorage.getItem('issueKey') || '',
     activeTab: localStorage.getItem('activeTab') || 'summary',
+    page:     1,
+    pageSize: 50
 };
+
+// Функция очистки имени проекта от случайных дубликатов (например, PROJPROJ)
+function getCleanProject() {
+    let p = state.project.trim();
+    if (p.length > 0 && p.length % 2 === 0) {
+        const half = p.length / 2;
+        if (p.slice(0, half) === p.slice(half)) {
+            p = p.slice(0, half);
+        }
+    }
+    return p;
+}
 
 const ctx = {
     state,
@@ -32,12 +45,21 @@ const ctx = {
     toast,
     qs() {
         const p = new URLSearchParams();
-        if (state.project) p.set('project', state.project);
+        const proj = getCleanProject();
+        if (proj) p.set('project', proj);
         p.set('sev', state.sev);
         p.set('qual', state.qual);
+        p.set('p', state.page);
+        p.set('ps', state.pageSize);
         return p.toString();
     },
     refreshStatus: () => refreshStatusBar(),
+    updatePagination: (total) => {
+        const maxPages = Math.ceil(total / state.pageSize) || 1;
+        document.getElementById('page-info').textContent = `Стр. ${state.page} из ${maxPages}`;
+        document.getElementById('btn-prev-page').disabled = state.page <= 1;
+        document.getElementById('btn-next-page').disabled = state.page >= maxPages;
+    }
 };
 
 // ============ Роутер ============
@@ -83,6 +105,20 @@ async function activateTab(id) {
     }
 }
 
+// ============ Пагинация ============
+
+document.getElementById('btn-prev-page').addEventListener('click', () => {
+    if (state.page > 1) {
+        state.page--;
+        activateTab(state.activeTab);
+    }
+});
+
+document.getElementById('btn-next-page').addEventListener('click', () => {
+    state.page++;
+    activateTab(state.activeTab);
+});
+
 // ============ Загрузка проектов ============
 
 async function loadProjectsList() {
@@ -97,7 +133,7 @@ async function loadProjectsList() {
         projects.forEach(p => {
             const opt = document.createElement('option');
             opt.value = p.key;
-            opt.textContent = p.name; // В браузере будет видно и имя, и ключ
+            opt.textContent = p.name;
             datalist.appendChild(opt);
         });
     } catch (e) {
@@ -121,7 +157,10 @@ async function loadKeysToSelect() {
     const currentVal = input.value;
 
     try {
-        const d = await api('/api/keys?' + ctx.qs());
+        // Для ключей тоже используем пагинацию, но берем большую страницу (например, 1000)
+        const p = new URLSearchParams(ctx.qs());
+        p.set('ps', 1000);
+        const d = await api('/api/keys?' + p.toString());
         const keys = d.keys || [];
 
         datalist.innerHTML = '';
@@ -159,7 +198,10 @@ async function downloadKeys() {
     btn.disabled = true;
 
     try {
-        const d = await api('/api/keys?' + ctx.qs());
+        // Скачиваем все ключи (ставим лимит 10000)
+        const p = new URLSearchParams(ctx.qs());
+        p.set('ps', 10000);
+        const d = await api('/api/keys?' + p.toString());
         const keys = d.keys || [];
 
         if (keys.length === 0) {
@@ -173,7 +215,7 @@ async function downloadKeys() {
 
         const a = document.createElement('a');
         a.href = url;
-        a.download = `keys_${state.project}_${state.sev}_${state.qual}.txt`;
+        a.download = `keys_${getCleanProject()}_${state.sev}_${state.qual}.txt`;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
@@ -259,13 +301,14 @@ async function loadMeasures() {
     const bar = document.getElementById('measures-bar');
     if (!bar) return;
 
-    if (!state.project) {
+    const cleanProject = getCleanProject();
+    if (!cleanProject) {
         bar.classList.add('hidden');
         return;
     }
 
     try {
-        const p = new URLSearchParams({ project: state.project });
+        const p = new URLSearchParams({ project: cleanProject });
         const d = await api('/api/measures?' + p);
         renderMeasures(d);
     } catch (e) {
@@ -355,8 +398,9 @@ function renderMeasures(d) {
 // ============ refreshSnapshot ============
 
 async function refreshSnapshot() {
-    if (!state.project) { toast('Сначала задайте project', true); return; }
-    const p = new URLSearchParams({ project: state.project });
+    const proj = getCleanProject();
+    if (!proj) { toast('Сначала задайте project', true); return; }
+    const p = new URLSearchParams({ project: proj });
     try {
         const d = await api('/api/refresh?' + p, { method: 'POST' });
         toast(d.message || d.status);
@@ -403,21 +447,26 @@ function initUI() {
 
     $('project').addEventListener('change', e => {
         state.project = e.target.value.trim();
+        state.page = 1; // Сбрасываем страницу при смене проекта
         localStorage.setItem('project', state.project);
         loadKeysToSelect();
         loadMeasures();
-        activateTab(state.activeTab); // Перезагружаем текущую вкладку
+        activateTab(state.activeTab);
     });
 
     $('sev').addEventListener('change', e => {
         state.sev = e.target.value;
+        state.page = 1;
         localStorage.setItem('sev', state.sev);
         loadKeysToSelect();
+        activateTab(state.activeTab);
     });
     $('qual').addEventListener('change', e => {
         state.qual = e.target.value;
+        state.page = 1;
         localStorage.setItem('qual', state.qual);
         loadKeysToSelect();
+        activateTab(state.activeTab);
     });
     $('snippets').addEventListener('change', e => {
         state.snippets = Number(e.target.value) || 0;
@@ -445,6 +494,7 @@ function initUI() {
 
     $('btn-download-keys').addEventListener('click', downloadKeys);
     $('btn-load').addEventListener('click', () => {
+        state.page = 1;
         loadKeysToSelect();
         loadMeasures();
         activateTab(state.activeTab);

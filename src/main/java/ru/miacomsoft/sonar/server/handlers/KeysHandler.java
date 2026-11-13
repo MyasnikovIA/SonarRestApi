@@ -3,11 +3,10 @@ package ru.miacomsoft.sonar.server.handlers;
 import com.sun.net.httpserver.HttpExchange;
 import org.json.JSONArray;
 import org.json.JSONObject;
-import ru.miacomsoft.sonar.Issue;
+import ru.miacomsoft.sonar.SonarIssuesApi;
 import ru.miacomsoft.sonar.server.BaseHandler;
 import ru.miacomsoft.sonar.server.ServerState;
 
-import java.util.List;
 import java.util.Map;
 
 public class KeysHandler extends BaseHandler {
@@ -22,17 +21,29 @@ public class KeysHandler extends BaseHandler {
         Map<String, String> q = parseQuery(ex);
         String sev = param(q, "sev", "MEDIUM");
         String qual = param(q, "qual", "MAINTAINABILITY");
+        int page = paramInt(q, "p", 1);
+        int ps = paramInt(q, "ps", 1000); // Для ключей можно брать больше
 
-        List<Issue> issues = fetchIssues(project, sev, qual);
+        SonarIssuesApi api = newApi(project);
+        JSONObject rawResponse = api.fetchPageRaw("OPEN,REOPENED", sev, qual, page, ps);
+
+        JSONArray rawIssues = rawResponse.optJSONArray("issues");
         JSONArray keys = new JSONArray();
-        for (Issue it : issues) keys.put(it.key);
+        if (rawIssues != null) {
+            for (int i = 0; i < rawIssues.length(); i++) {
+                keys.put(rawIssues.getJSONObject(i).optString("key"));
+            }
+        }
 
         JSONObject o = new JSONObject();
         o.put("project", project);
         o.put("severity", sev);
         o.put("quality", qual);
-        o.put("total", issues.size());
+        o.put("total", rawResponse.optInt("total", 0));
+        o.put("p", page);
+        o.put("ps", ps);
         o.put("keys", keys);
+
         putSource(o, project);
         sendJson(ex, 200, o);
     }

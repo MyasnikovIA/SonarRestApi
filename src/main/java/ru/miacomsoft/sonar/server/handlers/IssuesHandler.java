@@ -1,13 +1,11 @@
 package ru.miacomsoft.sonar.server.handlers;
 
 import com.sun.net.httpserver.HttpExchange;
-import org.json.JSONArray;
 import org.json.JSONObject;
-import ru.miacomsoft.sonar.Issue;
+import ru.miacomsoft.sonar.SonarIssuesApi;
 import ru.miacomsoft.sonar.server.BaseHandler;
 import ru.miacomsoft.sonar.server.ServerState;
 
-import java.util.List;
 import java.util.Map;
 
 public class IssuesHandler extends BaseHandler {
@@ -22,18 +20,18 @@ public class IssuesHandler extends BaseHandler {
         Map<String, String> q = parseQuery(ex);
         String sev = param(q, "sev", "MEDIUM");
         String qual = param(q, "qual", "MAINTAINABILITY");
+        int page = paramInt(q, "p", 1);
+        int ps = paramInt(q, "ps", 50); // По умолчанию 50 элементов на страницу
 
-        List<Issue> issues = fetchIssues(project, sev, qual);
-        JSONArray arr = new JSONArray();
-        for (Issue it : issues) arr.put(it.toJson());
+        SonarIssuesApi api = newApi(project);
 
-        JSONObject o = new JSONObject();
-        o.put("project", project);
-        o.put("severity", sev);
-        o.put("quality", qual);
-        o.put("total", issues.size());
-        o.put("issues", arr);
-        putSource(o, project);
-        sendJson(ex, 200, o);
+        // Прокси-запрос напрямую, без парсинга в объекты
+        JSONObject rawResponse = api.fetchPageRaw("OPEN,REOPENED", sev, qual, page, ps);
+
+        // Опционально: добавляем source для отладки
+        putSource(rawResponse, project);
+
+        // Отдаем ответ как есть (в нем уже есть fields: total, p, ps, issues)
+        sendJson(ex, 200, rawResponse);
     }
 }

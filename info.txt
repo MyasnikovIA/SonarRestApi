@@ -1,0 +1,17 @@
+https://sonar.bars.group/projects
+http://www.smwrap.ru:6060/
+====================================================================================================================================
+Список проектов:
+https://docs.google.com/spreadsheets/d/1YoNisMJA7J3DIblZRg864Q7mPCrbc7rcS3G6Hp36v0E/edit?pli=1&gid=718850574#gid=718850574
+
+МИС Владельцы модклей:
+https://docs.google.com/spreadsheets/d/1WnY1RQY3XYon1HSoluovD0suNXPAnUMtyFk6GQB3SOs/edit?gid=567561285#gid=567561285
+====================================================================================================================================
+
+
+MEDMIS-MISmobile.doctor_kafka_spec
+MEDMIS-MISmobile.kafka-service
+MEDMIS-MISmobile.kafka_api_spec
+MEDMIS-MISmobile.doctor_api_spec
+
+//import JSZip from 'https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm';

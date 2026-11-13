@@ -4,10 +4,10 @@ import com.sun.net.httpserver.HttpExchange;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import ru.miacomsoft.sonar.Issue;
+import ru.miacomsoft.sonar.SonarIssuesApi;
 import ru.miacomsoft.sonar.server.BaseHandler;
 import ru.miacomsoft.sonar.server.ServerState;
 
-import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
@@ -25,15 +25,23 @@ public class MatrixHandler extends BaseHandler {
         Map<String, String> q = parseQuery(ex);
         String sev = param(q, "sev", "MEDIUM");
         String qual = param(q, "qual", "MAINTAINABILITY");
+        int page = paramInt(q, "p", 1);
+        int ps = paramInt(q, "ps", 50);
 
-        List<Issue> issues = fetchIssues(project, sev, qual);
+        SonarIssuesApi api = newApi(project);
+        JSONObject rawResponse = api.fetchPageRaw("OPEN,REOPENED", sev, qual, page, ps);
+        JSONArray rawIssues = rawResponse.optJSONArray("issues");
 
         Set<String> rules = new TreeSet<>();
         Map<String, Map<String, Integer>> matrix = new TreeMap<>();
-        for (Issue it : issues) {
-            rules.add(it.rule);
-            matrix.computeIfAbsent(it.component, k -> new TreeMap<>())
-                    .merge(it.rule, 1, Integer::sum);
+
+        if (rawIssues != null) {
+            for (int i = 0; i < rawIssues.length(); i++) {
+                Issue it = Issue.from(rawIssues.getJSONObject(i), project);
+                rules.add(it.rule);
+                matrix.computeIfAbsent(it.component, k -> new TreeMap<>())
+                        .merge(it.rule, 1, Integer::sum);
+            }
         }
 
         JSONArray rows = new JSONArray();
@@ -56,7 +64,9 @@ public class MatrixHandler extends BaseHandler {
         o.put("project", project);
         o.put("severity", sev);
         o.put("quality", qual);
-        o.put("total", issues.size());
+        o.put("total", rawResponse.optInt("total", 0));
+        o.put("p", page);
+        o.put("ps", ps);
         o.put("rules", new JSONArray(rules));
         o.put("rows", rows);
         putSource(o, project);

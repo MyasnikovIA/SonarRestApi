@@ -13,6 +13,10 @@ export const perfile = {
         try {
             const d = await ctx.api('/api/perfile?' + ctx.qs());
             const files = d.files || [];
+
+            // ОБНОВЛЯЕМ ПАГИНАЦИЮ
+            if (ctx.updatePagination) ctx.updatePagination(d.total);
+
             if (!files.length) { el.innerHTML = '<div class="empty">Нет данных</div>'; return; }
 
             let rawData = d;
@@ -44,7 +48,7 @@ export const perfile = {
                     <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
                         <div style="display:flex; align-items:center; gap:12px;">
                             <input type="checkbox" id="pf-master-checkbox" title="Выделить всё" style="width:18px; height:18px; cursor:pointer;">
-                            <h3 id="pf-header-title" style="margin:0;">${esc(d.project)} · ${esc(d.severity)}/${esc(d.quality)} · ${d.issuesCount} issues · ${d.filesCount} файлов · ${totalRules} правил</h3>
+                            <h3 id="pf-header-title" style="margin:0;">${esc(d.project)} · ${esc(d.severity)}/${esc(d.quality)} · Всего: ${d.total}</h3>
                         </div>
                         <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
                             <label style="display:flex; align-items:center; gap:6px; font-size:12px;">
@@ -104,7 +108,7 @@ export const perfile = {
 
                 const totalIssues = rawData.files.reduce((s, f) => s + f.issues.length, 0);
                 const totalFiles = rawData.files.filter(f => f.issues.length > 0).length;
-                headerTitle.textContent = `${d.project} · ${d.severity}/${d.quality} · ${totalIssues} issues · ${totalFiles} файлов · ${totalRules} правил`;
+                headerTitle.textContent = `${d.project} · ${d.severity}/${d.quality} · Всего: ${d.total}`;
             };
 
             const applyFilters = () => {

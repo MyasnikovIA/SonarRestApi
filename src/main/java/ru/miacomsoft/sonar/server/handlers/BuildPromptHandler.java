@@ -18,12 +18,6 @@ import java.util.Map;
  * GET /api/prompt/build?name=<promptName>&project=KEY
  *     [&issueKey=KEY | &keys=A,B,C | &sev=ALL&qual=ALL]
  *     [&status=accept&statusLabel=...]
- *
- * Читает <promptsDir>/<name>.txt, подставляет [TAG]-значения и возвращает
- * готовый текст. Параметры сервер сам добирает из SonarQube.
- *
- * Если промпт не найден — 404 с перечнем доступных имён промптов
- * (чтобы было видно, что именно видит сервер).
  */
 public class BuildPromptHandler extends BaseHandler {
 
@@ -165,12 +159,23 @@ public class BuildPromptHandler extends BaseHandler {
     private void buildByFilter(String project, String sev, String qual,
                                Map<String, String> params,
                                List<String> availableTags) throws Exception {
-        List<Issue> issues;
+        SonarIssuesApi api = newApi(project);
+        List<Issue> issues = new ArrayList<>();
+
         try {
-            issues = fetchIssues(project, sev, qual);
+            // Используем fetchPageRaw с ограничением страницы, чтобы не зависнуть на 10000
+            JSONObject raw = api.fetchPageRaw("OPEN,REOPENED", sev, qual, 1, 500);
+            JSONArray arr = raw.optJSONArray("issues");
+            if (arr != null) {
+                for (int i = 0; i < arr.length(); i++) {
+                    issues.add(Issue.from(arr.getJSONObject(i), project));
+                }
+            }
         } catch (Exception e) {
+            // fallback, если что-то пошло не так
             issues = newApi(project).fetchAll(sev, qual);
         }
+
         fillBulkParams(issues, availableTags, params);
     }
 

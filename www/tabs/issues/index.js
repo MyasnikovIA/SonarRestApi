@@ -13,6 +13,10 @@ export const issues = {
         try {
             const d = await ctx.api('/api/issues?' + ctx.qs());
             const list = d.issues || [];
+
+            // ОБНОВЛЯЕМ ПАГИНАЦИЮ
+            if (ctx.updatePagination) ctx.updatePagination(d.total);
+
             if (!list.length) {
                 el.innerHTML = '<div class="empty">Нет issues</div>';
                 return;
@@ -30,7 +34,7 @@ export const issues = {
                             <input type="checkbox" id="iss-master-checkbox" title="Выделить всё"
                                    style="width:18px; height:18px; cursor:pointer;">
                             <h3 style="margin:0;">
-                                ${esc(d.project)} · ${esc(d.severity)}/${esc(d.quality)} · ${d.total} issues
+                                ${esc(d.project)} · ${esc(d.severity)}/${esc(d.quality)} · Всего: ${d.total}
                             </h3>
                         </div>
                         <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
@@ -132,7 +136,6 @@ export const issues = {
                     </div>
                 `;
 
-                // ---- master checkbox state ----
                 const allFilteredKeys = filtered.map(it => it.key);
                 if (allFilteredKeys.length > 0 && allFilteredKeys.every(k => selectedKeys.has(k))) {
                     masterCb.checked = true;
@@ -145,7 +148,6 @@ export const issues = {
                     masterCb.indeterminate = false;
                 }
 
-                // ---- row checkboxes ----
                 listEl.querySelectorAll('.iss-issue-checkbox').forEach(cb => {
                     cb.addEventListener('change', (e) => {
                         if (e.target.checked) selectedKeys.add(e.target.dataset.key);
@@ -154,7 +156,6 @@ export const issues = {
                     });
                 });
 
-                // ---- row interactions ----
                 listEl.querySelectorAll('.pf-issue-row').forEach(row => {
                     row.addEventListener('dblclick', (e) => {
                         if (e.target.type === 'checkbox') return;
@@ -178,17 +179,14 @@ export const issues = {
                             e.pageX, e.pageY,
                             issue, targetIssues, filtered, ctx,
                             () => {
-                                // reloadCb
                                 document.querySelector('.tab[data-tab="issues"]').click();
                             },
                             () => {
-                                // onSelectAll (все видимые)
                                 filtered.forEach(it => selectedKeys.add(it.key));
                                 renderList();
                                 updateBulkBtn();
                             },
                             () => {
-                                // onDeselectAll
                                 selectedKeys.clear();
                                 renderList();
                                 updateBulkBtn();

@@ -7,8 +7,6 @@ import { openAutoBulkModal } from './modals/auto-bulk-modal.js';
 export function showIssueContextMenu(x, y, clickedIssue, targetIssues, filteredData, ctx, reloadCb, onSelectAll, onDeselectAll, isAllSelected = false, totalCount = 0) {
     document.querySelector('.ctx-menu')?.remove();
 
-    // Если выбрано ВСЁ, то количество = totalCount (848)
-    // Иначе - размер массива targetIssues (может быть 1 или N)
     const displayCount = isAllSelected ? totalCount : targetIssues.length;
 
     const hasUnmarked = targetIssues.some(it => it.status === 'OPEN' || it.status === 'REOPENED');
@@ -35,7 +33,37 @@ export function showIssueContextMenu(x, y, clickedIssue, targetIssues, filteredD
     const closeMenu = () => menu.remove();
     document.addEventListener('click', closeMenu, { once: true });
 
-    menu.querySelector('#ctx-ai-prompt').addEventListener('click', () => {
+    // Загружаем все элементы, если выбран "Выделить всё"
+    const loadAllIfNeeded = async () => {
+        if (!isAllSelected) return targetIssues;
+
+        // Закрываем меню и показываем toast
+        closeMenu();
+        ctx.toast('Загрузка всех записей...', false);
+
+        let allIssues = [];
+        const pageSize = 500;
+        let page = 1;
+        let total = totalCount;
+
+        while (allIssues.length < total) {
+            const pPage = new URLSearchParams(ctx.qs());
+            pPage.set('ps', pageSize);
+            pPage.set('p', page);
+            const res = await ctx.api('/api/perfile?' + pPage.toString());
+            if (!res.files || res.files.length === 0) break;
+
+            res.files.forEach(f => {
+                f.issues.forEach(it => allIssues.push(it));
+            });
+
+            page++;
+            if (allIssues.length >= total || page > 100) break;
+        }
+        return allIssues;
+    };
+
+    menu.querySelector('#ctx-ai-prompt').addEventListener('click', async () => {
         if (targetIssues.length > 0) fetchAndShowPrompt(targetIssues[0], ctx);
     });
 
@@ -43,30 +71,30 @@ export function showIssueContextMenu(x, y, clickedIssue, targetIssues, filteredD
         openIssueModal(clickedIssue, ctx, reloadCb);
     });
 
-    menu.querySelector('#ctx-edit-tags').addEventListener('click', () => {
-        showTagEditor(targetIssues, ctx, reloadCb);
+    menu.querySelector('#ctx-edit-tags').addEventListener('click', async () => {
+        const issuesToEdit = await loadAllIfNeeded();
+        showTagEditor(issuesToEdit, ctx, reloadCb);
     });
 
     menu.querySelector('#ctx-select-all').addEventListener('click', onSelectAll);
     menu.querySelector('#ctx-deselect-all').addEventListener('click', onDeselectAll);
 
     if (hasUnmarked) {
-        menu.querySelector('#ctx-comment').addEventListener('click', () => {
-            // Если выбрано всё, targetIssues содержит только текущую страницу.
-            // Для корректной массовой обработки мы передаем targetIssues,
-            // а логика загрузки всех 848 записей будет в bulk-modal, если нужно.
-            // Либо, если isAllSelected, мы можем передать пустой массив и флаг,
-            // но проще передать то что есть, а модалка сама догрузит.
-            openBulkModal(targetIssues.filter(it => it.status === 'OPEN' || it.status === 'REOPENED'), ctx, reloadCb);
+        menu.querySelector('#ctx-comment').addEventListener('click', async () => {
+            const issuesToProcess = await loadAllIfNeeded();
+            openBulkModal(issuesToProcess.filter(it => it.status === 'OPEN' || it.status === 'REOPENED'), ctx, reloadCb);
         });
-        menu.querySelector('#ctx-auto-comment').addEventListener('click', () => {
-            openAutoBulkModal(targetIssues.filter(it => it.status === 'OPEN' || it.status === 'REOPENED'), ctx, reloadCb);
+
+        menu.querySelector('#ctx-auto-comment').addEventListener('click', async () => {
+            const issuesToProcess = await loadAllIfNeeded();
+            openAutoBulkModal(issuesToProcess.filter(it => it.status === 'OPEN' || it.status === 'REOPENED'), ctx, reloadCb);
         });
     }
 
     if (hasMarked) {
         menu.querySelector('#ctx-remove').addEventListener('click', async () => {
-            const reopenableIssues = targetIssues.filter(it => it.status !== 'OPEN' && it.status !== 'REOPENED');
+            const issuesToProcess = await loadAllIfNeeded();
+            const reopenableIssues = issuesToProcess.filter(it => it.status !== 'OPEN' && it.status !== 'REOPENED');
             if (!confirm(`Отменить комментарий (reopen) у ${reopenableIssues.length} issues?`)) return;
 
             let success = 0;

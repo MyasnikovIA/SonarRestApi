@@ -151,6 +151,30 @@ export const perfile = {
                 }
             };
 
+            // ФУНКЦИЯ ДЛЯ ЗАГРУЗКИ ВСЕХ ЭЛЕМЕНТОВ (нужна для контекстного меню)
+            const fetchAllIssuesForAction = async () => {
+                let issues = [];
+                const pageSize = 500;
+                let page = 1;
+                let total = rawData.total;
+
+                while (issues.length < total) {
+                    const pPage = new URLSearchParams(ctx.qs());
+                    pPage.set('ps', pageSize);
+                    pPage.set('p', page);
+                    const res = await ctx.api('/api/perfile?' + pPage.toString());
+                    if (!res.files || res.files.length === 0) break;
+
+                    res.files.forEach(f => {
+                        f.issues.forEach(it => issues.push(it));
+                    });
+
+                    page++;
+                    if (issues.length >= total || page > 100) break;
+                }
+                return issues;
+            };
+
             const renderList = () => {
                 const filtered = applyFilters();
                 if (filtered.length === 0) {
@@ -251,7 +275,6 @@ export const perfile = {
                             refreshData();
                         };
 
-                        // ИСПРАВЛЕНИЕ: Передаем флаг isAllSelected и общее количество (total)
                         showIssueContextMenu(
                             e.pageX, e.pageY,
                             issue, targetIssues, filtered, ctx,
@@ -355,55 +378,38 @@ export const perfile = {
                 updateBulkBtn();
             });
 
-            bulkBtn.addEventListener('click', async () => {
-                let issues = [];
-
-                if (isAllSelected) {
-                    bulkBtn.textContent = 'Загрузка...';
-                    bulkBtn.disabled = true;
-                    try {
-                        const pageSize = 500;
-                        let page = 1;
-                        let total = rawData.total;
-
-                        while (issues.length < total) {
-                            const pPage = new URLSearchParams(ctx.qs());
-                            pPage.set('ps', pageSize);
-                            pPage.set('p', page);
-                            const res = await ctx.api('/api/perfile?' + pPage.toString());
-                            if (!res.files || res.files.length === 0) break;
-
-                            res.files.forEach(f => {
-                                f.issues.forEach(it => issues.push(it));
-                            });
-
-                            page++;
-                            bulkBtn.textContent = `Загрузка... (${issues.length}/${total})`;
-
-                            if (issues.length >= total || page > 100) break;
-                        }
-                    } catch (err) {
-                        ctx.toast('Ошибка загрузки всех замечаний: ' + err.message, true);
-                        return;
-                    } finally {
-                        bulkBtn.disabled = false;
-                        updateBulkBtn();
-                    }
-                } else {
-                    issues = rawData.files.flatMap(x => x.issues).filter(i => selectedKeys.has(i.key));
-                }
-
-                if (issues.length === 0) {
+            // ОБНОВЛЕННЫЙ ОБРАБОТЧИК КНОПКИ (И для контекстного меню, и для кнопки сверху)
+            const handleBulkAction = async (issuesToProcess) => {
+                if (issuesToProcess.length === 0) {
                     ctx.toast('Нет выбранных замечаний', true);
                     return;
                 }
 
-                openBulkModal(issues, ctx, () => {
+                openBulkModal(issuesToProcess, ctx, () => {
                     isAllSelected = false;
                     selectedKeys.clear();
                     updateBulkBtn();
                     refreshData();
                 });
+            };
+
+            bulkBtn.addEventListener('click', async () => {
+                if (isAllSelected) {
+                    bulkBtn.textContent = 'Загрузка...';
+                    bulkBtn.disabled = true;
+                    try {
+                        const allIssues = await fetchAllIssuesForAction();
+                        handleBulkAction(allIssues);
+                    } catch (err) {
+                        ctx.toast('Ошибка загрузки всех замечаний: ' + err.message, true);
+                    } finally {
+                        bulkBtn.disabled = false;
+                        updateBulkBtn();
+                    }
+                } else {
+                    const issues = rawData.files.flatMap(x => x.issues).filter(i => selectedKeys.has(i.key));
+                    handleBulkAction(issues);
+                }
             });
 
             renderList();

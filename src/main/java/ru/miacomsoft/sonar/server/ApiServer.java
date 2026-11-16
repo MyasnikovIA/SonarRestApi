@@ -65,8 +65,11 @@ public final class ApiServer {
         server.createContext("/api/facets",       new FacetsHandler(state));
 
         server.createContext("/api/export-stream",   new ExportStreamHandler(state));
-        // ✅ ДОБАВЛЕНО: скачивание сформированного файла
         server.createContext("/api/export-download", new ExportDownloadHandler(state));
+
+        // ===== ИСПРАВЛЕНО: убран дубликат create-issue =====
+        server.createContext("/api/jira/config",       new CreateJiraIssueHandler(state));
+        server.createContext("/api/jira/create-issue", new CreateJiraIssueHandler(state));
 
         Path www = resolveWwwDir();
         if (www != null) {
@@ -88,6 +91,8 @@ public final class ApiServer {
         System.out.println("   GET  /api/prompt/list");
         System.out.println("   GET  /api/export-stream?format=<f>&project=<p>...");
         System.out.println("   GET  /api/export-download?file=<path>");
+        System.out.println("   GET  /api/jira/config");
+        System.out.println("   POST /api/jira/create-issue?project=<p>...");
         System.out.println("===================================================");
     }
 

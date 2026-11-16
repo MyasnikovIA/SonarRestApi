@@ -1,6 +1,7 @@
 import { esc, toast, highlightCode } from '../../common.js';
 import { showExportModal } from './export-modal.js';
 import { openReportIssueModal } from './modals/issue-modal.js';
+import { showJiraIssueModal } from './jira-issue-modal.js';   // ===== ДОБАВЛЕНО =====
 
 const NO_TAGS_KEY = '__NO_TAGS__';
 const NO_TAGS_LABEL = '(Без тегов)';
@@ -19,8 +20,6 @@ export const report = {
         el.innerHTML = '<div class="empty">Загрузка данных...</div>';
 
         try {
-            // Запрашиваем ВСЕ статусы (hideProcessed=false),
-            // иначе total показывает только активные.
             const pBase = new URLSearchParams();
             if (ctx.state.project) pBase.set('project', ctx.state.project.trim());
             pBase.set('sev', ctx.state.sev);
@@ -282,6 +281,8 @@ export const report = {
                 <div class="ctx-item" id="ctx-confluence">📋 Выгрузить Confluence (HTML)</div>
                 <div class="ctx-item" style="border-top:1px solid var(--border); margin-top:4px; padding-top:8px;" id="ctx-html-files">📦 Выгрузить HTML (по файлам)</div>
                 <div class="ctx-item" id="ctx-html-files-teams">📦 Выгрузить HTML (с командами)</div>
+                <!-- ===== ДОБАВЛЕНО ===== -->
+                <div class="ctx-item" style="border-top:1px solid var(--border); margin-top:4px; padding-top:8px;" id="ctx-jira-issue">🎫 Создать задачу в Jira</div>
             `;
             document.body.appendChild(ctxMenu);
             document.addEventListener('click', () => { ctxMenu.style.display = 'none'; }, { once: true });
@@ -290,7 +291,6 @@ export const report = {
                 if (!d.issues) return [];
                 const q = filterText.toLowerCase();
                 let filtered = d.issues.filter(it => {
-                    // isProcessed: OPEN/REOPENED = не обработано
                     const isProcessed = it.status && it.status !== 'OPEN' && it.status !== 'REOPENED';
                     if (statusFilter === 'PROCESSED' && !isProcessed) return false;
                     if (statusFilter === 'UNPROCESSED' && isProcessed) return false;
@@ -436,7 +436,6 @@ export const report = {
 
                 listEl.innerHTML = html;
 
-                // --- Чекбоксы строк ---
                 listEl.querySelectorAll('.rep-cb').forEach(cb => {
                     cb.addEventListener('change', (e) => {
                         if (isAllSelected) {
@@ -453,7 +452,6 @@ export const report = {
                     });
                 });
 
-                // --- Кнопка "Показать/Скрыть" сниппета ---
                 listEl.querySelectorAll('.rep-btn-toggle').forEach(btn => {
                     btn.addEventListener('click', async (e) => {
                         e.stopPropagation();
@@ -489,15 +487,12 @@ export const report = {
                     });
                 });
 
-                // --- Клик / двойной клик / правый клик по строке ---
                 listEl.querySelectorAll('.rep-row').forEach(tr => {
-                    // Одиночный клик — переключает чекбокс, но с debounce 250мс,
-                    // чтобы dblclick (открытие модалки) не привёл к двойному переключению.
                     let clickTimeout = null;
 
                     tr.addEventListener('click', (e) => {
                         if (e.target.type === 'checkbox' || e.target.closest('.rep-btn-toggle')) return;
-                        if (clickTimeout) return; // второй клик из серии dblclick — игнорируем
+                        if (clickTimeout) return;
 
                         clickTimeout = setTimeout(() => {
                             clickTimeout = null;
@@ -507,7 +502,6 @@ export const report = {
                         }, 250);
                     });
 
-                    // Двойной клик — открывает модалку
                     tr.addEventListener('dblclick', (e) => {
                         if (e.target.type === 'checkbox' || e.target.closest('.rep-btn-toggle')) return;
                         if (clickTimeout) { clearTimeout(clickTimeout); clickTimeout = null; }
@@ -517,12 +511,10 @@ export const report = {
                         if (!issue) return;
 
                         openReportIssueModal(issue, ctx, () => {
-                            // Пере-рендер вкладки «Отчет» после сохранения
                             document.querySelector('.tab[data-tab="report"]')?.click();
                         });
                     });
 
-                    // Правый клик — контекстное меню экспорта
                     tr.addEventListener('contextmenu', (e) => {
                         e.preventDefault();
                         if (selectedKeys.size === 0 && !isAllSelected) {
@@ -540,7 +532,6 @@ export const report = {
                 });
             };
 
-            // Вспомогательная обёртка: d - результат /api/issues, у него есть .issues
             const rawDataSafe = (obj) => obj || { issues: [] };
 
             const startExport = async (format) => {
@@ -574,6 +565,35 @@ export const report = {
                 await showExportModal(keys, format, ctx, ctx.state.project, filters);
             };
 
+            // ===== ДОБАВЛЕНО: создание задачи в Jira =====
+            const startJiraIssue = () => {
+                let keysToCreate = null;   // null = "по всем по фильтру"
+                if (!isAllSelected) {
+                    const filtered = applyFilters();
+                    const list = [];
+                    filtered.forEach(it => {
+                        if (selectedKeys.has(it.key)) list.push(it.key);
+                    });
+                    if (list.length === 0) {
+                        toast('Ничего не выбрано', true);
+                        return;
+                    }
+                    keysToCreate = list;
+                }
+
+                const filters = {
+                    sev: ctx.state.sev,
+                    qual: ctx.state.qual,
+                    tags: Array.from(selectedTags),
+                    excludedTags: Array.from(excludedTags),
+                    rules: Array.from(selectedRules),
+                    filterText: filterText,
+                    statusFilter: statusFilter
+                };
+
+                showJiraIssueModal(keysToCreate, ctx, ctx.state.project, filters);
+            };
+
             exportBtn.addEventListener('click', () => {
                 if (selectedKeys.size === 0 && !isAllSelected) return;
                 const rect = exportBtn.getBoundingClientRect();
@@ -588,6 +608,12 @@ export const report = {
             ctxMenu.querySelector('#ctx-confluence').addEventListener('click', () => { ctxMenu.style.display = 'none'; startExport('confluence'); });
             ctxMenu.querySelector('#ctx-html-files').addEventListener('click', () => { ctxMenu.style.display = 'none'; startExport('html-files'); });
             ctxMenu.querySelector('#ctx-html-files-teams').addEventListener('click', () => { ctxMenu.style.display = 'none'; startExport('html-files-teams'); });
+
+            // ===== ДОБАВЛЕНО =====
+            ctxMenu.querySelector('#ctx-jira-issue').addEventListener('click', () => {
+                ctxMenu.style.display = 'none';
+                startJiraIssue();
+            });
 
             masterCb.addEventListener('change', (e) => {
                 if (e.target.checked) {

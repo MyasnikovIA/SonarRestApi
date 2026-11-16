@@ -70,6 +70,8 @@ public final class ApiServer {
         // ===== ИСПРАВЛЕНО: убран дубликат create-issue =====
         server.createContext("/api/jira/config",       new CreateJiraIssueHandler(state));
         server.createContext("/api/jira/create-issue", new CreateJiraIssueHandler(state));
+        server.createContext("/api/jira/epics",        new CreateJiraIssueHandler(state));
+        server.createContext("/api/jira/teams",        new CreateJiraIssueHandler(state));
 
         Path www = resolveWwwDir();
         if (www != null) {

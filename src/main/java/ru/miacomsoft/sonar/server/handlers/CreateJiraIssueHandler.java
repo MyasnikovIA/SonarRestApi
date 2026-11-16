@@ -29,9 +29,11 @@ public class CreateJiraIssueHandler extends BaseHandler {
 
     @Override
     protected void handleRequest(HttpExchange ex) throws Exception {
-        if (ex.getRequestURI().getPath().endsWith("/config")) {
-            handleGetConfig(ex);
-        } else {
+        String path = ex.getRequestURI().getPath();
+        if (path.endsWith("/config")) handleGetConfig(ex);
+        else if (path.endsWith("/epics")) handleGetEpics(ex);
+        else if (path.endsWith("/teams")) handleGetTeams(ex);
+        else {
             if ("GET".equalsIgnoreCase(ex.getRequestMethod())) sendError(ex, 405, "Use POST");
             else handlePost(ex);
         }
@@ -47,26 +49,129 @@ public class CreateJiraIssueHandler extends BaseHandler {
             sessionError = e.getMessage();
         }
 
-        String resolvedAssignee = cfg.assignee();
-        if ("me".equalsIgnoreCase(resolvedAssignee) && session != null) {
-            resolvedAssignee = session.username() != null ? session.username() : "me";
-        }
+        String defaultAssignee = session != null && session.username() != null ? session.username() : cfg.assignee();
+        String userDisplayName = defaultAssignee;
 
         JSONObject resp = new JSONObject()
                 .put("url", cfg.baseUrl())
                 .put("sessionReady", session != null)
                 .put("username", session != null ? session.username() : null)
-                .put("project", cfg.defaultProject())
-                .put("issueType", cfg.issueType())
-                .put("priority", cfg.priority())
-                .put("security", cfg.security())
-                .put("team", cfg.team())
-                .put("labels", cfg.labels())
-                .put("components", cfg.components())
-                .put("assignee", resolvedAssignee);
+                .put("userDisplayName", userDisplayName)
+                .put("configProject", cfg.defaultProject())
+                .put("configIssueType", cfg.issueType())
+                .put("configEpic", cfg.epic())
+                .put("configPriority", cfg.priority())
+                .put("configSecurity", cfg.security())
+                .put("configTeam", cfg.team())
+                .put("configLabels", cfg.labels())
+                .put("configComponents", cfg.components())
+                .put("configAssignee", defaultAssignee);
 
         if (sessionError != null) resp.put("sessionError", sessionError);
+
+        if (session != null) {
+            try {
+                JiraClient jira = new JiraClient(cfg.baseUrl(), session.cookieHeader());
+                JiraFieldService fieldService = new JiraFieldService(jira);
+                JiraUserService userService = new JiraUserService(jira);
+                JiraLabelService labelService = new JiraLabelService(jira);
+
+                if (defaultAssignee != null && !defaultAssignee.isBlank()) {
+                    try {
+                        JiraUserService.JiraUser me = userService.getUser(defaultAssignee);
+                        if (me != null && me.displayName() != null && !me.displayName().isBlank()) {
+                            userDisplayName = me.displayName();
+                            resp.put("userDisplayName", userDisplayName);
+                        }
+                    } catch (Exception ignored) {}
+                }
+
+                JSONArray projectsArr = new JSONArray();
+                for (JiraFieldService.AllowedValue av : fieldService.getProjects()) {
+                    projectsArr.put(new JSONObject().put("id", av.id()).put("name", av.value()));
+                }
+                resp.put("projects", projectsArr);
+
+                JSONArray typesArr = new JSONArray();
+                for (JiraFieldService.AllowedValue av : fieldService.getIssueTypes(cfg.defaultProject())) {
+                    typesArr.put(new JSONObject().put("id", av.id()).put("name", av.value()));
+                }
+                resp.put("issueTypes", typesArr);
+
+                JSONArray priorsArr = new JSONArray();
+                for (JiraFieldService.AllowedValue av : fieldService.getAllPriorities()) {
+                    priorsArr.put(new JSONObject().put("id", av.id()).put("name", av.value()));
+                }
+                resp.put("priorities", priorsArr);
+
+                JSONArray secArr = new JSONArray();
+                String defaultSecurityId = "";
+                for (JiraFieldService.AllowedValue av : fieldService.getSecurityLevels(cfg.defaultProject(), cfg.issueType())) {
+                    secArr.put(new JSONObject().put("id", av.id()).put("name", av.value()));
+                    if (av.value().equalsIgnoreCase(cfg.security()) || av.value().equalsIgnoreCase("Основной")) {
+                        defaultSecurityId = av.id();
+                    }
+                }
+                resp.put("securityLevels", secArr);
+                resp.put("configSecurity", defaultSecurityId);
+
+                JSONArray labelsArr = new JSONArray();
+                for (String label : labelService.getSuggestions(cfg.defaultProject(), "")) {
+                    labelsArr.put(label);
+                }
+                resp.put("availableLabels", labelsArr);
+
+                JSONArray usersArr = new JSONArray();
+                List<JiraUserService.JiraUser> users = userService.getAssignableUsers(cfg.defaultProject(), "", 100);
+                for (JiraUserService.JiraUser u : users) {
+                    usersArr.put(new JSONObject().put("name", u.name()).put("displayName", u.displayName()));
+                }
+                resp.put("assignees", usersArr);
+
+            } catch (Exception e) {
+                resp.put("listError", e.getMessage());
+            }
+        }
         sendJson(ex, 200, resp);
+    }
+
+    private void handleGetEpics(HttpExchange ex) throws Exception {
+        JiraConfig cfg = JiraConfig.getInstance();
+        Map<String, String> q = parseQuery(ex);
+        String project = param(q, "project", cfg.defaultProject());
+
+        try {
+            SessionLoader.SessionInfo session = SessionLoader.load(Path.of(cfg.sessionFile()));
+            JiraClient jira = new JiraClient(cfg.baseUrl(), session.cookieHeader());
+            JiraEpicService epicService = new JiraEpicService(jira);
+
+            JSONArray arr = new JSONArray();
+            for (JiraFieldService.AllowedValue av : epicService.getEpics(project)) {
+                arr.put(new JSONObject().put("id", av.id()).put("name", av.value()));
+            }
+            JSONObject resp = new JSONObject().put("epics", arr);
+            sendJson(ex, 200, resp);
+        } catch (Exception e) {
+            sendError(ex, 500, e.getMessage());
+        }
+    }
+
+    private void handleGetTeams(HttpExchange ex) throws Exception {
+        JiraConfig cfg = JiraConfig.getInstance();
+        try {
+            SessionLoader.SessionInfo session = SessionLoader.load(Path.of(cfg.sessionFile()));
+            JiraClient jira = new JiraClient(cfg.baseUrl(), session.cookieHeader());
+            JiraTeamService teamService = new JiraTeamService(jira);
+
+            JSONArray arr = new JSONArray();
+            for (JiraFieldService.AllowedValue av : teamService.getTeams()) {
+                arr.put(new JSONObject().put("id", av.id()).put("name", av.value()));
+            }
+            JSONObject resp = new JSONObject().put("teams", arr);
+            sendJson(ex, 200, resp);
+        } catch (Exception e) {
+            sendError(ex, 500, e.getMessage());
+        }
     }
 
     private void handlePost(HttpExchange ex) throws Exception {
@@ -80,11 +185,24 @@ public class CreateJiraIssueHandler extends BaseHandler {
         String customDesc = param(q, "description", null);
         String statusFilter = param(q, "statusFilter", "ALL");
 
-        String jiraProject = cfg.defaultProject();
-        String jiraType = cfg.issueType();
+        // Фильтры из UI
+        String tagsParam = param(q, "tags", "");
+        String excludedTagsParam = param(q, "excludedTags", "");
+        String selectedRulesParam = param(q, "selectedRules", "");
+        String filterText = param(q, "filterText", "");
 
-        if (jiraProject == null || jiraProject.isBlank()) {
-            sendError(ex, 400, "jira.defaultProject не задан"); return;
+        String overrideProject = param(q, "overrideProject", cfg.defaultProject());
+        String overrideIssueType = param(q, "overrideIssueType", cfg.issueType());
+        String overrideEpic = param(q, "overrideEpic", cfg.epic());
+        String overridePriority = param(q, "overridePriority", cfg.priority());
+        String overrideSecurity = param(q, "overrideSecurity", cfg.security());
+        String overrideTeam = param(q, "overrideTeam", cfg.team());
+        String overrideLabels = param(q, "overrideLabels", cfg.labels());
+        String overrideComponents = param(q, "overrideComponents", cfg.components());
+        String overrideAssignee = param(q, "overrideAssignee", cfg.assignee());
+
+        if (overrideProject == null || overrideProject.isBlank()) {
+            sendError(ex, 400, "Проект не выбран"); return;
         }
 
         SessionLoader.SessionInfo session;
@@ -94,14 +212,6 @@ public class CreateJiraIssueHandler extends BaseHandler {
             sendError(ex, 500, cfg.sessionFile() + ": " + e.getMessage()); return;
         }
 
-        System.out.println("\n╔══════════════════════════════════════════════════════╗");
-        System.out.println("║  СОЗДАНИЕ ЗАДАЧИ В JIRA                              ║");
-        System.out.println("╚══════════════════════════════════════════════════════╝");
-        System.out.println("[Jira] URL       = " + cfg.baseUrl());
-        System.out.println("[Jira] Проект    = " + jiraProject);
-        System.out.println("[Jira] Тип       = " + jiraType);
-        System.out.println("[Jira] Sonar     = " + project + " (sev=" + sev + ", qual=" + qual + ", statusFilter=" + statusFilter + ")");
-
         JiraClient jira = new JiraClient(cfg.baseUrl(), session.cookieHeader());
         JiraFieldService fieldService = new JiraFieldService(jira);
         JiraTempoTeamService tempo = new JiraTempoTeamService(jira);
@@ -110,22 +220,24 @@ public class CreateJiraIssueHandler extends BaseHandler {
         JiraIssueCommentService comment = new JiraIssueCommentService(jira);
         JiraIssueAttachmentService attach = new JiraIssueAttachmentService(jira, cfg.baseUrl(), comment);
 
-        String author = "me".equalsIgnoreCase(cfg.assignee()) ? session.username() : cfg.assignee();
+        String author = "me".equalsIgnoreCase(overrideAssignee) ? session.username() : overrideAssignee;
         if (author == null || author.isBlank()) {
             try { author = userService.getMyself().name(); } catch (Exception ignored) {}
         }
 
-        // ---- Загрузка issues ----
-        System.out.println("\n[1/6] Загрузка issues из SonarQube...");
         SonarIssuesApi api = newApi(project);
         List<Issue> issues = new ArrayList<>();
         String keysCsv = param(q, "keys", null);
         byte[] bodyBytes = ex.getRequestBody().readAllBytes();
 
+        // ===== ИСПРАВЛЕНИЕ: Отслеживаем, были ли переданы конкретные ключи =====
+        boolean hasExplicitKeys = false;
+
         if (bodyBytes.length > 0 && (keysCsv == null || keysCsv.isEmpty())) {
             try {
                 JSONObject req = new JSONObject(new String(bodyBytes, StandardCharsets.UTF_8));
                 if (req.has("keys")) {
+                    hasExplicitKeys = true;
                     JSONArray arr = req.getJSONArray("keys");
                     for (int i = 0; i < arr.length(); i++) {
                         Issue it = api.fetchIssue(arr.getString(i));
@@ -135,28 +247,43 @@ public class CreateJiraIssueHandler extends BaseHandler {
             } catch (Exception ignored) {}
         }
         if (issues.isEmpty() && keysCsv != null && !keysCsv.isEmpty()) {
+            hasExplicitKeys = true;
             for (String raw : keysCsv.split(",")) {
                 Issue it = api.fetchIssue(raw.trim());
                 if (it != null) issues.add(it);
             }
         }
-        if (issues.isEmpty()) {
+
+        // Если пользователь нажал "Выделить всё" (hasExplicitKeys = false), тогда фильтруем
+        if (!hasExplicitKeys && issues.isEmpty()) {
             if ("UNPROCESSED".equals(statusFilter)) issues = api.fetchAllByStatuses(SonarIssuesApi.ACTIVE_STATUSES, sev, qual);
             else if ("PROCESSED".equals(statusFilter)) {
                 for (Issue it : api.fetchAllByStatuses(null, sev, qual)) {
                     if (!"OPEN".equals(it.status) && !"REOPENED".equals(it.status)) issues.add(it);
                 }
             } else issues = api.fetchAllByStatuses(null, sev, qual);
+
+            Set<String> selectedTags = new HashSet<>();
+            if (!tagsParam.isEmpty()) for (String t : tagsParam.split(",")) if (!t.isEmpty()) selectedTags.add(t.trim());
+
+            Set<String> excludedTags = new HashSet<>();
+            if (!excludedTagsParam.isEmpty()) for (String t : excludedTagsParam.split(",")) if (!t.isEmpty()) excludedTags.add(t.trim());
+
+            Set<String> selectedRules = new HashSet<>();
+            if (!selectedRulesParam.isEmpty()) for (String r : selectedRulesParam.split(",")) if (!r.isEmpty()) selectedRules.add(r.trim());
+
+            String qText = filterText == null ? "" : filterText.toLowerCase();
+
+            List<Issue> filtered = new ArrayList<>();
+            for (Issue it : issues) {
+                if (shouldSkip(it, selectedTags, excludedTags, selectedRules, qText, statusFilter)) continue;
+                filtered.add(it);
+            }
+            issues = filtered;
         }
 
-        if (issues.isEmpty()) {
-            System.out.println("  ✗ Нет issues для отчёта");
-            sendError(ex, 400, "Нет issues для отчёта"); return;
-        }
-        System.out.println("  ✓ Найдено issues: " + issues.size());
+        if (issues.isEmpty()) { sendError(ex, 400, "Нет issues для отчёта (проверьте фильтры)"); return; }
 
-        // ---- Формирование ZIP ----
-        System.out.println("\n[2/6] Формирование ZIP-архива...");
         Map<String, List<Issue>> issuesByFile = new TreeMap<>();
         for (Issue it : issues) issuesByFile.computeIfAbsent(it.component != null ? it.component : "(unknown)", k -> new ArrayList<>()).add(it);
 
@@ -178,125 +305,121 @@ public class CreateJiraIssueHandler extends BaseHandler {
         Path zip = Files.createTempFile("sonar_jira_", ".zip");
         try {
             HtmlPerFileExporter.writeZip(zip, issuesByFile, snippets, project, (state.getSession() != null ? state.getSession().getHost() : "sonar.bars.group"), false, null);
-            System.out.println("  ✓ ZIP: " + Files.size(zip) + " байт, " + issuesByFile.size() + " файлов");
         } catch (Exception e) {
             try { Files.deleteIfExists(zip); } catch (Exception ignored) {}
-            System.out.println("  ✗ Ошибка сборки ZIP: " + e.getMessage());
             sendError(ex, 500, "Ошибка сборки ZIP: " + e.getMessage()); return;
         }
 
         String summary = (customSum != null && !customSum.isBlank()) ? customSum : project + ": Необходимо исправить ошибки, найденные SonarQube";
         String description = (customDesc != null && !customDesc.isBlank()) ? customDesc : "Необходимо проанализировать ошибки...\n\n*Всего issues:* " + issues.size();
 
-        // ---- Поиск обязательных полей ----
-        System.out.println("\n[3/6] Определение типа задачи и обязательных полей...");
-        String issueTypeId = jiraType;
-        if (!jiraType.matches("\\d+")) {
-            issueTypeId = fieldService.findIssueTypeId(jiraProject, jiraType);
-        }
-        System.out.println("  ✓ IssueTypeId = " + issueTypeId);
+        String issueTypeId = fieldService.findIssueTypeId(overrideProject, overrideIssueType);
+        Map<String, Object> extras = buildExtraFields(fieldService, tempo, overrideProject, issueTypeId,
+                overrideEpic, overridePriority, overrideSecurity, overrideTeam, overrideLabels, overrideComponents);
 
-        // ---- Создание задачи ----
-        System.out.println("\n[4/6] Создание задачи в Jira...");
-        Map<String, Object> extras = buildExtraFields(cfg, tempo, fieldService, jiraProject, issueTypeId);
         JiraIssueService.CreatedIssue created;
         try {
-            created = issueService.createIssueWithAutoFill(jiraProject, issueTypeId, summary, description, author, extras);
+            created = issueService.createIssueWithAutoFill(overrideProject, issueTypeId, summary, description, author, extras);
         } catch (Exception e) {
             try { Files.deleteIfExists(zip); } catch (Exception ignored) {}
-            System.out.println("  ✗ Не удалось создать задачу: " + e.getMessage());
             sendError(ex, 500, "Не удалось создать задачу: " + e.getMessage()); return;
         }
 
-        // ============================================================
-        // ГЛАВНОЕ: ВЫВОД НОМЕРА ЗАДАЧИ В КОНСОЛЬ СЕРВЕРА
-        // ============================================================
         String browseUrl = cfg.baseUrl() + "/browse/" + created.key();
-        System.out.println();
-        System.out.println("╔══════════════════════════════════════════════════════╗");
-        System.out.println("║  ✓ ЗАДАЧА СОЗДАНА                                    ║");
-        System.out.println("╠══════════════════════════════════════════════════════╣");
-        System.out.printf("║  НОМЕР: %-45s║%n", created.key());
-        System.out.printf("║  ID:    %-45s║%n", created.id());
-        System.out.println("╠══════════════════════════════════════════════════════╣");
-        System.out.println("║  ССЫЛКА:");
-        System.out.println("║  " + browseUrl);
-        System.out.println("╚══════════════════════════════════════════════════════╝");
-        System.out.println();
 
-        // ---- Вложение ----
-        System.out.println("[5/6] Загрузка ZIP-архива в задачу...");
         List<JiraIssueAttachmentService.AttachmentInfo> attachments = Collections.emptyList();
         try {
             attachments = attach.uploadFile(created.key(), zip);
-            System.out.println("  ✓ Вложений: " + attachments.size());
-            for (JiraIssueAttachmentService.AttachmentInfo a : attachments) {
-                System.out.println("    → " + a.filename() + " (" + a.url() + ")");
-            }
         } catch (Exception e) {
-            System.err.println("  ✗ Ошибка загрузки вложения: " + e.getMessage());
+            System.err.println("Ошибка загрузки вложения: " + e.getMessage());
         } finally {
             try { Files.deleteIfExists(zip); } catch (Exception ignored) {}
         }
 
-        // ---- Комментарий ----
-        System.out.println("\n[6/6] Добавление комментария...");
         if (!attachments.isEmpty()) {
             String text = "Отчёт SonarQube сформирован.\nФайлов в отчёте: " + issuesByFile.size() + "\nIssues: " + issues.size();
-            try {
-                attach.addCommentWithLinks(created.key(), text, attachments);
-                System.out.println("  ✓ Комментарий добавлен");
-            } catch (Exception e) {
-                System.err.println("  ✗ Ошибка комментария: " + e.getMessage());
-            }
+            try { attach.addCommentWithLinks(created.key(), text, attachments); } catch (Exception ignored) {}
         }
-
-        System.out.println("\n═══════════════════════════════════════════════════════");
-        System.out.println(" ГОТОВО. Задача: " + created.key() + " — " + browseUrl);
-        System.out.println("═══════════════════════════════════════════════════════\n");
 
         JSONObject resp = new JSONObject()
                 .put("success", true)
                 .put("issueKey", created.key())
-                .put("issueId", created.id())
                 .put("url", browseUrl)
-                .put("summary", summary)
-                .put("assignee", author != null ? author : "")
                 .put("issuesCount", issues.size())
-                .put("filesCount", issuesByFile.size())
                 .put("attachmentsCount", attachments.size());
-
-        JSONArray att = new JSONArray();
-        for (JiraIssueAttachmentService.AttachmentInfo a : attachments) {
-            att.put(new JSONObject().put("id", a.id()).put("filename", a.filename()).put("url", a.url()));
-        }
-        resp.put("attachments", att);
 
         sendJson(ex, 200, resp);
     }
 
-    private Map<String, Object> buildExtraFields(JiraConfig cfg, JiraTempoTeamService tempo, JiraFieldService fields, String jiraProject, String issueTypeId) {
+    private boolean shouldSkip(Issue it, Set<String> selectedTags, Set<String> excludedTags,
+                               Set<String> selectedRules, String qText, String statusFilter) {
+        if (statusFilter != null && !statusFilter.isEmpty() && !"ALL".equals(statusFilter)) {
+            boolean isProcessed = !"OPEN".equals(it.status) && !"REOPENED".equals(it.status);
+            if ("PROCESSED".equals(statusFilter) && !isProcessed) return true;
+            if ("UNPROCESSED".equals(statusFilter) && isProcessed) return true;
+        }
+        if (!selectedTags.isEmpty()) {
+            List<String> itTags = it.tags != null ? it.tags : Collections.emptyList();
+            boolean hasMatch = false;
+            for (String t : selectedTags) {
+                if (t.equals("__NO_TAGS__")) { if (itTags.isEmpty()) hasMatch = true; }
+                else if (itTags.contains(t)) hasMatch = true;
+                if (hasMatch) break;
+            }
+            if (!hasMatch) return true;
+        }
+        if (!selectedRules.isEmpty() && !selectedRules.contains(it.rule)) return true;
+        if (!qText.isEmpty()) {
+            boolean m = (it.key != null && it.key.toLowerCase().contains(qText)) ||
+                    (it.message != null && it.message.toLowerCase().contains(qText)) ||
+                    (it.component != null && it.component.toLowerCase().contains(qText));
+            if (!m) return true;
+        }
+        if (!excludedTags.isEmpty()) {
+            List<String> itTags = it.tags != null ? it.tags : Collections.emptyList();
+            boolean hasExcluded = false;
+            for (String t : excludedTags) {
+                if (t.equals("__NO_TAGS__")) { if (itTags.isEmpty()) hasExcluded = true; }
+                else if (itTags.contains(t)) hasExcluded = true;
+                if (hasExcluded) break;
+            }
+            if (hasExcluded) return true;
+        }
+        return false;
+    }
+
+    private Map<String, Object> buildExtraFields(JiraFieldService fields, JiraTempoTeamService tempo,
+                                                 String jiraProject, String issueTypeId,
+                                                 String epic, String priority, String security,
+                                                 String team, String labels, String components) {
         Map<String, Object> extras = new LinkedHashMap<>();
-        if (cfg.priority() != null && !cfg.priority().isBlank()) {
-            String id = fields.findPriorityIdByName(jiraProject, issueTypeId, cfg.priority());
+
+        if (epic != null && !epic.isBlank()) extras.put("customfield_10101", epic);
+
+        if (priority != null && !priority.isBlank()) {
+            String id = priority.matches("\\d+") ? priority : fields.findPriorityIdByName(jiraProject, issueTypeId, priority);
             if (id != null) extras.put("priority", new JSONObject().put("id", id));
         }
-        if (cfg.security() != null && !cfg.security().isBlank()) {
-            String id = fields.findSecurityLevelIdByName(jiraProject, issueTypeId, cfg.security());
+
+        if (security != null && !security.isBlank()) {
+            String id = security.matches("\\d+") ? security : fields.findSecurityLevelIdByName(jiraProject, issueTypeId, security);
             if (id != null) extras.put("security", new JSONObject().put("id", id));
         }
-        if (cfg.team() != null && !cfg.team().isBlank()) {
-            Integer teamId = tempo.findIdByName(cfg.team());
+
+        if (team != null && !team.isBlank()) {
+            Integer teamId = tempo.findIdByName(team);
             if (teamId != null) extras.put("customfield_10202", teamId);
         }
-        if (cfg.labels() != null && !cfg.labels().isBlank()) {
+
+        if (labels != null && !labels.isBlank()) {
             JSONArray arr = new JSONArray();
-            for (String l : cfg.labels().split(",")) if (!l.trim().isEmpty()) arr.put(l.trim());
+            for (String l : labels.split(",")) if (!l.trim().isEmpty()) arr.put(l.trim());
             if (arr.length() > 0) extras.put("labels", arr);
         }
-        if (cfg.components() != null && !cfg.components().isBlank()) {
+
+        if (components != null && !components.isBlank()) {
             JSONArray arr = new JSONArray();
-            for (String c : cfg.components().split(",")) {
+            for (String c : components.split(",")) {
                 if (c.trim().isEmpty()) continue;
                 JSONObject o = new JSONObject();
                 if (c.trim().matches("\\d+")) o.put("id", c.trim());
@@ -305,6 +428,7 @@ public class CreateJiraIssueHandler extends BaseHandler {
             }
             if (arr.length() > 0) extras.put("components", arr);
         }
+
         return extras;
     }
 }

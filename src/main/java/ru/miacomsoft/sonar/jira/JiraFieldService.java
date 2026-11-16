@@ -96,49 +96,67 @@ public class JiraFieldService {
         return out;
     }
 
-    // ===== ИСПРАВЛЕНО: Умный поиск ID типа задачи с фоллбэком =====
-    public String findIssueTypeId(String projectKey, String typeName) {
-        if (typeName != null && typeName.matches("\\d+")) return typeName; // Уже ID
+    // ===== Методы для списков (Проекты, Типы, Приоритеты, Безопасность) =====
 
-        List<JSONObject> availableTypes = new ArrayList<>();
+    public List<AllowedValue> getProjects() {
+        List<AllowedValue> out = new ArrayList<>();
+        try {
+            JSONArray arr = new JSONArray(jira.get("/rest/api/2/project"));
+            for (int i = 0; i < arr.length(); i++) {
+                JSONObject o = arr.getJSONObject(i);
+                out.add(new AllowedValue(o.optString("key"), o.optString("name") + " (" + o.optString("key") + ")"));
+            }
+        } catch (Exception ignored) {}
+        return out;
+    }
 
+    public List<AllowedValue> getIssueTypes(String projectKey) {
+        List<AllowedValue> out = new ArrayList<>();
         try {
             JSONObject root = new JSONObject(jira.get("/rest/api/2/issue/createmeta/" + enc(projectKey) + "/issuetypes"));
             JSONArray arr = root.optJSONArray("values");
             if (arr != null) {
                 for (int i = 0; i < arr.length(); i++) {
                     JSONObject it = arr.getJSONObject(i);
-                    availableTypes.add(it);
-                    if (typeName != null && it.optString("name").equalsIgnoreCase(typeName)) {
-                        return it.optString("id");
-                    }
+                    out.add(new AllowedValue(it.optString("id"), it.optString("name")));
                 }
             }
         } catch (Exception ignored) { }
+        return out;
+    }
 
+    public List<AllowedValue> getAllPriorities() {
+        List<AllowedValue> out = new ArrayList<>();
         try {
-            JSONObject root = new JSONObject(jira.get("/rest/api/2/project/" + enc(projectKey)));
-            JSONArray types = root.optJSONArray("issueTypes");
-            if (types != null) {
-                for (int i = 0; i < types.length(); i++) {
-                    JSONObject it = types.getJSONObject(i);
-                    if (typeName != null && it.optString("name").equalsIgnoreCase(typeName)) {
-                        return it.optString("id");
-                    }
+            JSONArray arr = new JSONArray(jira.get("/rest/api/2/priority"));
+            for (int i = 0; i < arr.length(); i++) {
+                JSONObject p = arr.getJSONObject(i);
+                out.add(new AllowedValue(p.optString("id"), p.optString("name")));
+            }
+        } catch (Exception e) {
+            System.err.println("[JiraFieldService] Error loading priorities: " + e.getMessage());
+        }
+        return out;
+    }
+
+    public List<AllowedValue> getSecurityLevels(String projectKey, String issueTypeId) {
+        Map<String, FieldMeta> meta = getCreatemeta(projectKey, issueTypeId);
+        if (meta.containsKey("security")) return meta.get("security").allowedValues();
+        return List.of();
+    }
+
+    public String findIssueTypeId(String projectKey, String typeName) {
+        if (typeName != null && typeName.matches("\\d+")) return typeName;
+        try {
+            JSONObject root = new JSONObject(jira.get("/rest/api/2/issue/createmeta/" + enc(projectKey) + "/issuetypes"));
+            JSONArray arr = root.optJSONArray("values");
+            if (arr != null) {
+                for (int i = 0; i < arr.length(); i++) {
+                    JSONObject it = arr.getJSONObject(i);
+                    if (it.optString("name").equalsIgnoreCase(typeName)) return it.optString("id");
                 }
             }
         } catch (Exception ignored) { }
-
-        System.out.println("  WARN: тип задачи '" + typeName + "' не найден в проекте " + projectKey);
-        if (!availableTypes.isEmpty()) {
-            System.out.println("  Доступные типы задач в этом проекте:");
-            for (JSONObject it : availableTypes) {
-                System.out.println("    " + it.optString("id") + " = " + it.optString("name"));
-            }
-            String fallbackId = availableTypes.get(0).optString("id");
-            System.out.println("  ВНИМАНИЕ: используем первый доступный тип: " + fallbackId);
-            return fallbackId;
-        }
         return typeName;
     }
 

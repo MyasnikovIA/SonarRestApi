@@ -12,18 +12,27 @@ public class JiraTempoTeamService {
 
     public JiraTempoTeamService(JiraClient jira) { this.jira = jira; }
 
+    public List<JiraFieldService.AllowedValue> getPickerTeams() {
+        List<JiraFieldService.AllowedValue> out = new ArrayList<>();
+        try {
+            JSONArray arr = new JSONArray(jira.get("/rest/tempo-teams/2/picker/team?expand=projects&query="));
+            for (int i = 0; i < arr.length(); i++) {
+                JSONObject t = arr.getJSONObject(i);
+                out.add(new JiraFieldService.AllowedValue(t.optString("id"), t.optString("name")));
+            }
+        } catch (Exception ignored) {}
+        return out;
+    }
+
     public Integer findIdByName(String name) {
         if (name == null) return null;
         String target = name.trim().toLowerCase();
         Integer sel = lookup("/rest/tempo-teams/2/team/selectable", target);
-        if (sel != null) { System.out.println("  INFO: team '" + name + "' → id=" + sel + " (/selectable)"); return sel; }
+        if (sel != null) return sel;
         Integer all = lookup("/rest/tempo-teams/2/team", target);
-        if (all != null) {
-            System.out.println("  WARN: team '" + name + "' → id=" + all + " (/team — но НЕ в /selectable)");
-            return all;
-        }
+        if (all != null) return all;
         Integer member = lookup("/rest/tempo-teams/2/team/member", target);
-        if (member != null) { System.out.println("  INFO: team '" + name + "' → id=" + member + " (/member)"); return member; }
+        if (member != null) return member;
         return null;
     }
 
@@ -54,8 +63,7 @@ public class JiraTempoTeamService {
 
     public List<String> findAccessibleTeamIds() {
         List<String> out = new ArrayList<>();
-        for (String ep : new String[]{"/rest/tempo-teams/2/team/selectable",
-                "/rest/tempo-teams/2/team/member"}) {
+        for (String ep : new String[]{"/rest/tempo-teams/2/team/selectable", "/rest/tempo-teams/2/team/member"}) {
             try {
                 JSONArray arr = new JSONArray(jira.get(ep));
                 for (int i = 0; i < arr.length(); i++) {
@@ -68,7 +76,6 @@ public class JiraTempoTeamService {
         return out;
     }
 
-    /** Формат bare integer первым — рабочий для этого инстанса. */
     public List<Object> buildCandidates(Object sample, String teamId, String teamName) {
         List<Object> out = new ArrayList<>();
         int numericId = -1;
@@ -93,8 +100,7 @@ public class JiraTempoTeamService {
         if (numericId > 0) out.add(new JSONArray().put(numericId));
         if (teamId != null) out.add(new JSONArray().put(new JSONObject().put("id", teamId)));
         if (teamName != null) out.add(new JSONArray().put(new JSONObject().put("name", teamName)));
-        if (numericId > 0) out.add(new JSONObject().put("id", numericId)
-                .put("name", teamName == null ? "" : teamName));
+        if (numericId > 0) out.add(new JSONObject().put("id", numericId).put("name", teamName == null ? "" : teamName));
         if (teamId != null) {
             Object full = getFullTeam(teamId);
             if (full != null) out.add(full);

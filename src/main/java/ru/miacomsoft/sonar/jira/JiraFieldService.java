@@ -106,22 +106,49 @@ public class JiraFieldService {
                 JSONObject o = arr.getJSONObject(i);
                 out.add(new AllowedValue(o.optString("key"), o.optString("name") + " (" + o.optString("key") + ")"));
             }
-        } catch (Exception ignored) {}
+        } catch (Exception e) {
+            System.err.println("[JiraFieldService] Error loading projects: " + e.getMessage());
+        }
         return out;
     }
 
+    /**
+     * ИСПРАВЛЕНО: Добавлен fallback для старых версий Jira (до 8.4),
+     * где эндпоинт /createmeta/{projectKey}/issuetypes может отсутствовать.
+     * Если новый эндпоинт возвращает пустоту, пробуем старый.
+     */
     public List<AllowedValue> getIssueTypes(String projectKey) {
         List<AllowedValue> out = new ArrayList<>();
+        // 1) Пытаемся использовать новый эндпоинт (Jira 8.4+)
         try {
             JSONObject root = new JSONObject(jira.get("/rest/api/2/issue/createmeta/" + enc(projectKey) + "/issuetypes"));
             JSONArray arr = root.optJSONArray("values");
-            if (arr != null) {
+            if (arr != null && arr.length() > 0) {
                 for (int i = 0; i < arr.length(); i++) {
                     JSONObject it = arr.getJSONObject(i);
                     out.add(new AllowedValue(it.optString("id"), it.optString("name")));
                 }
+                return out;
             }
         } catch (Exception ignored) { }
+
+        // 2) Fallback для старых версий Jira
+        try {
+            JSONObject root = new JSONObject(jira.get("/rest/api/2/issue/createmeta?projectKeys="
+                    + enc(projectKey) + "&expand=projects.issuetypes"));
+            JSONArray projects = root.optJSONArray("projects");
+            if (projects != null && projects.length() > 0) {
+                JSONArray types = projects.getJSONObject(0).optJSONArray("issuetypes");
+                if (types != null) {
+                    for (int i = 0; i < types.length(); i++) {
+                        JSONObject it = types.getJSONObject(i);
+                        out.add(new AllowedValue(it.optString("id"), it.optString("name")));
+                    }
+                }
+            }
+        } catch (Exception e) {
+            System.err.println("[JiraFieldService] Error loading issueTypes for " + projectKey + ": " + e.getMessage());
+        }
         return out;
     }
 

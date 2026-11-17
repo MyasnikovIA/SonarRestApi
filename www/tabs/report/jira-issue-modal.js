@@ -7,6 +7,23 @@ export async function showJiraIssueModal(keys, ctx, projectName, filters) {
     const f = filters || {};
     const isAll = (keys === null);
 
+    // Баннер с ошибкой, если бэкенд вернул listError
+    let errorBanner = '';
+    if (cfg.listError) {
+        errorBanner = `
+            <div style="margin-bottom: 12px; font-size: 12px; color: var(--err); background: rgba(248,81,73,0.1); border: 1px solid var(--err); border-radius: 6px; padding: 8px 12px;">
+                ⚠ ${esc(cfg.listError)}
+            </div>
+        `;
+    }
+    if (cfg.sessionError) {
+        errorBanner += `
+            <div style="margin-bottom: 12px; font-size: 12px; color: var(--warn); background: rgba(210,153,34,0.1); border: 1px solid var(--warn); border-radius: 6px; padding: 8px 12px;">
+                ⚠ Сессия: ${esc(cfg.sessionError)}
+            </div>
+        `;
+    }
+
     const defaultSummary = `${projectName}: Необходимо исправить ошибки, найденные SonarQube`;
     const defaultDescription = `Необходимо проанализировать ошибки, найденные SonarQube... \n\nПроект SonarQube: ${projectName}\nSeverity: ${f.sev || 'ALL'} / ${f.qual || 'ALL'}\nВсего issues (по фильтру): ${isAll ? 'весь список' : keys.length}\n\nПолный отчёт — в ZIP-архиве, прикреплённом к задаче.\nСсылка на скачивание — в комментарии ниже.`;
 
@@ -50,6 +67,8 @@ export async function showJiraIssueModal(keys, ctx, projectName, filters) {
                 <button class="modal-close" type="button">&times;</button>
             </div>
             <div class="modal-body">
+
+                ${errorBanner}
 
                 <div style="margin-bottom: 12px; font-size: 12px; color: var(--text-dim); background: var(--bg3); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; display: flex; align-items: center; gap: 8px;">
                     <span>👤 Задача будет создана от имени:</span>

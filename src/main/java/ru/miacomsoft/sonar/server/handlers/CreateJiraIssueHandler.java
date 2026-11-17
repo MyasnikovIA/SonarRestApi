@@ -39,6 +39,11 @@ public class CreateJiraIssueHandler extends BaseHandler {
         }
     }
 
+    /**
+     * ИСПРАВЛЕНО: Каждый список загружается в отдельном try-catch,
+     * чтобы при ошибке одного из них остальные всё равно заполнились.
+     * Если какой-то список пуст, в ответе будет поле listError.
+     */
     private void handleGetConfig(HttpExchange ex) throws Exception {
         JiraConfig cfg = JiraConfig.getInstance();
         SessionLoader.SessionInfo session = null;
@@ -69,69 +74,106 @@ public class CreateJiraIssueHandler extends BaseHandler {
 
         if (sessionError != null) resp.put("sessionError", sessionError);
 
-        if (session != null) {
-            try {
-                JiraClient jira = new JiraClient(cfg.baseUrl(), session.cookieHeader());
-                JiraFieldService fieldService = new JiraFieldService(jira);
-                JiraUserService userService = new JiraUserService(jira);
-                JiraLabelService labelService = new JiraLabelService(jira);
-
-                if (defaultAssignee != null && !defaultAssignee.isBlank()) {
-                    try {
-                        JiraUserService.JiraUser me = userService.getUser(defaultAssignee);
-                        if (me != null && me.displayName() != null && !me.displayName().isBlank()) {
-                            userDisplayName = me.displayName();
-                            resp.put("userDisplayName", userDisplayName);
-                        }
-                    } catch (Exception ignored) {}
-                }
-
-                JSONArray projectsArr = new JSONArray();
-                for (JiraFieldService.AllowedValue av : fieldService.getProjects()) {
-                    projectsArr.put(new JSONObject().put("id", av.id()).put("name", av.value()));
-                }
-                resp.put("projects", projectsArr);
-
-                JSONArray typesArr = new JSONArray();
-                for (JiraFieldService.AllowedValue av : fieldService.getIssueTypes(cfg.defaultProject())) {
-                    typesArr.put(new JSONObject().put("id", av.id()).put("name", av.value()));
-                }
-                resp.put("issueTypes", typesArr);
-
-                JSONArray priorsArr = new JSONArray();
-                for (JiraFieldService.AllowedValue av : fieldService.getAllPriorities()) {
-                    priorsArr.put(new JSONObject().put("id", av.id()).put("name", av.value()));
-                }
-                resp.put("priorities", priorsArr);
-
-                JSONArray secArr = new JSONArray();
-                String defaultSecurityId = "";
-                for (JiraFieldService.AllowedValue av : fieldService.getSecurityLevels(cfg.defaultProject(), cfg.issueType())) {
-                    secArr.put(new JSONObject().put("id", av.id()).put("name", av.value()));
-                    if (av.value().equalsIgnoreCase(cfg.security()) || av.value().equalsIgnoreCase("Основной")) {
-                        defaultSecurityId = av.id();
-                    }
-                }
-                resp.put("securityLevels", secArr);
-                resp.put("configSecurity", defaultSecurityId);
-
-                JSONArray labelsArr = new JSONArray();
-                for (String label : labelService.getSuggestions(cfg.defaultProject(), "")) {
-                    labelsArr.put(label);
-                }
-                resp.put("availableLabels", labelsArr);
-
-                JSONArray usersArr = new JSONArray();
-                List<JiraUserService.JiraUser> users = userService.getAssignableUsers(cfg.defaultProject(), "", 100);
-                for (JiraUserService.JiraUser u : users) {
-                    usersArr.put(new JSONObject().put("name", u.name()).put("displayName", u.displayName()));
-                }
-                resp.put("assignees", usersArr);
-
-            } catch (Exception e) {
-                resp.put("listError", e.getMessage());
-            }
+        if (session == null) {
+            sendJson(ex, 200, resp);
+            return;
         }
+
+        JiraClient jira = new JiraClient(cfg.baseUrl(), session.cookieHeader());
+        JiraFieldService fieldService = new JiraFieldService(jira);
+        JiraUserService userService = new JiraUserService(jira);
+        JiraLabelService labelService = new JiraLabelService(jira);
+
+        // Диагностика ошибок
+        List<String> errors = new ArrayList<>();
+
+        // --- Проекты ---
+        try {
+            JSONArray projectsArr = new JSONArray();
+            for (JiraFieldService.AllowedValue av : fieldService.getProjects()) {
+                projectsArr.put(new JSONObject().put("id", av.id()).put("name", av.value()));
+            }
+            resp.put("projects", projectsArr);
+            if (projectsArr.isEmpty()) errors.add("projects пуст");
+        } catch (Exception e) {
+            errors.add("projects: " + e.getMessage());
+            resp.put("projects", new JSONArray());
+        }
+
+        // --- Типы задач ---
+        try {
+            JSONArray typesArr = new JSONArray();
+            for (JiraFieldService.AllowedValue av : fieldService.getIssueTypes(cfg.defaultProject())) {
+                typesArr.put(new JSONObject().put("id", av.id()).put("name", av.value()));
+            }
+            resp.put("issueTypes", typesArr);
+            if (typesArr.isEmpty()) errors.add("issueTypes пуст");
+        } catch (Exception e) {
+            errors.add("issueTypes: " + e.getMessage());
+            resp.put("issueTypes", new JSONArray());
+        }
+
+        // --- Приоритеты ---
+        try {
+            JSONArray priorsArr = new JSONArray();
+            for (JiraFieldService.AllowedValue av : fieldService.getAllPriorities()) {
+                priorsArr.put(new JSONObject().put("id", av.id()).put("name", av.value()));
+            }
+            resp.put("priorities", priorsArr);
+            if (priorsArr.isEmpty()) errors.add("priorities пуст");
+        } catch (Exception e) {
+            errors.add("priorities: " + e.getMessage());
+            resp.put("priorities", new JSONArray());
+        }
+
+        // --- Уровни безопасности ---
+        try {
+            JSONArray secArr = new JSONArray();
+            String defaultSecurityId = "";
+            for (JiraFieldService.AllowedValue av : fieldService.getSecurityLevels(cfg.defaultProject(), cfg.issueType())) {
+                secArr.put(new JSONObject().put("id", av.id()).put("name", av.value()));
+                if (av.value().equalsIgnoreCase(cfg.security()) || av.value().equalsIgnoreCase("Основной")) {
+                    defaultSecurityId = av.id();
+                }
+            }
+            resp.put("securityLevels", secArr);
+            resp.put("configSecurity", defaultSecurityId);
+        } catch (Exception e) {
+            errors.add("securityLevels: " + e.getMessage());
+            resp.put("securityLevels", new JSONArray());
+        }
+
+        // --- Метки ---
+        try {
+            JSONArray labelsArr = new JSONArray();
+            for (String label : labelService.getSuggestions(cfg.defaultProject(), "")) {
+                labelsArr.put(label);
+            }
+            resp.put("availableLabels", labelsArr);
+        } catch (Exception e) {
+            errors.add("availableLabels: " + e.getMessage());
+            resp.put("availableLabels", new JSONArray());
+        }
+
+        // --- Пользователи ---
+        try {
+            JSONArray usersArr = new JSONArray();
+            List<JiraUserService.JiraUser> users = userService.getAssignableUsers(cfg.defaultProject(), "", 100);
+            for (JiraUserService.JiraUser u : users) {
+                usersArr.put(new JSONObject().put("name", u.name()).put("displayName", u.displayName()));
+            }
+            resp.put("assignees", usersArr);
+            if (usersArr.isEmpty()) errors.add("assignees пуст");
+        } catch (Exception e) {
+            errors.add("assignees: " + e.getMessage());
+            resp.put("assignees", new JSONArray());
+        }
+
+        if (!errors.isEmpty()) {
+            resp.put("listError", "Ошибки загрузки: " + String.join("; ", errors)
+                    + ". Проверьте cookie в session.txt.");
+        }
+
         sendJson(ex, 200, resp);
     }
 
@@ -185,7 +227,6 @@ public class CreateJiraIssueHandler extends BaseHandler {
         String customDesc = param(q, "description", null);
         String statusFilter = param(q, "statusFilter", "ALL");
 
-        // Фильтры из UI
         String tagsParam = param(q, "tags", "");
         String excludedTagsParam = param(q, "excludedTags", "");
         String selectedRulesParam = param(q, "selectedRules", "");
@@ -230,7 +271,6 @@ public class CreateJiraIssueHandler extends BaseHandler {
         String keysCsv = param(q, "keys", null);
         byte[] bodyBytes = ex.getRequestBody().readAllBytes();
 
-        // ===== ИСПРАВЛЕНИЕ: Отслеживаем, были ли переданы конкретные ключи =====
         boolean hasExplicitKeys = false;
 
         if (bodyBytes.length > 0 && (keysCsv == null || keysCsv.isEmpty())) {
@@ -254,7 +294,6 @@ public class CreateJiraIssueHandler extends BaseHandler {
             }
         }
 
-        // Если пользователь нажал "Выделить всё" (hasExplicitKeys = false), тогда фильтруем
         if (!hasExplicitKeys && issues.isEmpty()) {
             if ("UNPROCESSED".equals(statusFilter)) issues = api.fetchAllByStatuses(SonarIssuesApi.ACTIVE_STATUSES, sev, qual);
             else if ("PROCESSED".equals(statusFilter)) {

@@ -40,9 +40,10 @@ public class CreateJiraIssueHandler extends BaseHandler {
     }
 
     /**
-     * ИСПРАВЛЕНО: Каждый список загружается в отдельном try-catch,
+     * ИСПРАВЛЕНО: display name текущего пользователя берётся из /rest/api/2/myself
+     * (раньше показывался логин — не совпадало с отображением остальных пользователей).
+     * Каждый список загружается в отдельном try-catch,
      * чтобы при ошибке одного из них остальные всё равно заполнились.
-     * Если какой-то список пуст, в ответе будет поле listError.
      */
     private void handleGetConfig(HttpExchange ex) throws Exception {
         JiraConfig cfg = JiraConfig.getInstance();
@@ -83,6 +84,16 @@ public class CreateJiraIssueHandler extends BaseHandler {
         JiraFieldService fieldService = new JiraFieldService(jira);
         JiraUserService userService = new JiraUserService(jira);
         JiraLabelService labelService = new JiraLabelService(jira);
+
+        // NEW: реальное display name текущего пользователя (из /myself)
+        try {
+            JiraUserService.JiraUser me = userService.getMyself();
+            if (me != null && me.displayName() != null && !me.displayName().isBlank()) {
+                resp.put("userDisplayName", me.displayName());
+            }
+        } catch (Exception ignored) {
+            // 401/недоступно — останется login из session.username() (приемлемо)
+        }
 
         // Диагностика ошибок
         List<String> errors = new ArrayList<>();
@@ -242,6 +253,15 @@ public class CreateJiraIssueHandler extends BaseHandler {
         String overrideComponents = param(q, "overrideComponents", cfg.components());
         String overrideAssignee = param(q, "overrideAssignee", cfg.assignee());
 
+        // NEW: диагностика — видно, что реально приходит с клиента
+        System.out.println("[CreateJiraIssue] POST: project=" + project
+                + " sev=" + sev + " qual=" + qual
+                + " statusFilter=" + statusFilter
+                + " tags=[" + tagsParam + "]"
+                + " excludedTags=[" + excludedTagsParam + "]"
+                + " selectedRules=[" + selectedRulesParam + "]"
+                + " filterText=[" + filterText + "]");
+
         if (overrideProject == null || overrideProject.isBlank()) {
             sendError(ex, 400, "Проект не выбран"); return;
         }
@@ -273,16 +293,44 @@ public class CreateJiraIssueHandler extends BaseHandler {
 
         boolean hasExplicitKeys = false;
 
+        // NEW: keys в теле POST обрабатываются батчами по 100 (было по одному fetch)
         if (bodyBytes.length > 0 && (keysCsv == null || keysCsv.isEmpty())) {
+            System.out.println("[CreateJiraIssue] Body bytes: " + bodyBytes.length);
             try {
                 JSONObject req = new JSONObject(new String(bodyBytes, StandardCharsets.UTF_8));
                 if (req.has("keys")) {
                     hasExplicitKeys = true;
                     JSONArray arr = req.getJSONArray("keys");
+                    List<String> keysList = new ArrayList<>();
                     for (int i = 0; i < arr.length(); i++) {
-                        Issue it = api.fetchIssue(arr.getString(i));
-                        if (it != null) issues.add(it);
+                        String k = arr.optString(i, "");
+                        if (k != null && !k.isEmpty()) keysList.add(k);
                     }
+
+                    final int BATCH = 100;
+                    for (int i = 0; i < keysList.size(); i += BATCH) {
+                        int end = Math.min(i + BATCH, keysList.size());
+                        List<String> batch = keysList.subList(i, end);
+                        try {
+                            JSONObject raw = api.fetchIssuesByKeys(String.join(",", batch));
+                            JSONArray issuesArr = raw.optJSONArray("issues");
+                            if (issuesArr != null) {
+                                for (int j = 0; j < issuesArr.length(); j++) {
+                                    issues.add(Issue.from(issuesArr.getJSONObject(j), project));
+                                }
+                            }
+                        } catch (Exception e) {
+                            // fallback на индивидуальный fetch
+                            for (String k : batch) {
+                                try {
+                                    Issue it = api.fetchIssue(k);
+                                    if (it != null) issues.add(it);
+                                } catch (Exception ignored) {}
+                            }
+                        }
+                    }
+                    System.out.println("[CreateJiraIssue] Explicit keys loaded: "
+                            + issues.size() + " из " + keysList.size() + " запрошенных");
                 }
             } catch (Exception ignored) {}
         }
@@ -320,6 +368,9 @@ public class CreateJiraIssueHandler extends BaseHandler {
             }
             issues = filtered;
         }
+
+        // NEW: диагностика после фильтрации
+        System.out.println("[CreateJiraIssue] After filter: " + issues.size() + " issues");
 
         if (issues.isEmpty()) { sendError(ex, 400, "Нет issues для отчёта (проверьте фильтры)"); return; }
 

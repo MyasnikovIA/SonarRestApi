@@ -25,7 +25,6 @@ export const report = {
             pBase.set('sev', ctx.state.sev);
             pBase.set('qual', ctx.state.qual);
             pBase.set('p', 1);
-            // ИСПРАВЛЕНИЕ 1: Запрашиваем все записи (10000), чтобы отображать полный листинг файлов
             pBase.set('ps', 10000);
             pBase.set('hideProcessed', 'false');
 
@@ -338,7 +337,6 @@ export const report = {
                 return filtered;
             };
 
-            // ИСПРАВЛЕНИЕ 2: Функция принимает отфильтрованный список для точного подсчета
             const updateExportBtn = (filteredList) => {
                 if (isAllSelected) {
                     exportBtn.style.display = 'inline-block';
@@ -540,7 +538,6 @@ export const report = {
             const startExport = async (format) => {
                 let keys = null;
 
-                // Если галочка "Выделить всё" НЕ стоит, отправляем только выбранные ключи
                 if (!isAllSelected) {
                     const filtered = applyFilters();
                     const list = [];
@@ -556,7 +553,6 @@ export const report = {
                     keys = list;
                 }
 
-                // Фильтры передаются в любом случае (сервер их использует, если keys == null)
                 const filters = {
                     sev: ctx.state.sev,
                     qual: ctx.state.qual,
@@ -570,11 +566,20 @@ export const report = {
                 await showExportModal(keys, format, ctx, ctx.state.project, filters);
             };
 
+            // ИСПРАВЛЕНО: при isAllSelected явно передаём отфильтрованные keys,
+            // чтобы на сервере не зависеть от корректности URL-фильтров.
             const startJiraIssue = () => {
                 let keysToCreate = null;
+                let filteredKeys  = null;
 
-                // Аналогично для Jira
-                if (!isAllSelected) {
+                if (isAllSelected) {
+                    const filtered = applyFilters();
+                    filteredKeys = filtered.map(it => it.key);
+                    if (filteredKeys.length === 0) {
+                        toast('Нет issues по фильтру', true);
+                        return;
+                    }
+                } else {
                     const filtered = applyFilters();
                     const list = [];
                     filtered.forEach(it => {
@@ -594,7 +599,8 @@ export const report = {
                     excludedTags: Array.from(excludedTags),
                     rules: Array.from(selectedRules),
                     filterText: filterText,
-                    statusFilter: statusFilter
+                    statusFilter: statusFilter,
+                    filteredKeys: filteredKeys
                 };
 
                 showJiraIssueModal(keysToCreate, ctx, ctx.state.project, filters);

@@ -298,10 +298,27 @@ export async function showJiraIssueModal(keys, ctx, projectName, filters) {
         p.set('overrideComponents', $('ji-components').value);
         p.set('overrideAssignee', $('ji-assignee').value);
 
+        // ИСПРАВЛЕНО: при isAll клиент передаёт отфильтрованные keys в теле POST.
+        // Это гарантирует совпадение "что вижу" == "что создам", даже если
+        // URL-фильтры по какой-то причине не доедут до сервера.
+        let bodyData;
+        if (isAll) {
+            const fk = f.filteredKeys;
+            if (Array.isArray(fk) && fk.length <= 2000) {
+                bodyData = JSON.stringify({ keys: fk });
+                console.log(`[Jira] Using ${fk.length} client-filtered keys`);
+            } else {
+                bodyData = JSON.stringify({});
+                console.log(`[Jira] Using server-side filter (${fk?.length ?? 0} keys — fallback)`);
+            }
+        } else {
+            bodyData = JSON.stringify({ keys });
+        }
+
         const opts = {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: isAll ? JSON.stringify({}) : JSON.stringify({ keys })
+            body: bodyData
         };
 
         try {

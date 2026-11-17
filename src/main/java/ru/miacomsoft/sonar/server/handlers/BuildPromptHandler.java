@@ -84,8 +84,13 @@ public class BuildPromptHandler extends BaseHandler {
         String sev      = param(q, "sev",  "ALL");
         String qual     = param(q, "qual", "ALL");
 
+        String fullCode = "";
+        String issueComponent = "";
+
         if (issueKey != null && !issueKey.isEmpty()) {
-            buildSingle(project, issueKey, params, availableTags);
+            String[] result = buildSingle(project, issueKey, params, availableTags);
+            fullCode = result[0];
+            issueComponent = result[1];
         } else if (keysCsv != null && !keysCsv.isEmpty()) {
             buildByKeys(project, keysCsv, params, availableTags);
         } else {
@@ -93,6 +98,17 @@ public class BuildPromptHandler extends BaseHandler {
         }
 
         String prompt = template.render(name, params);
+
+        // ДОБАВЛЕНИЕ ПОЛНОГО КОДА В КОНЕЦ
+        if (fullCode != null && !fullCode.isEmpty() && !prompt.contains(fullCode)) {
+            // Закрываем блок кода фрагмента, если шаблон его не закрыл (нет ``` в конце)
+            if (!prompt.trim().endsWith("```")) {
+                prompt += "\n```\n";
+            }
+
+            String langFence = PromptBuilder.detectLanguage(issueComponent).codeFence;
+            prompt += "\n=== ПОЛНЫЙ ЛИСТИНГ ФАЙЛА ===\n```" + langFence + "\n" + fullCode + "\n```";
+        }
 
         JSONObject o = new JSONObject();
         o.put("promptName", name);
@@ -110,9 +126,9 @@ public class BuildPromptHandler extends BaseHandler {
         sendJson(ex, 200, o);
     }
 
-    private void buildSingle(String project, String issueKey,
-                             Map<String, String> params,
-                             List<String> availableTags) throws Exception {
+    private String[] buildSingle(String project, String issueKey,
+                                 Map<String, String> params,
+                                 List<String> availableTags) throws Exception {
         SonarIssuesApi api = newApi(project);
         Issue issue = api.fetchIssue(issueKey);
         if (issue == null) {
@@ -133,13 +149,21 @@ public class BuildPromptHandler extends BaseHandler {
             snippet = new ArrayList<>();
         }
 
+        String fullCode = "";
+        if (issue.component != null && !issue.component.isEmpty()) {
+            String fullComponentKey = project + ":" + issue.component;
+            fullCode = api.fetchFullSource(fullComponentKey);
+        }
+
         if (issue.tags != null) {
             for (String t : issue.tags) {
                 if (!availableTags.contains(t)) availableTags.add(t);
             }
         }
 
-        fillIssueParams(issue, ruleName, snippet, availableTags, params);
+        fillIssueParams(issue, ruleName, snippet, fullCode, availableTags, params);
+
+        return new String[] { fullCode, issue.component };
     }
 
     private void buildByKeys(String project, String keysCsv,
@@ -163,7 +187,6 @@ public class BuildPromptHandler extends BaseHandler {
         List<Issue> issues = new ArrayList<>();
 
         try {
-            // 6 аргументов (добавлен null для rule)
             JSONObject raw = api.fetchPageRaw(SonarIssuesApi.ACTIVE_STATUSES, sev, qual, null, 1, 500);
             JSONArray arr = raw.optJSONArray("issues");
             if (arr != null) {
@@ -178,7 +201,7 @@ public class BuildPromptHandler extends BaseHandler {
         fillBulkParams(issues, availableTags, params);
     }
 
-    private void fillIssueParams(Issue issue, String ruleName, List<String> snippet,
+    private void fillIssueParams(Issue issue, String ruleName, List<String> snippet, String fullCode,
                                  List<String> availableTags,
                                  Map<String, String> params) {
 
@@ -213,6 +236,7 @@ public class BuildPromptHandler extends BaseHandler {
         params.put("LANGUAGE_FENCE",   lang.codeFence);
         params.put("CODE",             codeHighlighted);
         params.put("CODE_RAW",         codeRaw);
+        params.put("FULL_FILE_CODE",   fullCode != null ? fullCode : "");
         params.put("TAGS_LIST",        tagsList(availableTags));
         params.put("ISSUES_COUNT",     "1");
         params.put("ISSUES_LIST",      "1. " + issue.key + " | " + issue.rule
@@ -250,6 +274,7 @@ public class BuildPromptHandler extends BaseHandler {
         putEmptyIfAbsent(params, "LANGUAGE_FENCE");
         putEmptyIfAbsent(params, "CODE");
         putEmptyIfAbsent(params, "CODE_RAW");
+        putEmptyIfAbsent(params, "FULL_FILE_CODE");
     }
 
     private static void putEmptyIfAbsent(Map<String, String> m, String k) {

@@ -833,6 +833,38 @@ public class SonarIssuesApi {
                 + "&additionalFields=" + enc("_all");
         return new JSONObject(client.get(url));
     }
+    /**
+     * Запрашивает полный листинг файла из SonarQube.
+     *
+     * @param componentKey Полный ключ компонента (например, "MEDMIS-tMIS.mis:Cache/FileCache.inc")
+     * @return Строка с полным кодом файла (без HTML-тегов).
+     */
+    public String fetchFullSource(String componentKey) {
+        if (componentKey == null || componentKey.isEmpty()) return "";
+        try {
+            // Запрашиваем с 1 по 100000 строку (с запасом на весь файл)
+            String url = "/api/sources/lines?key=" + enc(componentKey) + "&from=1&to=100000";
+            String json = client.get(url);
+            JSONObject root = new JSONObject(json);
+            JSONArray sources = root.optJSONArray("sources");
+
+            if (sources == null) return "";
+
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < sources.length(); i++) {
+                JSONObject lineObj = sources.getJSONObject(i);
+                String code = lineObj.optString("code", "");
+                // Удаляем HTML-теги и декодируем сущности
+                String cleanLine = cleanHtml(code);
+                sb.append(cleanLine).append("\n");
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            System.err.println("[SonarIssuesApi] Ошибка получения полного кода для "
+                    + componentKey + ": " + e.getMessage());
+            return "";
+        }
+    }
 
     public static int getEffectivePsLimit() {
         return effectivePsLimit;

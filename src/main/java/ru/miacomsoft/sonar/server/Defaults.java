@@ -97,7 +97,8 @@ public final class Defaults {
             - Язык: [LANGUAGE]
 
             Код:
-            ```[LANGUAGE_FENCE]
+            ```[LANGUAGE_FENCE]```
+            
             [CODE]
             """;
 
@@ -137,7 +138,7 @@ public final class Defaults {
             - Язык: [LANGUAGE]
 
             Код:
-            ```[LANGUAGE_FENCE]
+            ```[LANGUAGE_FENCE]```
             [CODE]
             """;
 

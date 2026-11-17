@@ -127,7 +127,8 @@ public final class PromptBuilder {
      */
     private static Map<String, String> baseIssueParams(Issue issue, String ruleName,
                                                        List<String> snippet,
-                                                       List<String> availableTags) {
+                                                       List<String> availableTags,
+                                                       String fullFileCode) {
         Map<String, String> params = new LinkedHashMap<>();
 
         Lang lang = detectLanguage(issue.component);
@@ -164,6 +165,7 @@ public final class PromptBuilder {
         params.put("LANGUAGE_FENCE",   lang.codeFence);
         params.put("CODE",             codeHighlighted);
         params.put("CODE_RAW",         codeRaw);
+        params.put("FULL_FILE_CODE",   fullFileCode != null ? fullFileCode : "");
         params.put("TAGS_LIST",        tagsList);
         params.put("ISSUES_COUNT",     "1");
         params.put("ISSUES_LIST",      "1. " + (issue.key != null ? issue.key : "") + " | "
@@ -173,24 +175,43 @@ public final class PromptBuilder {
         return params;
     }
 
-    /** Для prompts/auto-resolve.txt */
+    /** Перегрузка без fullFileCode — для обратной совместимости. */
     public static Map<String, String> buildAutoResolveParams(
             Issue issue, List<String> snippet, List<String> availableTags) {
+        return buildAutoResolveParams(issue, snippet, availableTags, "");
+    }
+
+    /** Для prompts/auto-resolve.txt */
+    public static Map<String, String> buildAutoResolveParams(
+            Issue issue, List<String> snippet, List<String> availableTags, String fullFileCode) {
         String ruleName = issue.ruleName != null ? issue.ruleName : "";
-        return baseIssueParams(issue, ruleName, snippet, availableTags);
+        return baseIssueParams(issue, ruleName, snippet, availableTags, fullFileCode);
+    }
+
+    /** Перегрузка без fullFileCode — для обратной совместимости. */
+    public static Map<String, String> buildAnalyzeIssueParams(
+            Issue issue, String ruleName, List<String> snippet, List<String> availableTags) {
+        return buildAnalyzeIssueParams(issue, ruleName, snippet, availableTags, "");
     }
 
     /** Для prompts/analyze-issue.txt */
     public static Map<String, String> buildAnalyzeIssueParams(
-            Issue issue, String ruleName, List<String> snippet, List<String> availableTags) {
-        return baseIssueParams(issue, ruleName, snippet, availableTags);
+            Issue issue, String ruleName, List<String> snippet, List<String> availableTags, String fullFileCode) {
+        return baseIssueParams(issue, ruleName, snippet, availableTags, fullFileCode);
+    }
+
+    /** Перегрузка без fullFileCode — для обратной совместимости. */
+    public static Map<String, String> buildStatusCommentParams(
+            Issue issue, String ruleName, List<String> snippet,
+            String status, String statusLabel, List<String> availableTags) {
+        return buildStatusCommentParams(issue, ruleName, snippet, status, statusLabel, availableTags, "");
     }
 
     /** Для prompts/status-comment.txt */
     public static Map<String, String> buildStatusCommentParams(
             Issue issue, String ruleName, List<String> snippet,
-            String status, String statusLabel, List<String> availableTags) {
-        Map<String, String> params = baseIssueParams(issue, ruleName, snippet, availableTags);
+            String status, String statusLabel, List<String> availableTags, String fullFileCode) {
+        Map<String, String> params = baseIssueParams(issue, ruleName, snippet, availableTags, fullFileCode);
         String label = (statusLabel != null && !statusLabel.isEmpty())
                 ? statusLabel
                 : defaultStatusLabel(status);
@@ -246,6 +267,7 @@ public final class PromptBuilder {
         putEmptyIfAbsent(params, "LANGUAGE_FENCE");
         putEmptyIfAbsent(params, "CODE");
         putEmptyIfAbsent(params, "CODE_RAW");
+        putEmptyIfAbsent(params, "FULL_FILE_CODE");
 
         return params;
     }

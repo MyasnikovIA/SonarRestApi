@@ -15,3 +15,8 @@ MEDMIS-MISmobile.kafka_api_spec
 MEDMIS-MISmobile.doctor_api_spec
 
 //import JSZip from 'https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm';
+
+
+http://localhost:6060/api/sources/full?key=MEDMIS-tMIS.mis%3ACache%2FFileCache.inc&format=html
+http://localhost:6060/api/sources/full?key=MEDMIS-tMIS.mis%3ACache%2FFileCache.inc&format=txt
+http://localhost:6060/api/sources/full?key=MEDMIS-tMIS.mis%3ACache%2FFileCache.inc

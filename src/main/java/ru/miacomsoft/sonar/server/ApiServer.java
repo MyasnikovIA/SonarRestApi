@@ -49,6 +49,8 @@ public final class ApiServer {
         server.createContext("/api/issues",    new IssuesHandler(state));
         server.createContext("/api/keys",      new KeysHandler(state));
         server.createContext("/api/snippet",   new SnippetHandler(state));
+        server.createContext("/api/sources/full", new SourceFullHandler(state));
+        server.createContext("/api/sources",   new SourceHandler(state));
         server.createContext("/api/changelog", new ChangelogHandler(state));
         server.createContext("/api/projects",  new ProjectsHandler(state));
 

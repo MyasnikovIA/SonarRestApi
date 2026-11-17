@@ -1,7 +1,7 @@
 import { esc, toast, highlightCode } from '../../common.js';
 import { showExportModal } from './export-modal.js';
 import { openReportIssueModal } from './modals/issue-modal.js';
-import { showJiraIssueModal } from './jira-issue-modal.js';   // ===== ДОБАВЛЕНО =====
+import { showJiraIssueModal } from './jira-issue-modal.js';
 
 const NO_TAGS_KEY = '__NO_TAGS__';
 const NO_TAGS_LABEL = '(Без тегов)';
@@ -24,8 +24,9 @@ export const report = {
             if (ctx.state.project) pBase.set('project', ctx.state.project.trim());
             pBase.set('sev', ctx.state.sev);
             pBase.set('qual', ctx.state.qual);
-            pBase.set('p', ctx.state.page || 1);
-            pBase.set('ps', 50);
+            pBase.set('p', 1);
+            // ИСПРАВЛЕНИЕ 1: Запрашиваем все записи (10000), чтобы отображать полный листинг файлов
+            pBase.set('ps', 10000);
             pBase.set('hideProcessed', 'false');
 
             const d = await ctx.api('/api/issues?' + pBase.toString());
@@ -281,7 +282,6 @@ export const report = {
                 <div class="ctx-item" id="ctx-confluence">📋 Выгрузить Confluence (HTML)</div>
                 <div class="ctx-item" style="border-top:1px solid var(--border); margin-top:4px; padding-top:8px;" id="ctx-html-files">📦 Выгрузить HTML (по файлам)</div>
                 <div class="ctx-item" id="ctx-html-files-teams">📦 Выгрузить HTML (с командами)</div>
-                <!-- ===== ДОБАВЛЕНО ===== -->
                 <div class="ctx-item" style="border-top:1px solid var(--border); margin-top:4px; padding-top:8px;" id="ctx-jira-issue">🎫 Создать задачу в Jira</div>
             `;
             document.body.appendChild(ctxMenu);
@@ -338,10 +338,11 @@ export const report = {
                 return filtered;
             };
 
-            const updateExportBtn = () => {
+            // ИСПРАВЛЕНИЕ 2: Функция принимает отфильтрованный список для точного подсчета
+            const updateExportBtn = (filteredList) => {
                 if (isAllSelected) {
                     exportBtn.style.display = 'inline-block';
-                    exportBtn.textContent = `Действия со всеми (${d.total})`;
+                    exportBtn.textContent = `Действия со всеми (${filteredList ? filteredList.length : 0})`;
                 } else {
                     exportBtn.style.display = selectedKeys.size > 0 ? 'inline-block' : 'none';
                     exportBtn.textContent = `Действия с выбранными (${selectedKeys.size})`;
@@ -366,7 +367,7 @@ export const report = {
                 if (!filtered.length) {
                     listEl.innerHTML = '<div class="empty">Нет данных по фильтру</div>';
                     masterCb.checked = false;
-                    updateExportBtn();
+                    updateExportBtn(filtered);
                     return;
                 }
 
@@ -447,7 +448,7 @@ export const report = {
                             if (e.target.checked) selectedKeys.add(e.target.dataset.key);
                             else selectedKeys.delete(e.target.dataset.key);
                         }
-                        updateExportBtn();
+                        updateExportBtn(filtered);
                         syncMasterCheckbox(filtered);
                     });
                 });
@@ -521,7 +522,7 @@ export const report = {
                             selectedKeys.add(tr.dataset.key);
                             const cb = tr.querySelector('.rep-cb');
                             if (cb) cb.checked = true;
-                            updateExportBtn();
+                            updateExportBtn(filtered);
                             syncMasterCheckbox(filtered);
                         }
 
@@ -530,6 +531,8 @@ export const report = {
                         ctxMenu.style.top = e.pageY + 'px';
                     });
                 });
+
+                updateExportBtn(filtered);
             };
 
             const rawDataSafe = (obj) => obj || { issues: [] };
@@ -537,6 +540,7 @@ export const report = {
             const startExport = async (format) => {
                 let keys = null;
 
+                // Если галочка "Выделить всё" НЕ стоит, отправляем только выбранные ключи
                 if (!isAllSelected) {
                     const filtered = applyFilters();
                     const list = [];
@@ -552,6 +556,7 @@ export const report = {
                     keys = list;
                 }
 
+                // Фильтры передаются в любом случае (сервер их использует, если keys == null)
                 const filters = {
                     sev: ctx.state.sev,
                     qual: ctx.state.qual,
@@ -565,9 +570,10 @@ export const report = {
                 await showExportModal(keys, format, ctx, ctx.state.project, filters);
             };
 
-            // ===== ДОБАВЛЕНО: создание задачи в Jira =====
             const startJiraIssue = () => {
-                let keysToCreate = null;   // null = "по всем по фильтру"
+                let keysToCreate = null;
+
+                // Аналогично для Jira
                 if (!isAllSelected) {
                     const filtered = applyFilters();
                     const list = [];
@@ -608,8 +614,6 @@ export const report = {
             ctxMenu.querySelector('#ctx-confluence').addEventListener('click', () => { ctxMenu.style.display = 'none'; startExport('confluence'); });
             ctxMenu.querySelector('#ctx-html-files').addEventListener('click', () => { ctxMenu.style.display = 'none'; startExport('html-files'); });
             ctxMenu.querySelector('#ctx-html-files-teams').addEventListener('click', () => { ctxMenu.style.display = 'none'; startExport('html-files-teams'); });
-
-            // ===== ДОБАВЛЕНО =====
             ctxMenu.querySelector('#ctx-jira-issue').addEventListener('click', () => {
                 ctxMenu.style.display = 'none';
                 startJiraIssue();
@@ -624,7 +628,6 @@ export const report = {
                     selectedKeys.clear();
                 }
                 renderList();
-                updateExportBtn();
             });
 
             statusSel.addEventListener('change', e => { statusFilter = e.target.value; renderList(); });

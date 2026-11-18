@@ -2,6 +2,7 @@ import { esc, toast, highlightCode } from '../../common.js';
 import { showExportModal } from './export-modal.js';
 import { openReportIssueModal } from './modals/issue-modal.js';
 import { showJiraIssueModal } from './jira-issue-modal.js';
+import { showStatsModal } from './stats-modal.js';
 
 const NO_TAGS_KEY = '__NO_TAGS__';
 const NO_TAGS_LABEL = '(Без тегов)';
@@ -281,6 +282,7 @@ export const report = {
                 <div class="ctx-item" id="ctx-confluence">📋 Выгрузить Confluence (HTML)</div>
                 <div class="ctx-item" style="border-top:1px solid var(--border); margin-top:4px; padding-top:8px;" id="ctx-html-files">📦 Выгрузить HTML (по файлам)</div>
                 <div class="ctx-item" id="ctx-html-files-teams">📦 Выгрузить HTML (с командами)</div>
+                <div class="ctx-item" id="ctx-stats">📊 Статистика по проектам</div>
                 <div class="ctx-item" style="border-top:1px solid var(--border); margin-top:4px; padding-top:8px;" id="ctx-jira-issue">🎫 Создать задачу в Jira</div>
             `;
             document.body.appendChild(ctxMenu);
@@ -358,6 +360,8 @@ export const report = {
                     masterCb.indeterminate = !allVisible && visibleKeys.some(k => selectedKeys.has(k));
                 }
             };
+
+            const rawDataSafe = (obj) => obj || { issues: [] };
 
             const renderList = () => {
                 let filtered = applyFilters();
@@ -533,8 +537,6 @@ export const report = {
                 updateExportBtn(filtered);
             };
 
-            const rawDataSafe = (obj) => obj || { issues: [] };
-
             const startExport = async (format) => {
                 let keys = null;
 
@@ -566,8 +568,11 @@ export const report = {
                 await showExportModal(keys, format, ctx, ctx.state.project, filters);
             };
 
-            // ИСПРАВЛЕНО: при isAllSelected явно передаём отфильтрованные keys,
-            // чтобы на сервере не зависеть от корректности URL-фильтров.
+            // ---- Статистика: полностью независимый модал без родительских фильтров ----
+            const startStatsReport = () => {
+                showStatsModal(ctx);
+            };
+
             const startJiraIssue = () => {
                 let keysToCreate = null;
                 let filteredKeys  = null;
@@ -620,6 +625,10 @@ export const report = {
             ctxMenu.querySelector('#ctx-confluence').addEventListener('click', () => { ctxMenu.style.display = 'none'; startExport('confluence'); });
             ctxMenu.querySelector('#ctx-html-files').addEventListener('click', () => { ctxMenu.style.display = 'none'; startExport('html-files'); });
             ctxMenu.querySelector('#ctx-html-files-teams').addEventListener('click', () => { ctxMenu.style.display = 'none'; startExport('html-files-teams'); });
+            ctxMenu.querySelector('#ctx-stats').addEventListener('click', () => {
+                ctxMenu.style.display = 'none';
+                startStatsReport();
+            });
             ctxMenu.querySelector('#ctx-jira-issue').addEventListener('click', () => {
                 ctxMenu.style.display = 'none';
                 startJiraIssue();

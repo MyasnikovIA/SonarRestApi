@@ -65,6 +65,7 @@ public final class ApiServer {
         server.createContext("/api/prompt/build", new BuildPromptHandler(state, template));
         server.createContext("/api/prompt/list",  new ListPromptsHandler(state, template));
         server.createContext("/api/facets",       new FacetsHandler(state));
+        server.createContext("/api/stats/projects", new StatsProjectsHandler(state));
 
         server.createContext("/api/export-stream",   new ExportStreamHandler(state));
         server.createContext("/api/export-download", new ExportDownloadHandler(state));

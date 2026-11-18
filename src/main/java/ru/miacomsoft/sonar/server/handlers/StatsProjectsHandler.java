@@ -27,22 +27,18 @@ import java.util.concurrent.*;
  *   "projects":     ["PROJ1", "PROJ2"],
  *   "includedTags": ["tagA"],            // опционально
  *   "excludedTags": ["tagB"],            // опционально
+ *   "rules":        ["php:S116", ...],   // опционально (новая поддержка)
  *   "statuses":     "OPEN,CONFIRMED",    // опционально
  *   "branch":       "master"             // опционально (для ссылок на SonarQube)
  * }
  *
- * Ответ — SSE-поток:
- *   event: progress  data: {stage, message, current, total, projectIndex, projectTotal, projectKey, elapsedMs}
- *   event: complete  data: {file, downloadName, total, elapsedMs, projectsOk, projectsRequested}
- *   event: error     data: {message}
- *
- * По завершении (event: complete) — HTML-файл уже лежит на сервере,
- * клиент скачивает его через /api/export-download?file=...
+ * Особый маркер "__NO_TAGS__" в includedTags/excludedTags означает
+ * «issues без тегов».
  */
 public class StatsProjectsHandler extends BaseHandler {
 
-    private static final int PAGE_SIZE  = 500;   // лимит SonarQube
-    private static final int CHUNK_SIZE = 3000;  // размер «фрагмента» для логов/прогресса
+    /** Маркер «Без тегов» (синхронизирован с фронтом: NO_TAGS_KEY). */
+    private static final String NO_TAGS_MARKER = "__NO_TAGS__";
 
     public StatsProjectsHandler(ServerState state) {
         super(state);
@@ -89,8 +85,9 @@ public class StatsProjectsHandler extends BaseHandler {
             return;
         }
 
-        Set<String> includedTags = parseTags(req.optJSONArray("includedTags"));
-        Set<String> excludedTags = parseTags(req.optJSONArray("excludedTags"));
+        Set<String> includedTags  = parseSet(req.optJSONArray("includedTags"));
+        Set<String> excludedTags  = parseSet(req.optJSONArray("excludedTags"));
+        Set<String> selectedRules = parseSet(req.optJSONArray("rules"));  // NEW
 
         String statusesParam = req.optString("statuses", SonarIssuesApi.ACTIVE_STATUSES);
         final String statuses = (statusesParam == null || statusesParam.isBlank())
@@ -126,7 +123,7 @@ public class StatsProjectsHandler extends BaseHandler {
                 try {
                     JSONObject stats = computeForProject(
                             projectKey, statuses,
-                            includedTags, excludedTags,
+                            includedTags, excludedTags, selectedRules,
                             out, projIdx, projTotal, startMs
                     );
                     perProject.put(projectKey, stats);
@@ -169,6 +166,7 @@ public class StatsProjectsHandler extends BaseHandler {
             JSONObject response = new JSONObject();
             response.put("includedTags", new JSONArray(includedTags));
             response.put("excludedTags", new JSONArray(excludedTags));
+            response.put("rules",        new JSONArray(selectedRules));   // NEW
             response.put("statuses", statuses);
             response.put("projectsRequested", projects.size());
             response.put("projectsOk", okProjects);
@@ -216,20 +214,20 @@ public class StatsProjectsHandler extends BaseHandler {
     // Внутренняя логика
     // ============================================================
 
-    private Set<String> parseTags(JSONArray arr) {
-        Set<String> tags = new LinkedHashSet<>();
+    private Set<String> parseSet(JSONArray arr) {
+        Set<String> set = new LinkedHashSet<>();
         if (arr != null) {
             for (int i = 0; i < arr.length(); i++) {
                 String t = arr.optString(i, "").trim();
-                if (!t.isEmpty()) tags.add(t);
+                if (!t.isEmpty()) set.add(t);
             }
         }
-        return tags;
+        return set;
     }
 
     private JSONObject computeForProject(
             String projectKey, String statuses,
-            Set<String> includedTags, Set<String> excludedTags,
+            Set<String> includedTags, Set<String> excludedTags, Set<String> selectedRules,
             OutputStream out, int projIdx, int projTotal, long startMs
     ) throws Exception {
 
@@ -260,6 +258,9 @@ public class StatsProjectsHandler extends BaseHandler {
 
         for (Issue it : all) {
             if (!matchesTagFilter(it, includedTags, excludedTags)) continue;
+
+            // NEW: фильтр по правилам (если список пуст — не фильтруем)
+            if (!selectedRules.isEmpty() && !selectedRules.contains(it.rule)) continue;
 
             stats.totalIssues++;
 
@@ -312,20 +313,34 @@ public class StatsProjectsHandler extends BaseHandler {
         return stats.toJson();
     }
 
+    /**
+     * Фильтр по тегам. Поддерживает маркер {@code __NO_TAGS__}:
+     * если он есть в included — включаются issues без тегов;
+     * если он есть в excluded — исключаются issues без тегов.
+     */
     private boolean matchesTagFilter(Issue it, Set<String> included, Set<String> excluded) {
         List<String> itTags = it.tags != null ? it.tags : Collections.emptyList();
 
         if (!included.isEmpty()) {
             boolean has = false;
             for (String t : included) {
-                if (itTags.contains(t)) { has = true; break; }
+                if (NO_TAGS_MARKER.equals(t)) {
+                    if (itTags.isEmpty()) { has = true; break; }
+                } else if (itTags.contains(t)) {
+                    has = true;
+                    break;
+                }
             }
             if (!has) return false;
         }
 
         if (!excluded.isEmpty()) {
             for (String t : excluded) {
-                if (itTags.contains(t)) return false;
+                if (NO_TAGS_MARKER.equals(t)) {
+                    if (itTags.isEmpty()) return false;
+                } else if (itTags.contains(t)) {
+                    return false;
+                }
             }
         }
         return true;

@@ -7,6 +7,7 @@ import ru.miacomsoft.sonar.Issue;
 import ru.miacomsoft.sonar.SonarIssuesApi;
 import ru.miacomsoft.sonar.server.BaseHandler;
 import ru.miacomsoft.sonar.server.ServerState;
+import ru.miacomsoft.sonar.server.SessionManager;
 import ru.miacomsoft.sonar.server.exporters.StatsHtmlExporter;
 
 import java.io.IOException;
@@ -408,8 +409,10 @@ public class StatsProjectsHandler extends BaseHandler {
      * Порядок поиска:
      *   1) -Dsonar.url=<...>
      *   2) переменная окружения SONAR_URL
-     *   3) рефлексия по state.getClient() — ищет getBaseUrl() / getUrl() / getServerUrl() / getHost()
-     *   4) пустая строка — тогда карточки отрисуются без ссылок.
+     *   3) state.getSession().getUrl()  ← прямой доступ, всегда работает
+     *   4) рефлексия по state.getClient() — ищет getBaseUrl() / getUrl() /
+     *      getServerUrl() / getHost() (SonarClient.getUrl() теперь есть)
+     *   5) пустая строка — карточки отрисуются без ссылок.
      */
     private String resolveSonarBaseUrl() {
         String prop = System.getProperty("sonar.url");
@@ -417,6 +420,19 @@ public class StatsProjectsHandler extends BaseHandler {
 
         String env = System.getenv("SONAR_URL");
         if (env != null && !env.isBlank()) return env.replaceAll("/+$", "");
+
+        // Прямой доступ через SessionManager (самый надёжный путь)
+        try {
+            SessionManager sm = state.getSession();
+            if (sm != null) {
+                String u = sm.getUrl();
+                if (u != null && !u.isBlank()) {
+                    return u.replaceAll("/+$", "");
+                }
+            }
+        } catch (Exception ignored) {
+            // fall through
+        }
 
         // Рефлексия — безопасно, не требует наличия конкретного метода у SonarClient.
         try {

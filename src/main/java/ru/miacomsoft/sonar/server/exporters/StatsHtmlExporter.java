@@ -28,7 +28,7 @@ public final class StatsHtmlExporter {
         int ok        = data.optInt("projectsOk", 0);
         int failed    = requested - ok;
 
-        // -------- NEW: параметры для ссылок на SonarQube --------
+        // -------- параметры для ссылок на SonarQube --------
         String sonarBaseUrl = data.optString("sonarBaseUrl", "");
         String branch       = data.optString("branch", "");
         String statusesRaw  = data.optString("statuses", "");
@@ -227,6 +227,26 @@ public final class StatsHtmlExporter {
     // URL → SonarQube
     // ============================================================
 
+    /**
+     * Формирует URL на страницу /project/issues для карточки.
+     *
+     * Пример результирующего URL (для тега not-require-fix):
+     *   {base}/project/issues
+     *     ?issueStatuses=ACCEPTED%2CCONFIRMED%2CFALSE_POSITIVE%2CFIXED%2COPEN
+     *     &tags=not-require-fix
+     *     &branch=master
+     *     &id=MEDMIS-MISmobile.max-service
+     *
+     * Порядок параметров (как в SonarQube UI):
+     *   1) issueStatuses
+     *   2) impactSoftwareQualities | impactSeverities | tags
+     *   3) branch
+     *   4) id (projectKey)
+     *
+     * Возвращает null, если ссылку построить нельзя
+     * (нет base URL / projectKey / значения, либо значение = UNKNOWN) —
+     * в этом случае карточка рендерится как обычный <div>.
+     */
     private static String buildCardUrl(String prefix, String rawValue,
                                        String sonarBaseUrl, String projectKey,
                                        String statuses, String branch) {
@@ -239,6 +259,12 @@ public final class StatsHtmlExporter {
 
         List<String> params = new ArrayList<>();
 
+        // 1. issueStatuses — первым (как в примере SonarQube UI)
+        if (statuses != null && !statuses.isEmpty()) {
+            params.add("issueStatuses=" + urlEnc(statuses));
+        }
+
+        // 2. Параметр фильтра (qual / sev / tag)
         switch (prefix) {
             case "qual":
                 params.add("impactSoftwareQualities=" + urlEnc(rawValue));
@@ -253,20 +279,33 @@ public final class StatsHtmlExporter {
                 return null;
         }
 
-        if (statuses != null && !statuses.isEmpty()) {
-            params.add("issueStatuses=" + urlEnc(statuses));
-        }
+        // 3. branch
         if (branch != null && !branch.isEmpty()) {
             params.add("branch=" + urlEnc(branch));
         }
+
+        // 4. id проекта
         params.add("id=" + urlEnc(projectKey));
 
         return base + "/project/issues?" + String.join("&", params);
     }
 
+    /**
+     * Приводит произвольный набор статусов к MQR-валидным значениям,
+     * принимаемым SonarQube в параметре issueStatuses, и сортирует их
+     * по алфавиту — ровно так, как это делает сам SonarQube UI.
+     *
+     * Пример: "OPEN,WONTFIX,CONFIRMED,FALSE_POSITIVE,FIXED,ACCEPTED,REOPENED,CLOSED"
+     *   → "ACCEPTED,CONFIRMED,FALSE_POSITIVE,FIXED,OPEN"
+     *   → URL: issueStatuses=ACCEPTED%2CCONFIRMED%2CFALSE_POSITIVE%2CFIXED%2COPEN
+     *
+     * Используем TreeSet вместо LinkedHashSet, чтобы порядок был стабильным
+     * и совпадал с эталонным SonarQube. Это влияет только на внешний вид URL —
+     * на содержимое страницы SonarQube порядок статусов не влияет.
+     */
     private static String sanitizeStatusesForUrl(String statuses) {
         if (statuses == null || statuses.isEmpty()) return "";
-        Set<String> valid = new LinkedHashSet<>();
+        Set<String> valid = new TreeSet<>();
         for (String s : statuses.split(",")) {
             String t = s.trim().toUpperCase(Locale.ROOT);
             if (t.isEmpty()) continue;

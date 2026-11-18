@@ -146,4 +146,14 @@ public class SonarClient {
     }
 
     public SessionManager getSession() { return session; }
+
+    /**
+     * Базовый URL SonarQube (без завершающего слэша).
+     * Нужен, в частности, StatsProjectsHandler для построения кликабельных
+     * ссылок в HTML-отчёте. Рефлексия в resolveSonarBaseUrl() ищет именно
+     * этот метод (или getBaseUrl / getServerUrl / getHost).
+     */
+    public String getUrl() {
+        return session != null ? session.getUrl() : null;
+    }
 }

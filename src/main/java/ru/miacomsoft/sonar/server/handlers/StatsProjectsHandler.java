@@ -26,12 +26,13 @@ import java.util.concurrent.*;
  *   "projects":     ["PROJ1", "PROJ2"],
  *   "includedTags": ["tagA"],            // опционально
  *   "excludedTags": ["tagB"],            // опционально
- *   "statuses":     "OPEN,CONFIRMED"     // опционально
+ *   "statuses":     "OPEN,CONFIRMED",    // опционально
+ *   "branch":       "master"             // опционально (для ссылок на SonarQube)
  * }
  *
  * Ответ — SSE-поток:
  *   event: progress  data: {stage, message, current, total, projectIndex, projectTotal, projectKey, elapsedMs}
- *   event: complete  data: {file, downloadName, total, elapsedMs}
+ *   event: complete  data: {file, downloadName, total, elapsedMs, projectsOk, projectsRequested}
  *   event: error     data: {message}
  *
  * По завершении (event: complete) — HTML-файл уже лежит на сервере,
@@ -39,8 +40,8 @@ import java.util.concurrent.*;
  */
 public class StatsProjectsHandler extends BaseHandler {
 
-    private static final int PAGE_SIZE       = 500;   // лимит SonarQube
-    private static final int CHUNK_SIZE      = 3000;  // размер «фрагмента» для логов/прогресса
+    private static final int PAGE_SIZE  = 500;   // лимит SonarQube
+    private static final int CHUNK_SIZE = 3000;  // размер «фрагмента» для логов/прогресса
 
     public StatsProjectsHandler(ServerState state) {
         super(state);
@@ -94,6 +95,8 @@ public class StatsProjectsHandler extends BaseHandler {
         final String statuses = (statusesParam == null || statusesParam.isBlank())
                 ? SonarIssuesApi.ACTIVE_STATUSES
                 : statusesParam.trim();
+
+        final String branch = req.optString("branch", "");
 
         // ---------- SSE заголовки ----------
         ex.getResponseHeaders().set("Content-Type", "text/event-stream; charset=utf-8");
@@ -171,6 +174,8 @@ public class StatsProjectsHandler extends BaseHandler {
             response.put("projectsFailed", projects.size() - okProjects);
             response.put("projects", byProject);
             response.put("totals", aggregated.toJson());
+            response.put("sonarBaseUrl", resolveSonarBaseUrl());
+            response.put("branch", branch);
 
             // ---------- Генерация HTML ----------
             emitProgress(out, "rendering", "Формирование HTML-отчёта...",
@@ -229,8 +234,6 @@ public class StatsProjectsHandler extends BaseHandler {
 
         SonarIssuesApi api = state.newApi(projectKey);
 
-        // Прогресс-слушатель: эмитит SSE-события по каждой странице (500 issues).
-        // SonarIssuesApi внутри сам разбивает на страницы и при >10000 — по файлам.
         SonarIssuesApi.FetchProgressListener listener = (fetched, total, message) -> {
             JSONObject p = new JSONObject();
             p.put("stage", "fetch");
@@ -296,7 +299,6 @@ public class StatsProjectsHandler extends BaseHandler {
 
         stats.totalFiles = files.size();
 
-        // Финальный прогресс по проекту
         JSONObject done = new JSONObject();
         done.put("stage", "project-done");
         done.put("message", "Проект " + projectKey + " обработан (" + stats.totalIssues + " issues)");
@@ -366,7 +368,7 @@ public class StatsProjectsHandler extends BaseHandler {
     }
 
     // ============================================================
-    // Аккумулятор (как было)
+    // Аккумулятор
     // ============================================================
 
     private static class Stats {
@@ -399,5 +401,44 @@ public class StatsProjectsHandler extends BaseHandler {
             o.put("byTag",       new JSONObject(byTag));
             return o;
         }
+    }
+
+    /**
+     * Базовый URL SonarQube без завершающего слэша.
+     * Порядок поиска:
+     *   1) -Dsonar.url=<...>
+     *   2) переменная окружения SONAR_URL
+     *   3) рефлексия по state.getClient() — ищет getBaseUrl() / getUrl() / getServerUrl() / getHost()
+     *   4) пустая строка — тогда карточки отрисуются без ссылок.
+     */
+    private String resolveSonarBaseUrl() {
+        String prop = System.getProperty("sonar.url");
+        if (prop != null && !prop.isBlank()) return prop.replaceAll("/+$", "");
+
+        String env = System.getenv("SONAR_URL");
+        if (env != null && !env.isBlank()) return env.replaceAll("/+$", "");
+
+        // Рефлексия — безопасно, не требует наличия конкретного метода у SonarClient.
+        try {
+            Object client = state.getClient();
+            if (client != null) {
+                for (String m : new String[]{"getBaseUrl", "getUrl", "getServerUrl", "getHost"}) {
+                    try {
+                        java.lang.reflect.Method method = client.getClass().getMethod(m);
+                        Object result = method.invoke(client);
+                        if (result != null) {
+                            String s = result.toString();
+                            if (!s.isBlank()) return s.replaceAll("/+$", "");
+                        }
+                    } catch (NoSuchMethodException ignored) {
+                        // пробуем следующий
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+            // не смогли — просто вернём пусто
+        }
+
+        return "";
     }
 }

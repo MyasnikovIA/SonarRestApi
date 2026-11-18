@@ -2,12 +2,15 @@ package ru.miacomsoft.sonar.server.exporters;
 
 import org.json.JSONObject;
 
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.*;
 
 /**
  * Генерирует HTML-отчёт статистики по проектам.
- * Формат: единая таблица параметров вида "sev: HIGH", "qual: MAINTAINABILITY", "tag: require-fix".
+ * Формат: карточки-категории qual → sev → tag, внутри каждой — карточки значений.
+ * Для project-блоков карточки значений кликабельны и ведут на SonarQube UI.
  */
 public final class StatsHtmlExporter {
 
@@ -24,6 +27,13 @@ public final class StatsHtmlExporter {
         int requested = data.optInt("projectsRequested", 0);
         int ok        = data.optInt("projectsOk", 0);
         int failed    = requested - ok;
+
+        // -------- NEW: параметры для ссылок на SonarQube --------
+        String sonarBaseUrl = data.optString("sonarBaseUrl", "");
+        String branch       = data.optString("branch", "");
+        String statusesRaw  = data.optString("statuses", "");
+        // для URL используем MQR-валидные статусы, чтобы ссылки открывались без 400
+        String statusesUrl  = sanitizeStatusesForUrl(statusesRaw);
 
         List<String> keys = new ArrayList<>(projects.keySet());
         Collections.sort(keys);
@@ -59,9 +69,8 @@ public final class StatsHtmlExporter {
             html.append("<div class=\"row\"><span class=\"label\">Исключённые теги:</span><b>")
                     .append(esc(excl)).append("</b></div>\n");
         }
-        String statuses = data.optString("statuses", "");
         html.append("<div class=\"row\"><span class=\"label\">Статусы:</span><b>")
-                .append(statuses.isEmpty() ? "все" : esc(statuses)).append("</b></div>\n");
+                .append(statusesRaw.isEmpty() ? "все" : esc(statusesRaw)).append("</b></div>\n");
         html.append("</div>\n");
 
         // ---------- TOTALS ----------
@@ -76,7 +85,8 @@ public final class StatsHtmlExporter {
                     .append("<span class=\"total-value\">").append(totals.optInt("totalFiles", 0))
                     .append("</span></div>\n");
             html.append("</div>\n");
-            html.append(renderUnifiedBreakdown(totals));
+            // totals — без ссылок: projectKey пустой, sonarBaseUrl пустой.
+            html.append(renderUnifiedBreakdown(totals, "", "", statusesUrl, ""));
             html.append("</div>\n");
         }
 
@@ -109,7 +119,8 @@ public final class StatsHtmlExporter {
                             .append("<span class=\"total-value\">").append(p.optInt("totalFiles", 0))
                             .append("</span></div>\n");
                     html.append("</div>\n");
-                    html.append(renderUnifiedBreakdown(p));
+                    // project-block — со ссылками
+                    html.append(renderUnifiedBreakdown(p, sonarBaseUrl, key, statusesUrl, branch));
                 }
 
                 html.append("</div>\n");
@@ -124,8 +135,14 @@ public final class StatsHtmlExporter {
     }
 
     // ============================================================
+    // Рендер секций-карточек
+    // ============================================================
 
-    private static String renderUnifiedBreakdown(JSONObject p) {
+    private static String renderUnifiedBreakdown(JSONObject p,
+                                                 String sonarBaseUrl,
+                                                 String projectKey,
+                                                 String statuses,
+                                                 String branch) {
         JSONObject bySev  = p.optJSONObject("bySeverity");
         JSONObject byQual = p.optJSONObject("byQuality");
         JSONObject byTag  = p.optJSONObject("byTag");
@@ -136,26 +153,150 @@ public final class StatsHtmlExporter {
 
         StringBuilder sb = new StringBuilder();
         sb.append("<div class=\"breakdown-cards\">\n");
-
-        // Порядок как в ТЗ: сначала qual, потом внутри/после — sev, затем tag.
-        sb.append(renderCategoryCard("qual", "Качество (qual)", byQual, "quality"));
-        sb.append(renderCategoryCard("sev",  "Severity (sev)",  bySev,  "severity"));
-        sb.append(renderCategoryCard("tag",  "Теги (tag)",      byTag,  "tag"));
-
+        sb.append(renderCategoryCard("qual", "Качество (qual)", byQual, "quality",
+                sonarBaseUrl, projectKey, statuses, branch));
+        sb.append(renderCategoryCard("sev",  "Severity (sev)",  bySev,  "severity",
+                sonarBaseUrl, projectKey, statuses, branch));
+        sb.append(renderCategoryCard("tag",  "Теги (tag)",      byTag,  "tag",
+                sonarBaseUrl, projectKey, statuses, branch));
         sb.append("</div>\n");
         return sb.toString();
     }
 
-    private static List<Row> buildRows(JSONObject obj, String prefix) {
+    private static String renderCategoryCard(String prefix,
+                                             String label,
+                                             JSONObject values,
+                                             String cssClass,
+                                             String sonarBaseUrl,
+                                             String projectKey,
+                                             String statuses,
+                                             String branch) {
+        if (isEmpty(values)) return "";
+
         List<Row> rows = new ArrayList<>();
-        if (obj == null) return rows;
-        for (String key : obj.keySet()) {
-            int count = obj.optInt(key, 0);
+        for (String key : values.keySet()) {
+            int count = values.optInt(key, 0);
             if (count <= 0) continue;
-            rows.add(new Row(prefix + ": " + key, count));
+            rows.add(new Row(key, count));
         }
-        return rows;
+        rows.sort((a, b) -> {
+            if (b.count != a.count) return b.count - a.count;
+            return a.param.compareTo(b.param);
+        });
+        if (rows.isEmpty()) return "";
+
+        int totalInCategory = 0;
+        for (Row r : rows) totalInCategory += r.count;
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("<div class=\"breakdown-category breakdown-category-")
+                .append(cssClass).append("\">\n");
+
+        sb.append("<div class=\"breakdown-category-header\">")
+                .append("<span class=\"category-label\">").append(esc(label)).append("</span>")
+                .append("<span class=\"category-total\">").append(totalInCategory).append("</span>")
+                .append("</div>\n");
+
+        sb.append("<div class=\"breakdown-values\">\n");
+        for (Row r : rows) {
+            String url = buildCardUrl(prefix, r.param, sonarBaseUrl, projectKey, statuses, branch);
+
+            if (url != null) {
+                sb.append("<a href=\"").append(esc(url)).append("\" ")
+                        .append("class=\"breakdown-card breakdown-card-link\" ")
+                        .append("target=\"_blank\" rel=\"noopener noreferrer\" ")
+                        .append("title=\"Открыть в SonarQube\">");
+            } else {
+                sb.append("<div class=\"breakdown-card\">");
+            }
+
+            sb.append("<div class=\"breakdown-card-title\">")
+                    .append("<span class=\"param-prefix\">").append(esc(prefix)).append(":</span> ")
+                    .append("<span class=\"param-value\">").append(esc(r.param)).append("</span>")
+                    .append("</div>")
+                    .append("<div class=\"breakdown-card-count\">").append(r.count).append("</div>");
+
+            sb.append(url != null ? "</a>\n" : "</div>\n");
+        }
+        sb.append("</div>\n");
+        sb.append("</div>\n");
+        return sb.toString();
     }
+
+    // ============================================================
+    // URL → SonarQube
+    // ============================================================
+
+    private static String buildCardUrl(String prefix, String rawValue,
+                                       String sonarBaseUrl, String projectKey,
+                                       String statuses, String branch) {
+        if (sonarBaseUrl == null || sonarBaseUrl.isBlank()) return null;
+        if (projectKey == null || projectKey.isBlank()) return null;
+        if (rawValue == null || rawValue.isEmpty()) return null;
+        if ("UNKNOWN".equalsIgnoreCase(rawValue)) return null;
+
+        String base = sonarBaseUrl.replaceAll("/+$", "");
+
+        List<String> params = new ArrayList<>();
+
+        switch (prefix) {
+            case "qual":
+                params.add("impactSoftwareQualities=" + urlEnc(rawValue));
+                break;
+            case "sev":
+                params.add("impactSeverities=" + urlEnc(rawValue));
+                break;
+            case "tag":
+                params.add("tags=" + urlEnc(rawValue));
+                break;
+            default:
+                return null;
+        }
+
+        if (statuses != null && !statuses.isEmpty()) {
+            params.add("issueStatuses=" + urlEnc(statuses));
+        }
+        if (branch != null && !branch.isEmpty()) {
+            params.add("branch=" + urlEnc(branch));
+        }
+        params.add("id=" + urlEnc(projectKey));
+
+        return base + "/project/issues?" + String.join("&", params);
+    }
+
+    private static String sanitizeStatusesForUrl(String statuses) {
+        if (statuses == null || statuses.isEmpty()) return "";
+        Set<String> valid = new LinkedHashSet<>();
+        for (String s : statuses.split(",")) {
+            String t = s.trim().toUpperCase(Locale.ROOT);
+            if (t.isEmpty()) continue;
+            switch (t) {
+                case "REOPENED": valid.add("OPEN");            break;
+                case "CLOSED":   valid.add("FIXED");           break;
+                case "WONTFIX":  valid.add("FALSE_POSITIVE");  break;
+                case "RESOLVED": valid.add("FIXED");           break;
+                default:
+                    if (Set.of("OPEN", "CONFIRMED", "FALSE_POSITIVE",
+                            "ACCEPTED", "FIXED").contains(t)) {
+                        valid.add(t);
+                    }
+            }
+        }
+        return String.join(",", valid);
+    }
+
+    private static String urlEnc(String s) {
+        if (s == null) return "";
+        return URLEncoder.encode(s, StandardCharsets.UTF_8);
+    }
+
+    private static boolean isEmpty(JSONObject o) {
+        return o == null || o.isEmpty();
+    }
+
+    // ============================================================
+    // Прочее
+    // ============================================================
 
     private static String tagsToString(org.json.JSONArray arr) {
         if (arr == null || arr.isEmpty()) return "";
@@ -179,6 +320,8 @@ public final class StatsHtmlExporter {
         Row(String param, int count) { this.param = param; this.count = count; }
     }
 
+    // ============================================================
+    // CSS
     // ============================================================
 
     private static final String STYLES =
@@ -204,8 +347,6 @@ public final class StatsHtmlExporter {
                     ".total-badge{display:flex;flex-direction:column;align-items:center;background:#f4f5f7;border:1px solid #dfe1e6;border-radius:8px;padding:12px 24px;min-width:130px;}\n" +
                     ".total-label{font-size:10.5px;color:#6b778c;text-transform:uppercase;letter-spacing:0.6px;font-weight:600;}\n" +
                     ".total-value{font-size:26px;font-weight:700;color:#0052cc;margin-top:2px;font-variant-numeric:tabular-nums;}\n" +
-
-                    // ====== Новые стили: карточки категорий и вложенные карточки значений ======
                     ".breakdown-cards{display:flex;flex-direction:column;gap:16px;}\n" +
                     ".breakdown-category{background:#f9fafb;border:1px solid #dfe1e6;border-radius:10px;padding:14px 16px 16px;}\n" +
                     ".breakdown-category-header{display:flex;justify-content:space-between;align-items:center;font-size:12px;text-transform:uppercase;letter-spacing:0.6px;font-weight:700;color:#6b778c;padding-bottom:10px;margin-bottom:12px;border-bottom:1px dashed #dfe1e6;}\n" +
@@ -220,8 +361,11 @@ public final class StatsHtmlExporter {
                     ".breakdown-card-count{font-size:20px;font-weight:700;color:#0052cc;font-variant-numeric:tabular-nums;}\n" +
                     ".no-data{text-align:center;color:#6b778c;font-style:italic;padding:20px;font-size:13px;}\n" +
                     ".footer{text-align:center;color:#6b778c;font-size:12px;margin-top:40px;padding-top:20px;border-top:1px solid #dfe1e6;}\n" +
-
-                    // ====== Тёмная тема для блока «Суммарно по всем проектам» ======
+                    "a.breakdown-card{text-decoration:none;color:inherit;cursor:pointer;}\n" +
+                    "a.breakdown-card:visited{color:inherit;}\n" +
+                    "a.breakdown-card:hover{border-color:#0052cc;box-shadow:0 3px 10px rgba(0,82,204,0.18);text-decoration:none;}\n" +
+                    "a.breakdown-card:focus-visible{outline:2px solid #0052cc;outline-offset:2px;}\n" +
+                    "a.breakdown-card .breakdown-card-title::after{content:' ↗';font-size:10px;color:#6b778c;margin-left:2px;}\n" +
                     ".summary-block .breakdown-category{background:rgba(255,255,255,0.08);border-color:rgba(255,255,255,0.2);}\n" +
                     ".summary-block .breakdown-category-header{color:rgba(255,255,255,0.85);border-bottom-color:rgba(255,255,255,0.25);}\n" +
                     ".summary-block .breakdown-category-header .category-total{color:#fff;background:rgba(255,255,255,0.15);border-color:rgba(255,255,255,0.35);}\n" +
@@ -231,65 +375,5 @@ public final class StatsHtmlExporter {
                     ".summary-block .breakdown-card-title .param-value{color:#fff;}\n" +
                     ".summary-block .breakdown-card-count{color:#fff;}\n" +
                     ".summary-block .no-data{color:rgba(255,255,255,0.8);}\n" +
-
                     "@media print{body{background:#fff;}.project-block,.summary-block,.breakdown-category,.breakdown-card{break-inside:avoid;box-shadow:none;}}\n";
-
-    /**
-     * Одна секция-карточка с вложенными карточками значений.
-     *
-     * Заголовок секции — категория (qual / sev / tag).
-     * Внутри — карточки с конкретными значениями и их счётчиками,
-     * отсортированные по убыванию count, затем по имени.
-     */
-    private static String renderCategoryCard(String prefix,
-                                             String label,
-                                             JSONObject values,
-                                             String cssClass) {
-        if (isEmpty(values)) return "";
-
-        // Собираем строки и сортируем: count desc, param asc.
-        List<Row> rows = new ArrayList<>();
-        for (String key : values.keySet()) {
-            int count = values.optInt(key, 0);
-            if (count <= 0) continue;
-            rows.add(new Row(key, count));
-        }
-        rows.sort((a, b) -> {
-            if (b.count != a.count) return b.count - a.count;
-            return a.param.compareTo(b.param);
-        });
-        if (rows.isEmpty()) return "";
-
-        int totalInCategory = 0;
-        for (Row r : rows) totalInCategory += r.count;
-
-        StringBuilder sb = new StringBuilder();
-        sb.append("<div class=\"breakdown-category breakdown-category-")
-                .append(cssClass).append("\">\n");
-
-        // Заголовок секции-карточки.
-        sb.append("<div class=\"breakdown-category-header\">")
-                .append("<span class=\"category-label\">").append(esc(label)).append("</span>")
-                .append("<span class=\"category-total\">").append(totalInCategory).append("</span>")
-                .append("</div>\n");
-
-        // Вложенные карточки значений.
-        sb.append("<div class=\"breakdown-values\">\n");
-        for (Row r : rows) {
-            sb.append("<div class=\"breakdown-card\">")
-                    .append("<div class=\"breakdown-card-title\">")
-                    .append("<span class=\"param-prefix\">").append(esc(prefix)).append(":</span> ")
-                    .append("<span class=\"param-value\">").append(esc(r.param)).append("</span>")
-                    .append("</div>")
-                    .append("<div class=\"breakdown-card-count\">").append(r.count).append("</div>")
-                    .append("</div>\n");
-        }
-        sb.append("</div>\n");
-
-        sb.append("</div>\n");
-        return sb.toString();
-    }
-    private static boolean isEmpty(JSONObject o) {
-        return o == null || o.isEmpty();
-    }
 }

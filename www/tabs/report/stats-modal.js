@@ -133,14 +133,12 @@ export async function showStatsModal(ctx) {
         console.warn('[stats] не удалось загрузить теги:', e);
     }
 
-    // Сортируем по правилу родительской вкладки:
-    // require-fix, not-require-fix, __NO_TAGS__, остальные по алфавиту
     const baseTags = allTags
         .filter(t => t !== 'require-fix' && t !== 'not-require-fix')
         .sort((a, b) => a.localeCompare(b));
     const sortedTags = ['require-fix', 'not-require-fix', NO_TAGS_KEY, ...baseTags];
 
-    // ===== 3. Загрузка правил (из проекта верхней панели) =====
+    // ===== 3. Загрузка правил =====
     let allRules = [];
     let rulesHint = '';
     if (ctx.state.project) {
@@ -170,33 +168,26 @@ export async function showStatsModal(ctx) {
     overlay.className = 'modal-overlay';
     overlay.style.zIndex = '2000';
     overlay.innerHTML = `
-        <div class="modal-content" style="max-width: 1000px;">
-            <div class="modal-header">
+        <div class="modal-content"
+             style="max-width: 1100px; width: 95vw;
+                    height: 90vh; min-height: 720px;
+                    display: flex; flex-direction: column;
+                    overflow: visible;">
+            <div class="modal-header" style="flex-shrink: 0;">
                 <h3 style="margin:0;">Статистика по проектам</h3>
                 <button class="modal-close" type="button">&times;</button>
             </div>
-            <div class="modal-body">
+            <div class="modal-body"
+                 style="flex: 1; min-height: 0;
+                        overflow: visible;
+                        display: flex; flex-direction: column;
+                        padding: 16px 20px;">
 
-                <!-- ФИЛЬТР: многострочный ввод -->
-                <div style="margin-bottom:12px;">
-                    <label style="display:block; font-size:12px; color:var(--text-dim); margin-bottom:4px;">
-                        Поиск проектов — можно несколько через запятую, пробел или каждый с новой строки:
-                    </label>
-                    <textarea id="stats-search"
-                              rows="2"
-                              placeholder="Например:&#10;MEDMIS-MISmobile.max-service, MEDMIS-tMIS&#10;или каждый проект с новой строки"
-                              style="width:100%; box-sizing:border-box; padding:8px 12px; margin-bottom:8px;
-                                     border-radius:6px; border:1px solid var(--border);
-                                     background:var(--bg); color:var(--text); font-size:13px;
-                                     resize:vertical; min-height:56px; font-family:var(--mono);"></textarea>
-                    <div id="stats-search-hint"
-                         style="font-size:11px; color:var(--text-dim);"></div>
-                </div>
-
-                <!-- Фильтры: Теги / Исключить / Правила / Статусы / Ветка -->
+                <!-- ============ Фильтры (details + branch) ============ -->
                 <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;
                             margin-bottom:12px; padding:10px; background:var(--bg3);
-                            border:1px solid var(--border); border-radius:6px;">
+                            border:1px solid var(--border); border-radius:6px;
+                            flex-shrink: 0; position: relative; z-index: 1;">
 
                     <!-- Включённые теги -->
                     <details id="stats-tag-details" style="position:relative;">
@@ -204,7 +195,7 @@ export async function showStatsModal(ctx) {
                                     user-select:none; display:inline-flex; gap:4px; align-items:center;">
                             🏷️ Теги (<span id="stats-tag-count">0</span>)
                         </summary>
-                        <div style="position:absolute; z-index:200; top:100%; left:0; margin-top:4px;
+                        <div style="position:absolute; z-index:300; top:100%; left:0; margin-top:4px;
                                     background:var(--bg); border:1px solid var(--border);
                                     border-radius:6px; padding:8px; min-width:260px;
                                     max-height:340px; box-shadow:0 4px 12px rgba(0,0,0,0.15);">
@@ -229,7 +220,7 @@ export async function showStatsModal(ctx) {
                                     user-select:none; display:inline-flex; gap:4px; align-items:center;">
                             🚫 Исключить теги (<span id="stats-exclude-tag-count">0</span>)
                         </summary>
-                        <div style="position:absolute; z-index:200; top:100%; left:0; margin-top:4px;
+                        <div style="position:absolute; z-index:300; top:100%; left:0; margin-top:4px;
                                     background:var(--bg); border:1px solid var(--border);
                                     border-radius:6px; padding:8px; min-width:260px;
                                     max-height:340px; box-shadow:0 4px 12px rgba(0,0,0,0.15);">
@@ -255,7 +246,7 @@ export async function showStatsModal(ctx) {
                                  title="${esc(rulesHint)}">
                             📏 Правила (<span id="stats-rule-count">0</span>)
                         </summary>
-                        <div style="position:absolute; z-index:200; top:100%; left:0; margin-top:4px;
+                        <div style="position:absolute; z-index:300; top:100%; left:0; margin-top:4px;
                                     background:var(--bg); border:1px solid var(--border);
                                     border-radius:6px; padding:8px; min-width:340px;
                                     max-height:380px; box-shadow:0 4px 12px rgba(0,0,0,0.15);">
@@ -284,7 +275,7 @@ export async function showStatsModal(ctx) {
                                     user-select:none; display:inline-flex; gap:4px; align-items:center;">
                             ✅ Статусы (<span id="stats-status-count">0</span>)
                         </summary>
-                        <div style="position:absolute; z-index:200; top:100%; left:0; margin-top:4px;
+                        <div style="position:absolute; z-index:300; top:100%; left:0; margin-top:4px;
                                     background:var(--bg); border:1px solid var(--border);
                                     border-radius:6px; padding:8px; min-width:280px;
                                     max-height:380px; box-shadow:0 4px 12px rgba(0,0,0,0.15);">
@@ -309,9 +300,12 @@ export async function showStatsModal(ctx) {
                     </label>
                 </div>
 
-                <!-- Список проектов -->
-                <div style="margin-bottom:12px;">
-                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+                <!-- ============ Блок «Проекты»: заголовок + поиск + список ============ -->
+                <div style="flex: 1 1 auto; min-height: 0;
+                            display: flex; flex-direction: column;">
+
+                    <div style="display:flex; justify-content:space-between; align-items:center;
+                                margin-bottom:6px; flex-shrink: 0;">
                         <label style="font-size:12px; color:var(--text-dim);">
                             Проекты (<span id="stats-project-count">0</span>
                             из <span id="stats-project-total">${projects.length}</span>)
@@ -327,15 +321,38 @@ export async function showStatsModal(ctx) {
                             </button>
                         </div>
                     </div>
+
+                    <!-- Поиск проектов — прямо над списком -->
+                    <div style="margin-bottom:8px; flex-shrink: 0;">
+                        <label style="display:block; font-size:12px; color:var(--text-dim);
+                                      margin-bottom:4px;">
+                            Поиск проектов — можно несколько через запятую, пробел или каждый с новой строки:
+                        </label>
+                        <textarea id="stats-search"
+                                  rows="2"
+                                  placeholder="Например:&#10;MEDMIS-MISmobile.max-service, MEDMIS-tMIS&#10;или каждый проект с новой строки"
+                                  style="width:100%; box-sizing:border-box; padding:8px 12px;
+                                         border-radius:6px; border:1px solid var(--border);
+                                         background:var(--bg); color:var(--text); font-size:13px;
+                                         resize:vertical; min-height:56px;
+                                         font-family:var(--mono);"></textarea>
+                        <div id="stats-search-hint"
+                             style="font-size:11px; color:var(--text-dim); margin-top:2px;"></div>
+                    </div>
+
+                    <!-- Список проектов — фиксированной высоты -->
                     <div id="stats-project-list"
-                         style="max-height:280px; overflow-y:auto;
+                         style="height: 280px; overflow-y: auto;
                                 border:1px solid var(--border); border-radius:6px;
-                                background:var(--bg3); padding:6px;"></div>
+                                background:var(--bg3); padding:6px;
+                                flex-shrink: 0;"></div>
                 </div>
 
-                <!-- Прогресс -->
-                <div id="stats-progress-container" style="display:none; margin-top:16px;">
-                    <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:4px;">
+                <!-- ============ Прогресс ============ -->
+                <div id="stats-progress-container"
+                     style="display:none; margin-top:12px; flex-shrink: 0;">
+                    <div style="display:flex; justify-content:space-between;
+                                font-size:12px; margin-bottom:4px;">
                         <span id="stats-progress-text" style="color:var(--text-dim);">Инициализация…</span>
                         <span id="stats-progress-counter"
                               style="font-family:var(--mono); font-weight:bold;">0 / 0</span>
@@ -343,16 +360,22 @@ export async function showStatsModal(ctx) {
                     <div style="height:8px; background:var(--bg3); border-radius:4px; overflow:hidden;
                                 border:1px solid var(--border);">
                         <div id="stats-progress-fill"
-                             style="height:100%; width:0%; background:var(--accent); transition:width 0.2s;"></div>
+                             style="height:100%; width:0%; background:var(--accent);
+                                    transition:width 0.2s;"></div>
                     </div>
                     <div id="stats-progress-elapsed"
-                         style="font-size:11px; color:var(--text-dim); text-align:right; margin-top:4px;"></div>
+                         style="font-size:11px; color:var(--text-dim); text-align:right;
+                                margin-top:4px;"></div>
                 </div>
 
-                <div id="stats-result" style="display:none; margin-top:16px;"></div>
+                <!-- ============ Результат ============ -->
+                <div id="stats-result"
+                     style="display:none; margin-top:12px; flex-shrink: 0;"></div>
 
+                <!-- ============ Кнопки ============ -->
                 <div id="stats-actions"
-                     style="display:flex; justify-content:flex-end; gap:8px; margin-top:16px;">
+                     style="display:flex; justify-content:flex-end; gap:8px;
+                            margin-top:16px; flex-shrink: 0;">
                     <button id="stats-cancel-btn" class="btn" type="button">Отмена</button>
                     <button id="stats-start-btn" class="btn btn-accent" type="button">📊 Сформировать отчёт</button>
                 </div>
@@ -641,13 +664,39 @@ export async function showStatsModal(ctx) {
         $('stats-status-details').removeAttribute('open');
     });
 
-    // ===== 13. Закрытие =====
+    // ===== 13. Клик вне открытого <details> = «Готово» =====
+    //
+    // ИСПРАВЛЕНО: раньше здесь был вызов $('').ownerDocument.getElementById(id),
+    // что превращалось в overlay.querySelector('#') → SyntaxError.
+    // Теперь обращаемся к overlay.querySelector('#' + id) напрямую.
+    // =====
+    const detailsIds = [
+        'stats-tag-details',
+        'stats-exclude-tag-details',
+        'stats-rule-details',
+        'stats-status-details'
+    ];
+
+    function closeOtherDetails(e) {
+        for (const id of detailsIds) {
+            const d = overlay.querySelector('#' + id);
+            if (!d) continue;
+            if (!d.hasAttribute('open')) continue;
+            if (d.contains(e.target)) continue; // клик внутри — не закрываем
+            d.removeAttribute('open');
+        }
+    }
+
+    document.addEventListener('click', closeOtherDetails);
+
+    // ===== 14. Закрытие модала =====
     const stopTimer = () => {
         if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
     };
 
     const close = () => {
         stopTimer();
+        document.removeEventListener('click', closeOtherDetails);
         if (abortController) {
             try { abortController.abort(); } catch (_) {}
             abortController = null;
@@ -659,7 +708,7 @@ export async function showStatsModal(ctx) {
     $('stats-cancel-btn').addEventListener('click', close);
     overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
 
-    // ===== 14. Submit → SSE → download =====
+    // ===== 15. Submit → SSE → download =====
     $('stats-start-btn').addEventListener('click', async () => {
         if (selectedProjects.size === 0) {
             toast('Выберите хотя бы один проект', true);

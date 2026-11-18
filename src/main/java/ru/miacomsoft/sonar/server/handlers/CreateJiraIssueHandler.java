@@ -273,6 +273,7 @@ public class CreateJiraIssueHandler extends BaseHandler {
             sendError(ex, 500, cfg.sessionFile() + ": " + e.getMessage()); return;
         }
 
+
         JiraClient jira = new JiraClient(cfg.baseUrl(), session.cookieHeader());
         JiraFieldService fieldService = new JiraFieldService(jira);
         JiraTempoTeamService tempo = new JiraTempoTeamService(jira);
@@ -430,7 +431,11 @@ public class CreateJiraIssueHandler extends BaseHandler {
             String text = "Отчёт SonarQube сформирован.\nФайлов в отчёте: " + issuesByFile.size() + "\nIssues: " + issues.size();
             try { attach.addCommentWithLinks(created.key(), text, attachments); } catch (Exception ignored) {}
         }
-
+        System.out.println("[CreateJiraIssue] After filter: " + issues.size() + " issues");
+        if (issues.size() >= 10000) {
+            System.out.println("[CreateJiraIssue] WARN: Large batch (" + issues.size()
+                    + ") — near SonarQube 10000-result limit");
+        }
         JSONObject resp = new JSONObject()
                 .put("success", true)
                 .put("issueKey", created.key())

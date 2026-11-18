@@ -153,8 +153,6 @@ export function formatHtmlFile(fileIssues, projectName, host, fileName) {
         summary { cursor: pointer; padding: 8px 12px; font-weight: 600; color: #42526e; user-select: none; }
         summary:hover { background: #ebecf0; }
         pre { margin: 0; padding: 12px; background: #fff; overflow-x: auto; border-top: 1px solid #dfe1e6; border-radius: 0 0 4px 4px; font-family: monospace; font-size: 13px; white-space: pre-wrap; }
-
-        /* Стиль для подсветки ошибки (как в модальном окне) */
         mark.sonar-issue-mark {
             background-color: rgba(248, 81, 73, 0.25);
             border-bottom: 2px solid #f85149;
@@ -169,6 +167,12 @@ export function formatHtmlFile(fileIssues, projectName, host, fileName) {
 
     fileIssues.forEach(it => {
         const link = getIssueLink(it, projectName, host);
+
+        // NEW: ссылка на исходник файла (открывается в просмотрщике кода SonarQube)
+        const fullComponentKey = projectName + ':' + it.component;
+        const sourceLink = `https://${host}/code?id=${encodeURIComponent(projectName)}`
+                         + `&selected=${encodeURIComponent(fullComponentKey)}`;
+
         const ruleName = it.ruleName ? ` — ${it.ruleName}` : '';
         const tagsStr = (it.tags && it.tags.length > 0) ? it.tags.join(', ') : 'нет';
         const lastComment = getLastComment(it);
@@ -176,13 +180,16 @@ export function formatHtmlFile(fileIssues, projectName, host, fileName) {
         html += `<div class="issue">\n`;
         html += `<p><strong>Идентификатор ошибки:</strong>${escapeHtml(it.key)}  (Строка: ${it.line})</p>\n`;
         html += `<p><strong>Ссылка:</strong> <a href="${escapeHtml(link)}" target="_blank">${escapeHtml(link)}</a></p>\n`;
+
+        // NEW: ссылка на исходник — перед "Правило:"
+        html += `<p><strong>Ссылка на исходник:</strong> <a href="${escapeHtml(sourceLink)}" target="_blank">${escapeHtml(fullComponentKey)}</a></p>\n`;
+
         html += `<p><strong>Правило:</strong> ${escapeHtml(it.rule)}${escapeHtml(ruleName)}</p>\n`;
         html += `<p><strong>Теги:</strong> ${escapeHtml(tagsStr)}</p>\n`;
         html += `<p><strong>Сообщение:</strong> ${escapeHtml(it.message)}</p>\n`;
         html += `<p><strong>Пользовательский комментарий:</strong> ${escapeHtml(lastComment)}</p>\n`;
 
         if (it._snippet && it._snippet.length > 0) {
-            // Заменяем маркеры на HTML-теги выделения
             const code = it._snippet.map(line => {
                 return escapeHtml(line)
                     .replace(/§HL_START§/g, '<mark class="sonar-issue-mark">')

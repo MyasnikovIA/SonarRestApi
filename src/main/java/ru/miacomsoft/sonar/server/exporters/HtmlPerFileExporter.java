@@ -45,10 +45,6 @@ public final class HtmlPerFileExporter {
                 zos.closeEntry();
                 written++;
 
-                // Третье поле — ссылка на SonarQube для этого файла:
-                //   - если есть хотя бы один issue — ссылка на ПЕРВОЕ issue
-                //     (Sonar откроет его в контексте, оттуда 1 клик до "все замечания файла");
-                //   - если issues нет — file-фильтр "все замечания этого файла".
                 String sonarLink = buildSonarLink(projectName, host, fileName, issues);
                 manifest.append(fileName).append(';')
                         .append(entryName).append(';')
@@ -63,11 +59,6 @@ public final class HtmlPerFileExporter {
         }
     }
 
-    /**
-     * Ссылка на SonarQube:
-     *   - есть issues    → ?id=<project>&open=<firstIssueKey>
-     *   - нет issues     → ?id=<project>&files=<path>
-     */
     private static String buildSonarLink(String projectName, String host,
                                          String fileName, List<Issue> issues) {
         String base = "https://" + host + "/project/issues?id=" + urlEnc(projectName);
@@ -77,7 +68,6 @@ public final class HtmlPerFileExporter {
                 return base + "&open=" + urlEnc(first.key);
             }
         }
-        // fallback: показать все issues этого файла
         return base + "&files=" + urlEnc(fileName);
     }
 
@@ -126,6 +116,12 @@ public final class HtmlPerFileExporter {
         for (Issue it : issues) {
             String link = "https://" + host + "/project/issues?id=" + urlEnc(projectName)
                     + "&open=" + urlEnc(it.key);
+
+            // Формируем ссылку на исходник файла в SonarQube
+            String fullComponentKey = projectName + ":" + it.component;
+            String sourceLink = "https://" + host + "/code?id=" + urlEnc(projectName)
+                    + "&selected=" + urlEnc(fullComponentKey);
+
             String ruleName = (it.ruleName != null && !it.ruleName.isEmpty())
                     ? " — " + it.ruleName : "";
             String tagsStr = (it.tags == null || it.tags.isEmpty())
@@ -144,6 +140,14 @@ public final class HtmlPerFileExporter {
 
             html.append("<p><strong>Ссылка:</strong> <a href=\"").append(escapeHtml(link))
                     .append("\" target=\"_blank\">").append(escapeHtml(link)).append("</a></p>\n");
+
+            // ДОБАВЛЕНО: ссылка на исходник (строго перед "Правило:")
+            html.append("<p><strong>Ссылка на исходник:</strong> <a href=\"")
+                    .append(escapeHtml(sourceLink))
+                    .append("\" target=\"_blank\">")
+                    .append(escapeHtml(fullComponentKey))
+                    .append("</a></p>\n");
+
             html.append("<p><strong>Правило:</strong> ")
                     .append(escapeHtml(it.rule)).append(escapeHtml(ruleName)).append("</p>\n");
             html.append("<p><strong>Теги:</strong> ").append(escapeHtml(tagsStr)).append("</p>\n");

@@ -6,6 +6,7 @@ import org.json.JSONObject;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -14,12 +15,8 @@ public class SonarIssuesApi {
     public static final String ACTIVE_STATUSES = "OPEN,CONFIRMED,REOPENED";
     public static final int FETCH_PAGE_SIZE = 3000;
 
-    /** Сколько первых строк файла показывать для issue без какой-либо локации. */
     private static final int FILE_HEAD_LINES = 50;
-
-    /** Сколько строк контекста брать вокруг textRange в fallback-режиме. */
     private static final int SNIPPET_CONTEXT = 10;
-
     private static final int SAFETY_MAX_PAGES = 10_000;
 
     private static final Pattern PS_LIMIT_LTE = Pattern.compile(
@@ -31,6 +28,9 @@ public class SonarIssuesApi {
     private final String projectKey;
     private final Map<String, String> ruleNameCache;
     private final Map<String, List<String>> snippetCache;
+
+    // NEW: кэш недоступных компонентов (sources/lines 404) — чтобы не спамить запросами
+    private final Set<String> failedComponents = ConcurrentHashMap.newKeySet();
 
     private static boolean reopenedSupported = true;
     private static volatile int effectivePsLimit = FETCH_PAGE_SIZE;
@@ -59,9 +59,7 @@ public class SonarIssuesApi {
 
     private static String normalizeJsonQuotes(String msg) {
         if (msg == null) return null;
-        return msg.replace("\\u0027", "'")
-                .replace("\\u0022", "\"")
-                .replace("\\\"", "\"");
+        return msg.replace("\\u0027", "'").replace("\\u0022", "\"").replace("\\\"", "\"");
     }
 
     private static boolean isPsLimitError(String msg) {
@@ -121,9 +119,7 @@ public class SonarIssuesApi {
     private String sanitizeStatuses(String statuses) {
         if (statuses == null || statuses.isEmpty()) return "";
         if (!reopenedSupported && statuses.contains("REOPENED")) {
-            String st = statuses.replace("REOPENED", "")
-                    .replace(",,", ",")
-                    .replaceAll("^,|,$", "");
+            String st = statuses.replace("REOPENED", "").replace(",,", ",").replaceAll("^,|,$", "");
             return st.isEmpty() ? "OPEN" : st;
         }
         return statuses;
@@ -168,7 +164,7 @@ public class SonarIssuesApi {
                 String msg = e.getMessage();
                 if (msg != null && (msg.contains("REOPENED") || msg.contains("issueStatuses"))) {
                     reopenedSupported = false;
-                    System.err.println("[SonarIssuesApi] Сервер не поддерживает статус REOPENED. Переключаемся на OPEN,CONFIRMED.");
+                    System.err.println("[SonarIssuesApi] Сервер не поддерживает REOPENED. Переключаемся на OPEN,CONFIRMED.");
                     continue;
                 }
                 throw e;
@@ -193,8 +189,7 @@ public class SonarIssuesApi {
         return countWithStatuses(ACTIVE_STATUSES, impactSeverity, quality);
     }
 
-    public int countWithStatuses(String statuses, String impactSeverity, String quality)
-            throws Exception {
+    public int countWithStatuses(String statuses, String impactSeverity, String quality) throws Exception {
         String url = "/api/issues/search?"
                 + buildQueryWithStatuses(statuses, impactSeverity, quality, null) + "&ps=1";
         JSONObject root = new JSONObject(client.get(url));
@@ -209,8 +204,7 @@ public class SonarIssuesApi {
         return fetchAllByStatuses("ACCEPTED", impactSeverity, quality);
     }
 
-    public List<Issue> fetchAllByStatuses(String statuses, String impactSeverity, String quality)
-            throws Exception {
+    public List<Issue> fetchAllByStatuses(String statuses, String impactSeverity, String quality) throws Exception {
         try {
             return fetchAllByStatusesDirect(statuses, impactSeverity, quality);
         } catch (RuntimeException e) {
@@ -248,8 +242,7 @@ public class SonarIssuesApi {
         return out;
     }
 
-    private List<Issue> fetchAllByParts(String statuses, String impactSeverity, String quality)
-            throws Exception {
+    private List<Issue> fetchAllByParts(String statuses, String impactSeverity, String quality) throws Exception {
         List<Issue> out = new ArrayList<>();
         String[] sevs  = { "BLOCKER", "HIGH", "MEDIUM", "LOW", "INFO" };
         String[] quals = { "MAINTAINABILITY", "RELIABILITY", "SECURITY" };
@@ -294,8 +287,6 @@ public class SonarIssuesApi {
         for (int i = 0; i < files.size(); i += batchSize) {
             List<String> batch = files.subList(i, Math.min(i + batchSize, files.size()));
             String components = String.join(",", batch);
-            System.out.printf("[SonarIssuesApi] Обработка файлов %d - %d из %d...%n",
-                    i + 1, Math.min(i + batchSize, files.size()), files.size());
             try {
                 out.addAll(fetchAllByComponents(statuses, impactSeverity, quality, components));
             } catch (BatchLimitExceededException e) {
@@ -408,8 +399,7 @@ public class SonarIssuesApi {
         return result;
     }
 
-    public Map<String, List<Issue>> issuesByFile(String impactSeverity, String quality)
-            throws Exception {
+    public Map<String, List<Issue>> issuesByFile(String impactSeverity, String quality) throws Exception {
         List<Issue> all = fetchOpen(impactSeverity, quality);
         Map<String, List<Issue>> byFile = new TreeMap<>();
         for (Issue it : all) {
@@ -477,15 +467,9 @@ public class SonarIssuesApi {
     }
 
     // ============================================================
-    // SNIPPETS
+    // SNIPPETS — ИСПРАВЛЕНО
     // ============================================================
 
-    /**
-     * Какая строка используется для поиска фрагмента:
-     *  - issue.line, если > 0
-     *  - иначе textRange.startLine, если > 0
-     *  - иначе -1 (нет привязки)
-     */
     private static int resolveEffectiveLine(Issue issue) {
         if (issue.line > 0) return issue.line;
         if (issue.textRange != null && issue.textRange.startLine > 0) {
@@ -494,9 +478,6 @@ public class SonarIssuesApi {
         return -1;
     }
 
-    /**
-     * Признак того, что подсветка возможна (есть ненулевой диапазон).
-     */
     private static boolean hasHighlightableRange(Issue issue) {
         if (issue.textRange == null) return false;
         if (issue.textRange.startLine <= 0 || issue.textRange.endLine <= 0) return false;
@@ -508,9 +489,13 @@ public class SonarIssuesApi {
 
     /**
      * Возвращает фрагмент кода для issue.
-     *  - line > 0                       → issue_snippets (быстро, с контекстом)
-     *  - line <= 0, но textRange > 0    → sources/lines вокруг textRange + подсветка
-     *  - иначе                          → sources/lines, первые FILE_HEAD_LINES строк
+     *
+     * ИСПРАВЛЕНИЕ: если issue_snippets вернул данные (даже без подсветки),
+     * но sources/lines падает (404 — файл недоступен в SonarQube),
+     * МЫ НЕ ТЕРЯЕМ ДАННЫЕ — используем то, что вернул issue_snippets.
+     *
+     * Также кэшируем недоступность компонента, чтобы не спамить 404 для
+     * каждого issue в одном и том же файле.
      */
     public List<String> fetchSnippet(String issueKey) throws Exception {
         if (snippetCache.containsKey(issueKey)) {
@@ -534,38 +519,31 @@ public class SonarIssuesApi {
                 boolean hasHighlight = viaSnippets != null
                         && viaSnippets.stream().anyMatch(l -> l.contains("§HL_START§"));
 
-                if (viaSnippets != null && !viaSnippets.isEmpty()
-                        && (!expectHighlight || hasHighlight)) {
-                    // Годится: либо подсветка есть, либо она и не ожидалась
-                    lines = viaSnippets;
-                } else {
-                    // issue_snippets не дал подсветку (или вернул пусто) — fallback
-                    if (viaSnippets != null && !viaSnippets.isEmpty() && !expectHighlight) {
+                if (viaSnippets != null && !viaSnippets.isEmpty()) {
+                    // ИСПРАВЛЕНО: не выбрасываем данные issue_snippets
+                    if (!expectHighlight || hasHighlight) {
                         lines = viaSnippets;
                     } else {
-                        System.out.println("[SonarIssuesApi] snippet fallback for " + issueKey
-                                + ": sources/lines around " + effectiveLine
-                                + (expectHighlight ? " (expected highlight)" : ""));
-                        lines = trySourcesLinesAround(issue, effectiveLine);
-                        if (lines == null || lines.isEmpty()) {
-                            lines = trySourcesLinesHead(issue, FILE_HEAD_LINES);
+                        // Хотели подсветку, но её нет — пробуем sources/lines.
+                        // Если получим — используем; если нет — оставляем
+                        // viaSnippets (без подсветки лучше, чем пусто).
+                        List<String> fallback = trySourcesLinesAround(issue, effectiveLine);
+                        if (fallback != null && !fallback.isEmpty()) {
+                            lines = fallback;
+                        } else {
+                            lines = viaSnippets;
                         }
                     }
+                } else {
+                    // issue_snippets ничего не вернул — пробуем sources/lines
+                    lines = trySourcesLinesAround(issue, effectiveLine);
+                    if (lines == null || lines.isEmpty()) {
+                        lines = trySourcesLinesHead(issue, FILE_HEAD_LINES);
+                    }
+                    if (lines == null) lines = Collections.emptyList();
                 }
             } else {
                 lines = trySourcesLinesHead(issue, FILE_HEAD_LINES);
-            }
-
-            // диагностика: если textRange задан, но подсветки так и нет
-            if (expectHighlight) {
-                boolean hasHighlight = lines.stream().anyMatch(l -> l.contains("§HL_START§"));
-                if (!hasHighlight) {
-                    System.out.println("[SonarIssuesApi] WARN: no highlight for " + issueKey
-                            + " (textRange=" + issue.textRange.startLine + ":"
-                            + issue.textRange.startOffset + "-"
-                            + issue.textRange.endLine + ":"
-                            + issue.textRange.endOffset + ", effectiveLine=" + effectiveLine + ")");
-                }
             }
         }
 
@@ -573,7 +551,6 @@ public class SonarIssuesApi {
         return lines;
     }
 
-    /** issue_snippets — работает для issues с line > 0. Возвращает null при полной неудаче. */
     private List<String> tryIssueSnippets(Issue issue) {
         try {
             String url = "/api/sources/issue_snippets?issueKey=" + enc(issue.key);
@@ -595,13 +572,15 @@ public class SonarIssuesApi {
             }
             return lines;
         } catch (Exception e) {
-            System.err.println("[SonarIssuesApi] issue_snippets failed for "
-                    + issue.key + ": " + e.getMessage());
+            String m = e.getMessage();
+            if (m == null || !m.contains("HTTP 404")) {
+                System.err.println("[SonarIssuesApi] issue_snippets failed for "
+                        + issue.key + ": " + m);
+            }
             return null;
         }
     }
 
-    /** sources/lines с диапазоном вокруг эффективной строки. */
     private List<String> trySourcesLinesAround(Issue issue, int centerLine) {
         String componentKey = buildFullComponentKey(issue.component);
         if (componentKey == null || componentKey.isEmpty()) return null;
@@ -613,7 +592,6 @@ public class SonarIssuesApi {
         return trySourcesLines(issue, componentKey, from, to);
     }
 
-    /** sources/lines: первые N строк файла. */
     private List<String> trySourcesLinesHead(Issue issue, int maxLines) {
         String componentKey = buildFullComponentKey(issue.component);
         if (componentKey == null || componentKey.isEmpty()) return Collections.emptyList();
@@ -621,8 +599,14 @@ public class SonarIssuesApi {
         return result != null ? result : Collections.emptyList();
     }
 
-    /** Общий метод: GET /api/sources/lines?key=<componentKey>&from=<from>&to=<to>. */
+    /**
+     * ИСПРАВЛЕНИЕ: кэшируем недоступность компонента, чтобы не делать
+     * десятки запросов с 404 для разных issues одного файла.
+     */
     private List<String> trySourcesLines(Issue issue, String componentKey, int from, int to) {
+        if (failedComponents.contains(componentKey)) {
+            return null;
+        }
         try {
             String url = "/api/sources/lines?key=" + enc(componentKey)
                     + "&from=" + from + "&to=" + to;
@@ -642,30 +626,26 @@ public class SonarIssuesApi {
             }
             return lines;
         } catch (Exception e) {
-            System.err.println("[SonarIssuesApi] sources/lines недоступен для "
-                    + issue.component + " [" + from + "-" + to + "]: " + e.getMessage());
+            String msg = e.getMessage();
+            if (msg != null && (msg.contains("HTTP 404") || msg.contains("not found"))) {
+                failedComponents.add(componentKey);
+                System.out.println("[SonarIssuesApi] source unavailable for component "
+                        + componentKey + " (cached, will skip further attempts)");
+            } else {
+                System.err.println("[SonarIssuesApi] sources/lines failed for "
+                        + componentKey + " [" + from + "-" + to + "]: " + msg);
+            }
             return null;
         }
     }
 
-    /**
-     * Применяет подсветку, если нужно:
-     *  - если код уже содержит <mark class="sonar-issue-mark"> — не дублируем
-     *  - иначе, если textRange валиден — вызываем applyHighlight
-     */
     private String maybeHighlight(String code, int lineNum, Issue issue) {
         if (code == null || code.isEmpty()) return code;
-        if (code.contains("<mark class=\"sonar-issue-mark\">")) {
-            return code;
-        }
+        if (code.contains("<mark class=\"sonar-issue-mark\">")) return code;
         if (!hasHighlightableRange(issue)) return code;
         return applyHighlight(code, lineNum, issue.textRange);
     }
 
-    /**
-     * Восстанавливает полный ключ компонента вида "<projectKey>:<path>".
-     * В Issue.from component уже без префикса проекта.
-     */
     private String buildFullComponentKey(String component) {
         if (component == null || component.isEmpty()) return null;
         if (projectKey == null || projectKey.isEmpty()) return component;
@@ -677,15 +657,6 @@ public class SonarIssuesApi {
         snippetCache.remove(issueKey);
     }
 
-    /**
-     * Подсветка фрагмента mark'ами.
-     * Защищённые случаи:
-     *  - textRange null / startLine<=0 / endLine<=0 → без изменений
-     *  - startLine > endLine → без изменений
-     *  - zero-width range (startLine==endLine && startOffset==endOffset) → без изменений
-     *  - строка вне диапазона → без изменений
-     *  - в html уже есть <mark class="sonar-issue-mark"> → без изменений
-     */
     private String applyHighlight(String html, int lineNum, Issue.TextRange range) {
         if (range == null) return html;
         if (range.startLine <= 0 || range.endLine <= 0) return html;
@@ -833,35 +804,33 @@ public class SonarIssuesApi {
                 + "&additionalFields=" + enc("_all");
         return new JSONObject(client.get(url));
     }
-    /**
-     * Запрашивает полный листинг файла из SonarQube.
-     *
-     * @param componentKey Полный ключ компонента (например, "MEDMIS-tMIS.mis:Cache/FileCache.inc")
-     * @return Строка с полным кодом файла (без HTML-тегов).
-     */
+
     public String fetchFullSource(String componentKey) {
         if (componentKey == null || componentKey.isEmpty()) return "";
+        if (failedComponents.contains(componentKey)) return "";
         try {
-            // Запрашиваем с 1 по 100000 строку (с запасом на весь файл)
             String url = "/api/sources/lines?key=" + enc(componentKey) + "&from=1&to=100000";
             String json = client.get(url);
             JSONObject root = new JSONObject(json);
             JSONArray sources = root.optJSONArray("sources");
-
             if (sources == null) return "";
 
             StringBuilder sb = new StringBuilder();
             for (int i = 0; i < sources.length(); i++) {
                 JSONObject lineObj = sources.getJSONObject(i);
                 String code = lineObj.optString("code", "");
-                // Удаляем HTML-теги и декодируем сущности
                 String cleanLine = cleanHtml(code);
                 sb.append(cleanLine).append("\n");
             }
             return sb.toString();
         } catch (Exception e) {
-            System.err.println("[SonarIssuesApi] Ошибка получения полного кода для "
-                    + componentKey + ": " + e.getMessage());
+            String msg = e.getMessage();
+            if (msg != null && (msg.contains("HTTP 404") || msg.contains("not found"))) {
+                failedComponents.add(componentKey);
+            } else {
+                System.err.println("[SonarIssuesApi] Ошибка получения полного кода для "
+                        + componentKey + ": " + msg);
+            }
             return "";
         }
     }

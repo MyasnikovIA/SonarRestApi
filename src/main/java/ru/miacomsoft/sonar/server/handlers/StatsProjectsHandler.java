@@ -294,6 +294,11 @@ public class StatsProjectsHandler extends BaseHandler {
                 }
             }
 
+            // NEW: подсчёт по правилам
+            if (it.rule != null && !it.rule.isEmpty()) {
+                stats.byRule.merge(it.rule, 1, Integer::sum);
+            }
+
             if (it.component != null && !it.component.isEmpty()) {
                 files.add(it.component);
             }
@@ -393,6 +398,7 @@ public class StatsProjectsHandler extends BaseHandler {
         final Map<String, Integer> bySeverity = new TreeMap<>();
         final Map<String, Integer> byQuality  = new TreeMap<>();
         final Map<String, Integer> byTag      = new TreeMap<>();
+        final Map<String, Integer> byRule     = new TreeMap<>(); // NEW
 
         void merge(JSONObject other) {
             if (other == null) return;
@@ -401,6 +407,7 @@ public class StatsProjectsHandler extends BaseHandler {
             mergeMap(other.optJSONObject("bySeverity"), bySeverity);
             mergeMap(other.optJSONObject("byQuality"),  byQuality);
             mergeMap(other.optJSONObject("byTag"),      byTag);
+            mergeMap(other.optJSONObject("byRule"),     byRule); // NEW
         }
 
         private static void mergeMap(JSONObject src, Map<String, Integer> dst) {
@@ -415,20 +422,11 @@ public class StatsProjectsHandler extends BaseHandler {
             o.put("bySeverity",  new JSONObject(bySeverity));
             o.put("byQuality",   new JSONObject(byQuality));
             o.put("byTag",       new JSONObject(byTag));
+            o.put("byRule",      new JSONObject(byRule)); // NEW
             return o;
         }
     }
 
-    /**
-     * Базовый URL SonarQube без завершающего слэша.
-     * Порядок поиска:
-     *   1) -Dsonar.url=<...>
-     *   2) переменная окружения SONAR_URL
-     *   3) state.getSession().getUrl()  ← прямой доступ, всегда работает
-     *   4) рефлексия по state.getClient() — ищет getBaseUrl() / getUrl() /
-     *      getServerUrl() / getHost() (SonarClient.getUrl() теперь есть)
-     *   5) пустая строка — карточки отрисуются без ссылок.
-     */
     private String resolveSonarBaseUrl() {
         String prop = System.getProperty("sonar.url");
         if (prop != null && !prop.isBlank()) return prop.replaceAll("/+$", "");
@@ -436,7 +434,6 @@ public class StatsProjectsHandler extends BaseHandler {
         String env = System.getenv("SONAR_URL");
         if (env != null && !env.isBlank()) return env.replaceAll("/+$", "");
 
-        // Прямой доступ через SessionManager (самый надёжный путь)
         try {
             SessionManager sm = state.getSession();
             if (sm != null) {
@@ -445,11 +442,8 @@ public class StatsProjectsHandler extends BaseHandler {
                     return u.replaceAll("/+$", "");
                 }
             }
-        } catch (Exception ignored) {
-            // fall through
-        }
+        } catch (Exception ignored) {}
 
-        // Рефлексия — безопасно, не требует наличия конкретного метода у SonarClient.
         try {
             Object client = state.getClient();
             if (client != null) {
@@ -461,14 +455,10 @@ public class StatsProjectsHandler extends BaseHandler {
                             String s = result.toString();
                             if (!s.isBlank()) return s.replaceAll("/+$", "");
                         }
-                    } catch (NoSuchMethodException ignored) {
-                        // пробуем следующий
-                    }
+                    } catch (NoSuchMethodException ignored) {}
                 }
             }
-        } catch (Exception ignored) {
-            // не смогли — просто вернём пусто
-        }
+        } catch (Exception ignored) {}
 
         return "";
     }

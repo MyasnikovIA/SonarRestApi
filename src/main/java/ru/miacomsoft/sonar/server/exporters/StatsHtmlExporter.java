@@ -9,8 +9,7 @@ import java.util.*;
 
 /**
  * Генерирует HTML-отчёт статистики по проектам.
- * Формат: карточки-категории qual → sev → tag, внутри каждой — карточки значений.
- * Для project-блоков карточки значений кликабельны и ведут на SonarQube UI.
+ * Формат: карточки-категории qual → sev → rule → tag, внутри каждой — карточки значений.
  */
 public final class StatsHtmlExporter {
 
@@ -28,11 +27,9 @@ public final class StatsHtmlExporter {
         int ok        = data.optInt("projectsOk", 0);
         int failed    = requested - ok;
 
-        // -------- параметры для ссылок на SonarQube --------
         String sonarBaseUrl = data.optString("sonarBaseUrl", "");
         String branch       = data.optString("branch", "");
         String statusesRaw  = data.optString("statuses", "");
-        // для URL используем MQR-валидные статусы, чтобы ссылки открывались без 400
         String statusesUrl  = sanitizeStatusesForUrl(statusesRaw);
 
         List<String> keys = new ArrayList<>(projects.keySet());
@@ -53,7 +50,8 @@ public final class StatsHtmlExporter {
         html.append("<div class=\"filters-box\">\n");
         html.append("<div class=\"row\"><span class=\"label\">Проектов запрошено:</span><b>")
                 .append(requested).append("</b></div>\n");
-        html.append("<div class=\"row\"><span class=\"label\">Успешно:</span><b>").append(ok).append("</b>");
+        html.append("<div class=\"row\"><span class=\"label\">Успешно:</span><b>")
+                .append(ok).append("</b>");
         if (failed > 0) {
             html.append(" · <span style=\"color:#de350b;\">Ошибок: ").append(failed).append("</span>");
         }
@@ -85,26 +83,41 @@ public final class StatsHtmlExporter {
                     .append("<span class=\"total-value\">").append(totals.optInt("totalFiles", 0))
                     .append("</span></div>\n");
             html.append("</div>\n");
-            // totals — без ссылок: projectKey пустой, sonarBaseUrl пустой.
             html.append(renderUnifiedBreakdown(totals, "", "", statusesUrl, ""));
             html.append("</div>\n");
         }
 
         // ---------- PROJECTS ----------
-        html.append("<h2 style=\"color:#172b4d;border-bottom:2px solid #0052cc;margin-top:32px;font-size:20px;\">")
+        html.append("<h2 style=\"color:#172b4d;border-bottom:2px solid #0052cc;")
+                .append("margin-top:32px;font-size:20px;\">")
                 .append("Проекты (").append(keys.size()).append(")</h2>\n");
 
         if (keys.isEmpty()) {
-            html.append("<div style=\"text-align:center;color:#6b778c;padding:40px;font-style:italic;\">")
-                    .append("Нет данных по проектам</div>\n");
+            html.append("<div style=\"text-align:center;color:#6b778c;padding:40px;")
+                    .append("font-style:italic;\">Нет данных по проектам</div>\n");
         } else {
             for (String key : keys) {
                 JSONObject p = projects.optJSONObject(key);
                 if (p == null) p = new JSONObject();
 
+                String dashboardUrl = null;
+                if (sonarBaseUrl != null && !sonarBaseUrl.isBlank()) {
+                    String base = sonarBaseUrl.replaceAll("/+$", "");
+                    dashboardUrl = base + "/dashboard?id=" + urlEnc(key)
+                            + "&codeScope=overall";
+                }
+
                 html.append("<div class=\"project-block\">\n");
-                html.append("<div class=\"project-header\"><span class=\"project-icon\">📁</span>")
-                        .append("<h2>").append(esc(key)).append("</h2></div>\n");
+                html.append("<div class=\"project-header\"><span class=\"project-icon\">📁</span>");
+                if (dashboardUrl != null) {
+                    html.append("<h2><a href=\"").append(esc(dashboardUrl))
+                            .append("\" target=\"_blank\" rel=\"noopener noreferrer\" ")
+                            .append("title=\"Открыть dashboard проекта в SonarQube\">")
+                            .append(esc(key)).append("</a></h2>");
+                } else {
+                    html.append("<h2>").append(esc(key)).append("</h2>");
+                }
+                html.append("</div>\n");
 
                 if (p.has("error")) {
                     html.append("<div style=\"color:#de350b;padding:12px;background:#ffebe6;")
@@ -119,7 +132,6 @@ public final class StatsHtmlExporter {
                             .append("<span class=\"total-value\">").append(p.optInt("totalFiles", 0))
                             .append("</span></div>\n");
                     html.append("</div>\n");
-                    // project-block — со ссылками
                     html.append(renderUnifiedBreakdown(p, sonarBaseUrl, key, statusesUrl, branch));
                 }
 
@@ -128,7 +140,11 @@ public final class StatsHtmlExporter {
         }
 
         // ---------- FOOTER ----------
-        html.append("<div class=\"footer\">SonarQube Stats Report · ").append(esc(now)).append("</div>\n");
+        html.append("<div class=\"footer\">SonarQube Stats Report · ")
+                .append(esc(now)).append("</div>\n");
+
+        html.append(MULTI_SELECT_SCRIPT);
+
         html.append("</body>\n</html>\n");
 
         return html.toString();
@@ -145,9 +161,10 @@ public final class StatsHtmlExporter {
                                                  String branch) {
         JSONObject bySev  = p.optJSONObject("bySeverity");
         JSONObject byQual = p.optJSONObject("byQuality");
+        JSONObject byRule = p.optJSONObject("byRule");
         JSONObject byTag  = p.optJSONObject("byTag");
 
-        if (isEmpty(byQual) && isEmpty(bySev) && isEmpty(byTag)) {
+        if (isEmpty(byQual) && isEmpty(bySev) && isEmpty(byRule) && isEmpty(byTag)) {
             return "<div class=\"no-data\">— нет данных —</div>\n";
         }
 
@@ -156,6 +173,8 @@ public final class StatsHtmlExporter {
         sb.append(renderCategoryCard("qual", "Качество (qual)", byQual, "quality",
                 sonarBaseUrl, projectKey, statuses, branch));
         sb.append(renderCategoryCard("sev",  "Severity (sev)",  bySev,  "severity",
+                sonarBaseUrl, projectKey, statuses, branch));
+        sb.append(renderCategoryCard("rule", "Правила (rule)",  byRule, "rule",
                 sonarBaseUrl, projectKey, statuses, branch));
         sb.append(renderCategoryCard("tag",  "Теги (tag)",      byTag,  "tag",
                 sonarBaseUrl, projectKey, statuses, branch));
@@ -188,35 +207,84 @@ public final class StatsHtmlExporter {
         int totalInCategory = 0;
         for (Row r : rows) totalInCategory += r.count;
 
+        // Теперь и "tag", и "rule" являются мультивыборными
+        boolean isSelectable = "tag".equals(prefix) || "rule".equals(prefix);
+        boolean canBuildUrls = sonarBaseUrl != null && !sonarBaseUrl.isBlank()
+                && projectKey != null && !projectKey.isBlank();
+
         StringBuilder sb = new StringBuilder();
         sb.append("<div class=\"breakdown-category breakdown-category-")
                 .append(cssClass).append("\">\n");
 
+        // ---------- header ----------
         sb.append("<div class=\"breakdown-category-header\">")
-                .append("<span class=\"category-label\">").append(esc(label)).append("</span>")
+                .append("<div style=\"display:flex; align-items:center; gap:8px; flex-wrap:wrap;\">")
+                .append("<span class=\"category-label\">").append(esc(label)).append("</span>");
+
+        if (isSelectable && canBuildUrls) {
+            String base = sonarBaseUrl.replaceAll("/+$", "");
+            String filterType = "tag".equals(prefix) ? "tags" : "rules";
+
+            sb.append("<button class=\"multi-sel-open\" type=\"button\" ")
+                    .append("style=\"display:none;\" ")
+                    .append("data-base=\"").append(esc(base)).append("\" ")
+                    .append("data-project=\"").append(esc(projectKey)).append("\" ")
+                    .append("data-filter-type=\"").append(filterType).append("\" ")
+                    .append("data-branch=\"").append(esc(branch == null ? "" : branch)).append("\" ")
+                    .append("title=\"Открыть SonarQube с выбранными параметрами\">")
+                    .append("📂 <span class=\"multi-sel-label\">")
+                    .append(esc(projectKey)).append(": —</span>")
+                    .append("</button>");
+        }
+
+        sb.append("</div>")
                 .append("<span class=\"category-total\">").append(totalInCategory).append("</span>")
                 .append("</div>\n");
 
+        // ---------- values ----------
         sb.append("<div class=\"breakdown-values\">\n");
         for (Row r : rows) {
             String url = buildCardUrl(prefix, r.param, sonarBaseUrl, projectKey, statuses, branch);
 
-            if (url != null) {
+            if (isSelectable && url != null) {
+                // Мультивыборный элемент (тег или правило)
+                sb.append("<div class=\"breakdown-card breakdown-card-select\">")
+                        .append("<label class=\"multi-sel-cb-label\" ")
+                        .append("title=\"Добавить в мультивыбор\">")
+                        .append("<input type=\"checkbox\" class=\"multi-sel-cb\" ")
+                        .append("value=\"").append(esc(r.param)).append("\">")
+                        .append("</label>")
+                        .append("<a href=\"").append(esc(url)).append("\" ")
+                        .append("class=\"breakdown-card-link breakdown-card-select-link\" ")
+                        .append("target=\"_blank\" rel=\"noopener noreferrer\" ")
+                        .append("title=\"Открыть SonarQube с одним значением\">")
+                        .append("<div class=\"breakdown-card-title\">")
+                        .append("<span class=\"param-prefix\">").append(esc(prefix)).append(":</span> ")
+                        .append("<span class=\"param-value\">").append(esc(r.param)).append("</span>")
+                        .append("</div>")
+                        .append("<div class=\"breakdown-card-count\">").append(r.count).append("</div>")
+                        .append("</a>")
+                        .append("</div>\n");
+            } else if (url != null) {
                 sb.append("<a href=\"").append(esc(url)).append("\" ")
                         .append("class=\"breakdown-card breakdown-card-link\" ")
                         .append("target=\"_blank\" rel=\"noopener noreferrer\" ")
-                        .append("title=\"Открыть в SonarQube\">");
+                        .append("title=\"Открыть в SonarQube\">")
+                        .append("<div class=\"breakdown-card-title\">")
+                        .append("<span class=\"param-prefix\">").append(esc(prefix)).append(":</span> ")
+                        .append("<span class=\"param-value\">").append(esc(r.param)).append("</span>")
+                        .append("</div>")
+                        .append("<div class=\"breakdown-card-count\">").append(r.count).append("</div>")
+                        .append("</a>\n");
             } else {
-                sb.append("<div class=\"breakdown-card\">");
+                sb.append("<div class=\"breakdown-card\">")
+                        .append("<div class=\"breakdown-card-title\">")
+                        .append("<span class=\"param-prefix\">").append(esc(prefix)).append(":</span> ")
+                        .append("<span class=\"param-value\">").append(esc(r.param)).append("</span>")
+                        .append("</div>")
+                        .append("<div class=\"breakdown-card-count\">").append(r.count).append("</div>")
+                        .append("</div>\n");
             }
-
-            sb.append("<div class=\"breakdown-card-title\">")
-                    .append("<span class=\"param-prefix\">").append(esc(prefix)).append(":</span> ")
-                    .append("<span class=\"param-value\">").append(esc(r.param)).append("</span>")
-                    .append("</div>")
-                    .append("<div class=\"breakdown-card-count\">").append(r.count).append("</div>");
-
-            sb.append(url != null ? "</a>\n" : "</div>\n");
         }
         sb.append("</div>\n");
         sb.append("</div>\n");
@@ -224,29 +292,9 @@ public final class StatsHtmlExporter {
     }
 
     // ============================================================
-    // URL → SonarQube
+    // URL → SonarQube (одиночная карточка)
     // ============================================================
 
-    /**
-     * Формирует URL на страницу /project/issues для карточки.
-     *
-     * Пример результирующего URL (для тега not-require-fix):
-     *   {base}/project/issues
-     *     ?issueStatuses=ACCEPTED%2CCONFIRMED%2CFALSE_POSITIVE%2CFIXED%2COPEN
-     *     &tags=not-require-fix
-     *     &branch=master
-     *     &id=MEDMIS-MISmobile.max-service
-     *
-     * Порядок параметров (как в SonarQube UI):
-     *   1) issueStatuses
-     *   2) impactSoftwareQualities | impactSeverities | tags
-     *   3) branch
-     *   4) id (projectKey)
-     *
-     * Возвращает null, если ссылку построить нельзя
-     * (нет base URL / projectKey / значения, либо значение = UNKNOWN) —
-     * в этом случае карточка рендерится как обычный <div>.
-     */
     private static String buildCardUrl(String prefix, String rawValue,
                                        String sonarBaseUrl, String projectKey,
                                        String statuses, String branch) {
@@ -259,18 +307,19 @@ public final class StatsHtmlExporter {
 
         List<String> params = new ArrayList<>();
 
-        // 1. issueStatuses — первым (как в примере SonarQube UI)
         if (statuses != null && !statuses.isEmpty()) {
             params.add("issueStatuses=" + urlEnc(statuses));
         }
 
-        // 2. Параметр фильтра (qual / sev / tag)
         switch (prefix) {
             case "qual":
                 params.add("impactSoftwareQualities=" + urlEnc(rawValue));
                 break;
             case "sev":
                 params.add("impactSeverities=" + urlEnc(rawValue));
+                break;
+            case "rule":
+                params.add("rules=" + urlEnc(rawValue));
                 break;
             case "tag":
                 params.add("tags=" + urlEnc(rawValue));
@@ -279,30 +328,15 @@ public final class StatsHtmlExporter {
                 return null;
         }
 
-        // 3. branch
         if (branch != null && !branch.isEmpty()) {
             params.add("branch=" + urlEnc(branch));
         }
 
-        // 4. id проекта
         params.add("id=" + urlEnc(projectKey));
 
         return base + "/project/issues?" + String.join("&", params);
     }
 
-    /**
-     * Приводит произвольный набор статусов к MQR-валидным значениям,
-     * принимаемым SonarQube в параметре issueStatuses, и сортирует их
-     * по алфавиту — ровно так, как это делает сам SonarQube UI.
-     *
-     * Пример: "OPEN,WONTFIX,CONFIRMED,FALSE_POSITIVE,FIXED,ACCEPTED,REOPENED,CLOSED"
-     *   → "ACCEPTED,CONFIRMED,FALSE_POSITIVE,FIXED,OPEN"
-     *   → URL: issueStatuses=ACCEPTED%2CCONFIRMED%2CFALSE_POSITIVE%2CFIXED%2COPEN
-     *
-     * Используем TreeSet вместо LinkedHashSet, чтобы порядок был стабильным
-     * и совпадал с эталонным SonarQube. Это влияет только на внешний вид URL —
-     * на содержимое страницы SonarQube порядок статусов не влияет.
-     */
     private static String sanitizeStatusesForUrl(String statuses) {
         if (statuses == null || statuses.isEmpty()) return "";
         Set<String> valid = new TreeSet<>();
@@ -360,6 +394,110 @@ public final class StatsHtmlExporter {
     }
 
     // ============================================================
+    // JavaScript для мультивыбора
+    // ============================================================
+
+    private static final String MULTI_SELECT_SCRIPT =
+            "<script>\n" +
+                    "(function() {\n" +
+                    "  function buildUrl(btn, values) {\n" +
+                    "    var base = btn.dataset.base || '';\n" +
+                    "    var proj = btn.dataset.project || '';\n" +
+                    "    var fType = btn.dataset.filterType || 'tags';\n" +
+                    "    var br   = btn.dataset.branch || '';\n" +
+                    "    var params = [];\n" +
+                    "    params.push(fType + '=' + encodeURIComponent(values.join(',')));\n" +
+                    "    if (br) params.push('branch=' + encodeURIComponent(br));\n" +
+                    "    params.push('id=' + encodeURIComponent(proj));\n" +
+                    "    return base + '/project/issues?' + params.join('&');\n" +
+                    "  }\n" +
+                    "\n" +
+                    "  function updateBtn(cb) {\n" +
+                    "    var cat = cb.closest('.breakdown-category');\n" +
+                    "    if (!cat) return;\n" +
+                    "    var checked = cat.querySelectorAll('.multi-sel-cb:checked');\n" +
+                    "    var btn = cat.querySelector('.multi-sel-open');\n" +
+                    "    if (!btn) return;\n" +
+                    "    var proj = btn.dataset.project || '';\n" +
+                    "    var vals = Array.prototype.slice.call(checked)\n" +
+                    "      .map(function(c){ return c.value; }).sort();\n" +
+                    "\n" +
+                    "    if (vals.length > 0) {\n" +
+                    "      var label = proj + ': ' + vals.join(', ');\n" +
+                    "      btn.querySelector('.multi-sel-label').textContent = label;\n" +
+                    "      btn.title = 'Открыть: ' + buildUrl(btn, vals);\n" +
+                    "      btn.style.display = 'inline-flex';\n" +
+                    "    } else {\n" +
+                    "      btn.querySelector('.multi-sel-label').textContent = proj + ': —';\n" +
+                    "      btn.title = 'Открыть SonarQube с выбранными параметрами';\n" +
+                    "      btn.style.display = 'none';\n" +
+                    "    }\n" +
+                    "  }\n" +
+                    "\n" +
+                    "  // 1) Основной путь: <label> переключает <input> нативно\n" +
+                    "  document.querySelectorAll('.multi-sel-cb').forEach(function(cb) {\n" +
+                    "    cb.addEventListener('change', function() { updateBtn(cb); });\n" +
+                    "  });\n" +
+                    "\n" +
+                    "  // 2) Клик по карточке\n" +
+                    "  document.querySelectorAll('.breakdown-card-select-link').forEach(function(link) {\n" +
+                    "    link.addEventListener('click', function(e) {\n" +
+                    "      var card = link.closest('.breakdown-card-select');\n" +
+                    "      if (!card) return;\n" +
+                    "      var cat = link.closest('.breakdown-category');\n" +
+                    "      if (!cat) return;\n" +
+                    "      var cb = card.querySelector('.multi-sel-cb');\n" +
+                    "      if (!cb) return;\n" +
+                    "\n" +
+                    "      var checked = cat.querySelectorAll('.multi-sel-cb:checked');\n" +
+                    "\n" +
+                    "      // 2a) hit-area чекбокса\n" +
+                    "      var cbRect = cb.getBoundingClientRect();\n" +
+                    "      var pad = 15;\n" +
+                    "      if (e.clientX >= cbRect.left - pad && e.clientX <= cbRect.right + pad &&\n" +
+                    "          e.clientY >= cbRect.top - pad && e.clientY <= cbRect.bottom + pad) {\n" +
+                    "        e.preventDefault();\n" +
+                    "        e.stopPropagation();\n" +
+                    "        cb.checked = !cb.checked;\n" +
+                    "        updateBtn(cb);\n" +
+                    "        return;\n" +
+                    "      }\n" +
+                    "\n" +
+                    "      // 2b) Если есть отмеченные — мультивыборный URL (без issueStatuses)\n" +
+                    "      if (checked.length > 0) {\n" +
+                    "        e.preventDefault();\n" +
+                    "        e.stopPropagation();\n" +
+                    "\n" +
+                    "        if (!cb.checked) {\n" +
+                    "          cb.checked = true;\n" +
+                    "          updateBtn(cb);\n" +
+                    "        }\n" +
+                    "\n" +
+                    "        var vals = Array.prototype.slice.call(cat.querySelectorAll('.multi-sel-cb:checked'))\n" +
+                    "          .map(function(c){ return c.value; }).sort();\n" +
+                    "        var btn = cat.querySelector('.multi-sel-open');\n" +
+                    "        window.open(buildUrl(btn, vals), '_blank');\n" +
+                    "      }\n" +
+                    "    }, true);\n" +
+                    "  });\n" +
+                    "\n" +
+                    "  // 3) Синяя кнопка «<projectKey>: tag1, tag2»\n" +
+                    "  document.querySelectorAll('.multi-sel-open').forEach(function(btn) {\n" +
+                    "    btn.addEventListener('click', function(e) {\n" +
+                    "      e.preventDefault();\n" +
+                    "      var cat = btn.closest('.breakdown-category');\n" +
+                    "      if (!cat) return;\n" +
+                    "      var checked = cat.querySelectorAll('.multi-sel-cb:checked');\n" +
+                    "      if (!checked.length) return;\n" +
+                    "      var vals = Array.prototype.slice.call(checked)\n" +
+                    "        .map(function(c){ return c.value; }).sort();\n" +
+                    "      window.open(buildUrl(btn, vals), '_blank');\n" +
+                    "    });\n" +
+                    "  });\n" +
+                    "})();\n" +
+                    "</script>\n";
+
+    // ============================================================
     // CSS
     // ============================================================
 
@@ -381,6 +519,8 @@ public final class StatsHtmlExporter {
                     ".project-block{background:#fff;border:1px solid #dfe1e6;border-radius:10px;padding:22px 26px;margin-bottom:24px;box-shadow:0 1px 3px rgba(0,0,0,0.06);}\n" +
                     ".project-header{display:flex;align-items:center;gap:8px;margin-bottom:18px;padding-bottom:4px;}\n" +
                     ".project-header h2{margin:0;border:none;padding:0;font-size:17px;font-family:monospace;word-break:break-all;}\n" +
+                    ".project-header h2 a{color:inherit;text-decoration:none;}\n" +
+                    ".project-header h2 a:hover{color:#0052cc;text-decoration:underline;}\n" +
                     ".project-icon{font-size:20px;}\n" +
                     ".totals-row{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:20px;}\n" +
                     ".total-badge{display:flex;flex-direction:column;align-items:center;background:#f4f5f7;border:1px solid #dfe1e6;border-radius:8px;padding:12px 24px;min-width:130px;}\n" +
@@ -405,6 +545,31 @@ public final class StatsHtmlExporter {
                     "a.breakdown-card:hover{border-color:#0052cc;box-shadow:0 3px 10px rgba(0,82,204,0.18);text-decoration:none;}\n" +
                     "a.breakdown-card:focus-visible{outline:2px solid #0052cc;outline-offset:2px;}\n" +
                     "a.breakdown-card .breakdown-card-title::after{content:' ↗';font-size:10px;color:#6b778c;margin-left:2px;}\n" +
+
+                    ".breakdown-card-select{padding:0;position:relative;min-height:0;overflow:visible;}\n" +
+                    ".multi-sel-cb-label{position:absolute;left:0;top:0;bottom:0;width:34px;" +
+                    "display:flex;align-items:center;justify-content:center;" +
+                    "z-index:10;cursor:pointer;pointer-events:auto;}\n" +
+                    ".multi-sel-cb{width:16px;height:16px;margin:0;cursor:pointer;accent-color:#0052cc;pointer-events:auto;}\n" +
+                    ".breakdown-card-select .breakdown-card-select-link{display:flex;flex-direction:column;gap:4px;" +
+                    "padding:10px 14px 10px 34px;text-decoration:none;color:inherit;" +
+                    "width:100%;box-sizing:border-box;}\n" +
+                    ".breakdown-card-select:hover{border-color:#0052cc;box-shadow:0 3px 10px rgba(0,82,204,0.18);}\n" +
+                    ".breakdown-card-select .breakdown-card-select-link:focus-visible{outline:2px solid #0052cc;outline-offset:-2px;border-radius:6px;}\n" +
+                    ".breakdown-card-select .breakdown-card-select-link:hover .breakdown-card-title::after{content:' ↗';font-size:10px;color:#6b778c;margin-left:2px;}\n" +
+
+                    ".multi-sel-open{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;" +
+                    "background:#0052cc;color:#fff;border:none;border-radius:4px;" +
+                    "font-size:11px;font-weight:600;cursor:pointer;" +
+                    "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;" +
+                    "text-transform:none;letter-spacing:0;transition:background .15s;" +
+                    "max-width:560px;}\n" +
+                    ".multi-sel-open:hover{background:#0747a6;}\n" +
+                    ".multi-sel-open:focus-visible{outline:2px solid #0052cc;outline-offset:2px;}\n" +
+                    ".multi-sel-open .multi-sel-label{font-family:monospace;font-weight:700;" +
+                    "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" +
+                    "max-width:520px;display:inline-block;vertical-align:middle;}\n" +
+
                     ".summary-block .breakdown-category{background:rgba(255,255,255,0.08);border-color:rgba(255,255,255,0.2);}\n" +
                     ".summary-block .breakdown-category-header{color:rgba(255,255,255,0.85);border-bottom-color:rgba(255,255,255,0.25);}\n" +
                     ".summary-block .breakdown-category-header .category-total{color:#fff;background:rgba(255,255,255,0.15);border-color:rgba(255,255,255,0.35);}\n" +

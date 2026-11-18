@@ -126,37 +126,23 @@ public final class StatsHtmlExporter {
     // ============================================================
 
     private static String renderUnifiedBreakdown(JSONObject p) {
-        List<Row> rows = new ArrayList<>();
-        rows.addAll(buildRows(p.optJSONObject("bySeverity"), "sev"));
-        rows.addAll(buildRows(p.optJSONObject("byQuality"),  "qual"));
-        rows.addAll(buildRows(p.optJSONObject("byTag"),      "tag"));
+        JSONObject bySev  = p.optJSONObject("bySeverity");
+        JSONObject byQual = p.optJSONObject("byQuality");
+        JSONObject byTag  = p.optJSONObject("byTag");
 
-        if (rows.isEmpty()) {
+        if (isEmpty(byQual) && isEmpty(bySev) && isEmpty(byTag)) {
             return "<div class=\"no-data\">— нет данных —</div>\n";
         }
 
-        rows.sort((a, b) -> {
-            if (b.count != a.count) return b.count - a.count;
-            return a.param.compareTo(b.param);
-        });
-
         StringBuilder sb = new StringBuilder();
-        sb.append("<table class=\"breakdown-table\">\n");
-        sb.append("<thead><tr><th>Параметр</th><th style=\"text-align:right;\">Количество</th></tr></thead>\n");
-        sb.append("<tbody>\n");
+        sb.append("<div class=\"breakdown-cards\">\n");
 
-        for (Row r : rows) {
-            int colon = r.param.indexOf(": ");
-            String prefix = colon >= 0 ? r.param.substring(0, colon) : r.param;
-            String value  = colon >= 0 ? r.param.substring(colon + 2) : "";
+        // Порядок как в ТЗ: сначала qual, потом внутри/после — sev, затем tag.
+        sb.append(renderCategoryCard("qual", "Качество (qual)", byQual, "quality"));
+        sb.append(renderCategoryCard("sev",  "Severity (sev)",  bySev,  "severity"));
+        sb.append(renderCategoryCard("tag",  "Теги (tag)",      byTag,  "tag"));
 
-            sb.append("<tr><td>")
-                    .append("<span class=\"param-prefix\">").append(esc(prefix)).append(":</span> ")
-                    .append("<span class=\"param-value\">").append(esc(value)).append("</span>")
-                    .append("</td><td class=\"param-count\">").append(r.count).append("</td></tr>\n");
-        }
-
-        sb.append("</tbody>\n</table>\n");
+        sb.append("</div>\n");
         return sb.toString();
     }
 
@@ -207,12 +193,6 @@ public final class StatsHtmlExporter {
                     ".filters-box b{color:#172b4d;}\n" +
                     ".summary-block{background:linear-gradient(135deg,#0052cc 0%,#0747a6 100%);color:#fff;border-radius:10px;padding:22px 26px;margin-bottom:32px;box-shadow:0 4px 14px rgba(0,82,204,0.2);}\n" +
                     ".summary-block h2{color:#fff;border-bottom-color:rgba(255,255,255,0.35);}\n" +
-                    ".summary-block .breakdown-table{color:#fff;}\n" +
-                    ".summary-block .breakdown-table th{color:rgba(255,255,255,0.85);border-bottom-color:rgba(255,255,255,0.3);}\n" +
-                    ".summary-block .breakdown-table td{border-bottom-color:rgba(255,255,255,0.15);}\n" +
-                    ".summary-block .param-prefix{color:rgba(255,255,255,0.7);}\n" +
-                    ".summary-block .param-value{color:#fff;}\n" +
-                    ".summary-block .param-count{color:#fff;}\n" +
                     ".summary-block .total-badge{background:rgba(255,255,255,0.15);border-color:rgba(255,255,255,0.35);}\n" +
                     ".summary-block .total-label{color:rgba(255,255,255,0.85);}\n" +
                     ".summary-block .total-value{color:#fff;}\n" +
@@ -224,15 +204,92 @@ public final class StatsHtmlExporter {
                     ".total-badge{display:flex;flex-direction:column;align-items:center;background:#f4f5f7;border:1px solid #dfe1e6;border-radius:8px;padding:12px 24px;min-width:130px;}\n" +
                     ".total-label{font-size:10.5px;color:#6b778c;text-transform:uppercase;letter-spacing:0.6px;font-weight:600;}\n" +
                     ".total-value{font-size:26px;font-weight:700;color:#0052cc;margin-top:2px;font-variant-numeric:tabular-nums;}\n" +
-                    ".breakdown-table{width:100%;border-collapse:collapse;font-size:13px;}\n" +
-                    ".breakdown-table th{text-align:left;color:#6b778c;font-weight:700;padding:8px 12px;border-bottom:2px solid #dfe1e6;font-size:11px;text-transform:uppercase;letter-spacing:0.3px;}\n" +
-                    ".breakdown-table td{padding:8px 12px;border-bottom:1px solid #ebecf0;}\n" +
-                    ".breakdown-table tr:last-child td{border-bottom:none;}\n" +
-                    ".breakdown-table tr:hover td{background:#f4f5f7;}\n" +
-                    ".param-prefix{color:#6b778c;font-family:monospace;font-size:12px;font-weight:600;}\n" +
-                    ".param-value{color:#172b4d;font-family:monospace;font-size:12.5px;}\n" +
-                    ".param-count{text-align:right;font-weight:700;font-variant-numeric:tabular-nums;font-size:14px;color:#0052cc;}\n" +
+
+                    // ====== Новые стили: карточки категорий и вложенные карточки значений ======
+                    ".breakdown-cards{display:flex;flex-direction:column;gap:16px;}\n" +
+                    ".breakdown-category{background:#f9fafb;border:1px solid #dfe1e6;border-radius:10px;padding:14px 16px 16px;}\n" +
+                    ".breakdown-category-header{display:flex;justify-content:space-between;align-items:center;font-size:12px;text-transform:uppercase;letter-spacing:0.6px;font-weight:700;color:#6b778c;padding-bottom:10px;margin-bottom:12px;border-bottom:1px dashed #dfe1e6;}\n" +
+                    ".breakdown-category-header .category-label{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;}\n" +
+                    ".breakdown-category-header .category-total{font-family:monospace;font-size:13px;font-weight:700;color:#0052cc;background:#fff;border:1px solid #dfe1e6;border-radius:6px;padding:2px 10px;font-variant-numeric:tabular-nums;}\n" +
+                    ".breakdown-values{display:flex;flex-wrap:wrap;gap:10px;}\n" +
+                    ".breakdown-card{display:flex;flex-direction:column;gap:4px;background:#fff;border:1px solid #dfe1e6;border-radius:8px;padding:10px 14px;min-width:140px;flex:0 0 auto;transition:box-shadow .15s,border-color .15s;}\n" +
+                    ".breakdown-card:hover{border-color:#b3bac5;box-shadow:0 2px 6px rgba(0,0,0,0.06);}\n" +
+                    ".breakdown-card-title{font-family:monospace;font-size:12px;line-height:1.3;}\n" +
+                    ".breakdown-card-title .param-prefix{color:#6b778c;font-weight:600;}\n" +
+                    ".breakdown-card-title .param-value{color:#172b4d;}\n" +
+                    ".breakdown-card-count{font-size:20px;font-weight:700;color:#0052cc;font-variant-numeric:tabular-nums;}\n" +
                     ".no-data{text-align:center;color:#6b778c;font-style:italic;padding:20px;font-size:13px;}\n" +
                     ".footer{text-align:center;color:#6b778c;font-size:12px;margin-top:40px;padding-top:20px;border-top:1px solid #dfe1e6;}\n" +
-                    "@media print{body{background:#fff;}.project-block,.summary-block{break-inside:avoid;box-shadow:none;}}\n";
+
+                    // ====== Тёмная тема для блока «Суммарно по всем проектам» ======
+                    ".summary-block .breakdown-category{background:rgba(255,255,255,0.08);border-color:rgba(255,255,255,0.2);}\n" +
+                    ".summary-block .breakdown-category-header{color:rgba(255,255,255,0.85);border-bottom-color:rgba(255,255,255,0.25);}\n" +
+                    ".summary-block .breakdown-category-header .category-total{color:#fff;background:rgba(255,255,255,0.15);border-color:rgba(255,255,255,0.35);}\n" +
+                    ".summary-block .breakdown-card{background:rgba(255,255,255,0.15);border-color:rgba(255,255,255,0.3);}\n" +
+                    ".summary-block .breakdown-card:hover{border-color:rgba(255,255,255,0.5);box-shadow:none;}\n" +
+                    ".summary-block .breakdown-card-title .param-prefix{color:rgba(255,255,255,0.7);}\n" +
+                    ".summary-block .breakdown-card-title .param-value{color:#fff;}\n" +
+                    ".summary-block .breakdown-card-count{color:#fff;}\n" +
+                    ".summary-block .no-data{color:rgba(255,255,255,0.8);}\n" +
+
+                    "@media print{body{background:#fff;}.project-block,.summary-block,.breakdown-category,.breakdown-card{break-inside:avoid;box-shadow:none;}}\n";
+
+    /**
+     * Одна секция-карточка с вложенными карточками значений.
+     *
+     * Заголовок секции — категория (qual / sev / tag).
+     * Внутри — карточки с конкретными значениями и их счётчиками,
+     * отсортированные по убыванию count, затем по имени.
+     */
+    private static String renderCategoryCard(String prefix,
+                                             String label,
+                                             JSONObject values,
+                                             String cssClass) {
+        if (isEmpty(values)) return "";
+
+        // Собираем строки и сортируем: count desc, param asc.
+        List<Row> rows = new ArrayList<>();
+        for (String key : values.keySet()) {
+            int count = values.optInt(key, 0);
+            if (count <= 0) continue;
+            rows.add(new Row(key, count));
+        }
+        rows.sort((a, b) -> {
+            if (b.count != a.count) return b.count - a.count;
+            return a.param.compareTo(b.param);
+        });
+        if (rows.isEmpty()) return "";
+
+        int totalInCategory = 0;
+        for (Row r : rows) totalInCategory += r.count;
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("<div class=\"breakdown-category breakdown-category-")
+                .append(cssClass).append("\">\n");
+
+        // Заголовок секции-карточки.
+        sb.append("<div class=\"breakdown-category-header\">")
+                .append("<span class=\"category-label\">").append(esc(label)).append("</span>")
+                .append("<span class=\"category-total\">").append(totalInCategory).append("</span>")
+                .append("</div>\n");
+
+        // Вложенные карточки значений.
+        sb.append("<div class=\"breakdown-values\">\n");
+        for (Row r : rows) {
+            sb.append("<div class=\"breakdown-card\">")
+                    .append("<div class=\"breakdown-card-title\">")
+                    .append("<span class=\"param-prefix\">").append(esc(prefix)).append(":</span> ")
+                    .append("<span class=\"param-value\">").append(esc(r.param)).append("</span>")
+                    .append("</div>")
+                    .append("<div class=\"breakdown-card-count\">").append(r.count).append("</div>")
+                    .append("</div>\n");
+        }
+        sb.append("</div>\n");
+
+        sb.append("</div>\n");
+        return sb.toString();
+    }
+    private static boolean isEmpty(JSONObject o) {
+        return o == null || o.isEmpty();
+    }
 }

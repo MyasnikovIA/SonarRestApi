@@ -12,33 +12,43 @@ public class JiraEpicService {
 
     private final JiraClient jira;
 
-    public JiraEpicService(JiraClient jira) { this.jira = jira; }
+    public JiraEpicService(JiraClient jira) {
+        this.jira = jira;
+    }
 
     public List<JiraFieldService.AllowedValue> getEpics(String projectKey) {
         List<JiraFieldService.AllowedValue> out = new ArrayList<>();
         try {
-            String url = "/rest/greenhopper/1.0/epics?searchQuery=&projectKey=" + enc(projectKey) + "&maxResults=100&hideDone=true";
-            JSONObject root = new JSONObject(jira.get(url));
-            JSONArray lists = root.optJSONArray("epicLists");
-            if (lists != null) {
-                for (int i = 0; i < lists.length(); i++) {
-                    JSONObject list = lists.getJSONObject(i);
-                    JSONArray epics = list.optJSONArray("epicNames");
-                    if (epics != null) {
-                        for (int j = 0; j < epics.length(); j++) {
-                            JSONObject ep = epics.getJSONObject(j);
-                            String key = ep.optString("key");
-                            String name = ep.optString("name");
-                            out.add(new JiraFieldService.AllowedValue(key, key + ": " + name));
+            // Новый запрос через Greenhopper API
+            String url = "/rest/greenhopper/1.0/epics?searchQuery=&projectKey="
+                    + URLEncoder.encode(projectKey, StandardCharsets.UTF_8)
+                    + "&maxResults=10000&hideDone=true";
+
+            String resp = jira.get(url);
+            JSONObject root = new JSONObject(resp);
+            JSONArray epicLists = root.optJSONArray("epicLists");
+
+            if (epicLists != null) {
+                for (int i = 0; i < epicLists.length(); i++) {
+                    JSONObject listObj = epicLists.getJSONObject(i);
+                    JSONArray epicNames = listObj.optJSONArray("epicNames");
+                    if (epicNames != null) {
+                        for (int j = 0; j < epicNames.length(); j++) {
+                            JSONObject epic = epicNames.getJSONObject(j);
+                            String key = epic.optString("key");
+                            String name = epic.optString("name");
+
+                            // Адаптируем под формат AllowedValue: id = key, value = name
+                            if (key != null && !key.isEmpty()) {
+                                out.add(new JiraFieldService.AllowedValue(key, name));
+                            }
                         }
                     }
                 }
             }
         } catch (Exception e) {
-            System.err.println("[JiraEpicService] Error: " + e.getMessage());
+            System.err.println("[JiraEpicService] Ошибка загрузки эпиков: " + e.getMessage());
         }
         return out;
     }
-
-    private static String enc(String s) { return URLEncoder.encode(s, StandardCharsets.UTF_8); }
 }

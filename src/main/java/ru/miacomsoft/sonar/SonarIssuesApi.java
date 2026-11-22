@@ -28,19 +28,10 @@ public class SonarIssuesApi {
     /** Минимальный уровень покрытия facets=files, при котором доверяем чанкованию. */
     private static final double FACET_COVERAGE_THRESHOLD = 0.9;
 
-    /**
-     * MQR-статусы, которые SonarQube принимает в параметре {@code issueStatuses}
-     * (по умолчанию). Если сервер вернёт свой список — он заменит этот набор
-     * через {@link #serverAllowedStatuses}.
-     */
     private static final Set<String> DEFAULT_MQR_STATUSES = Set.of(
             "OPEN", "CONFIRMED", "FALSE_POSITIVE", "ACCEPTED", "FIXED"
     );
 
-    /**
-     * Маппинг legacy-статусов (старая модель SonarQube) в MQR-статусы.
-     * Нужен, чтобы не падать на WONTFIX / CLOSED / REOPENED / RESOLVED.
-     */
     private static final Map<String, String> LEGACY_TO_MQR_STATUS = Map.of(
             "REOPENED", "OPEN",
             "CLOSED",   "FIXED",
@@ -48,7 +39,6 @@ public class SonarIssuesApi {
             "RESOLVED", "FIXED"
     );
 
-    /** Регулярка для парсинга списка допустимых статусов из текста ошибки 400. */
     private static final Pattern ALLOWED_STATUSES_PATTERN = Pattern.compile(
             "must be one of:\\s*\\[([^\\]]+)\\]", Pattern.CASE_INSENSITIVE);
 
@@ -62,16 +52,11 @@ public class SonarIssuesApi {
     private final Map<String, String> ruleNameCache;
     private final Map<String, List<String>> snippetCache;
 
-    // кэш недоступных компонентов (sources/lines 404) — чтобы не спамить запросами
     private final Set<String> failedComponents = ConcurrentHashMap.newKeySet();
 
     private static boolean reopenedSupported = true;
     private static volatile int effectivePsLimit = FETCH_PAGE_SIZE;
 
-    /**
-     * Список статусов, который реально принимает текущий сервер.
-     * {@code null} — ещё не известно, используем {@link #DEFAULT_MQR_STATUSES}.
-     */
     private static volatile Set<String> serverAllowedStatuses = null;
 
     public SonarIssuesApi(SonarClient client, String projectKey) {
@@ -92,18 +77,10 @@ public class SonarIssuesApi {
         return URLEncoder.encode(s, StandardCharsets.UTF_8);
     }
 
-    // ============================================================
-    // NEW: прогресс-колбэк для SSE-отчёта статистики
-    // ============================================================
-
     @FunctionalInterface
     public interface FetchProgressListener {
         void onProgress(int fetched, int total, String message);
     }
-
-    // ============================================================
-    // ps-fallback
-    // ============================================================
 
     private static String normalizeJsonQuotes(String msg) {
         if (msg == null) return null;
@@ -160,14 +137,6 @@ public class SonarIssuesApi {
         throw new IllegalStateException("Не удалось подобрать допустимый ps для " + logContext);
     }
 
-    // ============================================================
-    // NEW: нормализация статусов (MQR)
-    // ============================================================
-
-    /**
-     * Парсит список допустимых статусов из текста ошибки:
-     * {@code "... must be one of: [OPEN, CONFIRMED, FALSE_POSITIVE, ACCEPTED, FIXED]"}.
-     */
     private static Set<String> parseAllowedStatusesFromError(String msg) {
         if (msg == null) return null;
         String norm = normalizeJsonQuotes(msg);
@@ -181,19 +150,6 @@ public class SonarIssuesApi {
         return result.isEmpty() ? null : result;
     }
 
-    /**
-     * Приводит произвольный список статусов к допустимым значениям
-     * параметра {@code issueStatuses} в SonarQube MQR:
-     * <ul>
-     *   <li>валидные MQR-статусы оставляем как есть;</li>
-     *   <li>legacy-статусы (REOPENED/CLOSED/WONTFIX/RESOLVED) маппим в ближайший MQR;</li>
-     *   <li>неизвестные — отбрасываем с логом;</li>
-     *   <li>если после фильтрации ничего не осталось — вернём "", что означает
-     *       «не передавать issueStatuses вообще» (эквивалент «все»).</li>
-     * </ul>
-     *
-     * @return строка для параметра {@code issueStatuses} или "" — не передавать.
-     */
     private String sanitizeStatuses(String statuses) {
         if (statuses == null || statuses.isEmpty()) return "";
 
@@ -230,11 +186,8 @@ public class SonarIssuesApi {
         return result.isEmpty() ? "" : String.join(",", result);
     }
 
-    // ============================================================
-    // Build queries
-    // ============================================================
-
-    private String buildQueryWithStatuses(String statuses, String impactSeverity, String quality, String rule) {
+    private String buildQueryWithStatuses(String statuses, String impactSeverity, String quality,
+                                          String rule, String tags, String notTags) {
         StringBuilder q = new StringBuilder();
         q.append("components=").append(enc(projectKey));
         q.append("&s=").append(enc("FILE_LINE"));
@@ -247,6 +200,12 @@ public class SonarIssuesApi {
         if (rule != null && !rule.isEmpty()) {
             q.append("&rules=").append(enc(rule));
         }
+        if (tags != null && !tags.isEmpty()) {
+            q.append("&tags=").append(enc(tags));
+        }
+        if (notTags != null && !notTags.isEmpty()) {
+            q.append("&notTags=").append(enc(notTags));
+        }
         String st = sanitizeStatuses(statuses);
         if (!st.isEmpty()) {
             q.append("&issueStatuses=").append(enc(st));
@@ -256,23 +215,23 @@ public class SonarIssuesApi {
         return q.toString();
     }
 
-    // ============================================================
-    // Публичное API
-    // ============================================================
-
     public JSONObject fetchPageRaw(String statuses, String impactSeverity, String quality,
                                    String rule, int p, int ps) throws Exception {
+        return fetchPageRaw(statuses, impactSeverity, quality, rule, null, null, p, ps);
+    }
+
+    public JSONObject fetchPageRaw(String statuses, String impactSeverity, String quality,
+                                   String rule, String tags, String notTags, int p, int ps) throws Exception {
         int attempt = 0;
         while (attempt++ < 3) {
             String template = "/api/issues/search?"
-                    + buildQueryWithStatuses(statuses, impactSeverity, quality, rule)
+                    + buildQueryWithStatuses(statuses, impactSeverity, quality, rule, tags, notTags)
                     + "&ps={PS}&p=" + p;
             try {
                 return getJsonWithPsFallback(template, ps, "issues/search");
             } catch (RuntimeException e) {
                 String msg = e.getMessage();
 
-                // 1) Сервер сообщил свой список допустимых статусов — кэшируем и повторяем.
                 if (msg != null && msg.contains("issueStatuses")
                         && msg.toLowerCase().contains("must be one of")) {
                     Set<String> parsed = parseAllowedStatusesFromError(msg);
@@ -285,7 +244,6 @@ public class SonarIssuesApi {
                     }
                 }
 
-                // 2) Совместимость со старыми сборками без REOPENED.
                 if (msg != null && (msg.contains("REOPENED") || msg.contains("issueStatuses"))) {
                     reopenedSupported = false;
                     System.err.println("[SonarIssuesApi] Сервер не поддерживает REOPENED. "
@@ -316,7 +274,6 @@ public class SonarIssuesApi {
     }
 
     public int countWithStatuses(String statuses, String impactSeverity, String quality) throws Exception {
-        // Идём через fetchPageRaw, чтобы получить ту же защиту от 400 по статусам/ps.
         JSONObject root = fetchPageRaw(statuses, impactSeverity, quality, null, 1, 1);
         return root.getInt("total");
     }
@@ -352,7 +309,7 @@ public class SonarIssuesApi {
         int total = -1;
         while (total < 0 || out.size() < total) {
             String template = "/api/issues/search?"
-                    + buildQueryWithStatuses(statuses, impactSeverity, quality, null)
+                    + buildQueryWithStatuses(statuses, impactSeverity, quality, null, null, null)
                     + "&ps={PS}&p=" + page;
             JSONObject root = getJsonWithPsFallback(template, FETCH_PAGE_SIZE, "issues/search(direct)");
             total = root.getInt("total");
@@ -403,10 +360,6 @@ public class SonarIssuesApi {
         public BatchLimitExceededException(String msg) { super(msg); }
     }
 
-    // ============================================================
-    // fetchAllByFiles (пачки по 20) — сохранён + перегрузка с прогрессом
-    // ============================================================
-
     private List<Issue> fetchAllByFiles(String statuses, String impactSeverity, String quality) throws Exception {
         return fetchAllByFiles(statuses, impactSeverity, quality, 0, -1, null);
     }
@@ -443,10 +396,6 @@ public class SonarIssuesApi {
         System.out.println("[SonarIssuesApi] Обход файлов завершен. Собрано: " + out.size() + " замечаний.");
         return out;
     }
-
-    // ============================================================
-    // fetchAllByComponents — сохранён + перегрузка с прогрессом
-    // ============================================================
 
     private List<Issue> fetchAllByComponents(String statuses, String impactSeverity,
                                              String quality, String components) throws Exception {
@@ -556,7 +505,7 @@ public class SonarIssuesApi {
                                                   String quality, String rule, String facetName)
             throws Exception {
         String url = "/api/issues/search?"
-                + buildQueryWithStatuses(statuses, impactSeverity, quality, rule)
+                + buildQueryWithStatuses(statuses, impactSeverity, quality, rule, null, null)
                 + "&ps=1&facets=" + enc(facetName);
         JSONObject root = new JSONObject(client.get(url));
         JSONArray facets = root.getJSONArray("facets");
@@ -640,10 +589,6 @@ public class SonarIssuesApi {
         ruleNameCache.put(ruleKey, name);
         return name;
     }
-
-    // ============================================================
-    // SNIPPETS
-    // ============================================================
 
     private static int resolveEffectiveLine(Issue issue) {
         if (issue.line > 0) return issue.line;
@@ -932,6 +877,11 @@ public class SonarIssuesApi {
 
     public JSONObject fetchPageRawForComponent(String statuses, String impactSeverity, String quality,
                                                String rule, String component, int p, int ps) throws Exception {
+        return fetchPageRawForComponent(statuses, impactSeverity, quality, rule, component, null, null, p, ps);
+    }
+
+    public JSONObject fetchPageRawForComponent(String statuses, String impactSeverity, String quality,
+                                               String rule, String component, String tags, String notTags, int p, int ps) throws Exception {
         StringBuilder q = new StringBuilder();
         q.append("components=").append(enc(component));
         q.append("&s=").append(enc("FILE_LINE"));
@@ -943,6 +893,12 @@ public class SonarIssuesApi {
         }
         if (rule != null && !rule.isEmpty()) {
             q.append("&rules=").append(enc(rule));
+        }
+        if (tags != null && !tags.isEmpty()) {
+            q.append("&tags=").append(enc(tags));
+        }
+        if (notTags != null && !notTags.isEmpty()) {
+            q.append("&notTags=").append(enc(notTags));
         }
         String st = sanitizeStatuses(statuses);
         if (!st.isEmpty()) {
@@ -995,10 +951,6 @@ public class SonarIssuesApi {
         return effectivePsLimit;
     }
 
-    // ============================================================
-    // Статистика по проектам с прогрессом
-    // ============================================================
-
     public List<Issue> fetchAllByStatuses(String statuses, String impactSeverity,
                                           String quality, FetchProgressListener listener) throws Exception {
 
@@ -1008,12 +960,10 @@ public class SonarIssuesApi {
         }
         if (total == 0) return new ArrayList<>();
 
-        // ---------- 1. Простой путь: total ≤ 10 000 ----------
         if (total <= HARD_LIMIT_10000) {
             return fetchPagedDirectWithProgress(statuses, impactSeverity, quality, total, listener);
         }
 
-        // ---------- 2. Пробуем facets=files для чанкования ----------
         Map<String, Integer> fileCounts = null;
         try {
             fileCounts = facetWithStatuses(statuses, impactSeverity, quality, null, "files");
@@ -1036,7 +986,6 @@ public class SonarIssuesApi {
                     + String.format("%.1f", coverage * 100) + "%), откат на обход по components/tree");
         }
 
-        // ---------- 3. Фолбэк: обход по всем файлам, пачки по 20 ----------
         if (listener != null) {
             listener.onProgress(0, total, "Фасеты недоступны, идём по списку файлов...");
         }
@@ -1072,7 +1021,6 @@ public class SonarIssuesApi {
         return out;
     }
 
-    /** Наибольший ps, при котором ceil(total/ps)*ps ≤ 10 000. */
     private int computeSafePs(int total) {
         if (total <= 0) return 1000;
         int maxPs = Math.min(FETCH_PAGE_SIZE, total);

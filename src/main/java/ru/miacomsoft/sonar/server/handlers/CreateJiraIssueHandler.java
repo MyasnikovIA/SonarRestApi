@@ -39,12 +39,6 @@ public class CreateJiraIssueHandler extends BaseHandler {
         }
     }
 
-    /**
-     * ИСПРАВЛЕНО: display name текущего пользователя берётся из /rest/api/2/myself
-     * (раньше показывался логин — не совпадало с отображением остальных пользователей).
-     * Каждый список загружается в отдельном try-catch,
-     * чтобы при ошибке одного из них остальные всё равно заполнились.
-     */
     private void handleGetConfig(HttpExchange ex) throws Exception {
         JiraConfig cfg = JiraConfig.getInstance();
         SessionLoader.SessionInfo session = null;
@@ -85,20 +79,15 @@ public class CreateJiraIssueHandler extends BaseHandler {
         JiraUserService userService = new JiraUserService(jira);
         JiraLabelService labelService = new JiraLabelService(jira);
 
-        // NEW: реальное display name текущего пользователя (из /myself)
         try {
             JiraUserService.JiraUser me = userService.getMyself();
             if (me != null && me.displayName() != null && !me.displayName().isBlank()) {
                 resp.put("userDisplayName", me.displayName());
             }
-        } catch (Exception ignored) {
-            // 401/недоступно — останется login из session.username() (приемлемо)
-        }
+        } catch (Exception ignored) {}
 
-        // Диагностика ошибок
         List<String> errors = new ArrayList<>();
 
-        // --- Проекты ---
         try {
             JSONArray projectsArr = new JSONArray();
             for (JiraFieldService.AllowedValue av : fieldService.getProjects()) {
@@ -111,7 +100,6 @@ public class CreateJiraIssueHandler extends BaseHandler {
             resp.put("projects", new JSONArray());
         }
 
-        // --- Типы задач ---
         try {
             JSONArray typesArr = new JSONArray();
             for (JiraFieldService.AllowedValue av : fieldService.getIssueTypes(cfg.defaultProject())) {
@@ -124,7 +112,6 @@ public class CreateJiraIssueHandler extends BaseHandler {
             resp.put("issueTypes", new JSONArray());
         }
 
-        // --- Приоритеты ---
         try {
             JSONArray priorsArr = new JSONArray();
             for (JiraFieldService.AllowedValue av : fieldService.getAllPriorities()) {
@@ -137,7 +124,6 @@ public class CreateJiraIssueHandler extends BaseHandler {
             resp.put("priorities", new JSONArray());
         }
 
-        // --- Уровни безопасности ---
         try {
             JSONArray secArr = new JSONArray();
             String defaultSecurityId = "";
@@ -154,7 +140,6 @@ public class CreateJiraIssueHandler extends BaseHandler {
             resp.put("securityLevels", new JSONArray());
         }
 
-        // --- Метки ---
         try {
             JSONArray labelsArr = new JSONArray();
             for (String label : labelService.getSuggestions(cfg.defaultProject(), "")) {
@@ -166,7 +151,6 @@ public class CreateJiraIssueHandler extends BaseHandler {
             resp.put("availableLabels", new JSONArray());
         }
 
-        // --- Пользователи ---
         try {
             JSONArray usersArr = new JSONArray();
             List<JiraUserService.JiraUser> users = userService.getAssignableUsers(cfg.defaultProject(), "", 100);
@@ -253,7 +237,6 @@ public class CreateJiraIssueHandler extends BaseHandler {
         String overrideComponents = param(q, "overrideComponents", cfg.components());
         String overrideAssignee = param(q, "overrideAssignee", cfg.assignee());
 
-        // NEW: диагностика — видно, что реально приходит с клиента
         System.out.println("[CreateJiraIssue] POST: project=" + project
                 + " sev=" + sev + " qual=" + qual
                 + " statusFilter=" + statusFilter
@@ -294,7 +277,6 @@ public class CreateJiraIssueHandler extends BaseHandler {
 
         boolean hasExplicitKeys = false;
 
-        // NEW: keys в теле POST обрабатываются батчами по 100 (было по одному fetch)
         if (bodyBytes.length > 0 && (keysCsv == null || keysCsv.isEmpty())) {
             System.out.println("[CreateJiraIssue] Body bytes: " + bodyBytes.length);
             try {
@@ -321,7 +303,6 @@ public class CreateJiraIssueHandler extends BaseHandler {
                                 }
                             }
                         } catch (Exception e) {
-                            // fallback на индивидуальный fetch
                             for (String k : batch) {
                                 try {
                                     Issue it = api.fetchIssue(k);
@@ -344,12 +325,10 @@ public class CreateJiraIssueHandler extends BaseHandler {
         }
 
         if (!hasExplicitKeys && issues.isEmpty()) {
-            if ("UNPROCESSED".equals(statusFilter)) issues = api.fetchAllByStatuses(SonarIssuesApi.ACTIVE_STATUSES, sev, qual);
-            else if ("PROCESSED".equals(statusFilter)) {
-                for (Issue it : api.fetchAllByStatuses(null, sev, qual)) {
-                    if (!"OPEN".equals(it.status) && !"REOPENED".equals(it.status)) issues.add(it);
-                }
-            } else issues = api.fetchAllByStatuses(null, sev, qual);
+            String sqTags = tagsParam;
+            String sqNotTags = excludedTagsParam;
+            if (sqTags != null && sqTags.contains("__NO_TAGS__")) sqTags = null;
+            if (sqNotTags != null && sqNotTags.contains("__NO_TAGS__")) sqNotTags = null;
 
             Set<String> selectedTags = new HashSet<>();
             if (!tagsParam.isEmpty()) for (String t : tagsParam.split(",")) if (!t.isEmpty()) selectedTags.add(t.trim());
@@ -361,19 +340,47 @@ public class CreateJiraIssueHandler extends BaseHandler {
             if (!selectedRulesParam.isEmpty()) for (String r : selectedRulesParam.split(",")) if (!r.isEmpty()) selectedRules.add(r.trim());
 
             String qText = filterText == null ? "" : filterText.toLowerCase();
+            String fetchStatuses = "UNPROCESSED".equals(statusFilter) ? SonarIssuesApi.ACTIVE_STATUSES : null;
 
-            List<Issue> filtered = new ArrayList<>();
-            for (Issue it : issues) {
-                if (shouldSkip(it, selectedTags, excludedTags, selectedRules, qText, statusFilter)) continue;
-                filtered.add(it);
+            int page = 1;
+            int pageSize = SonarIssuesApi.FETCH_PAGE_SIZE; // 3000
+            int total = -1;
+
+            try {
+                while (total < 0 || issues.size() < total) {
+                    JSONObject raw = api.fetchPageRaw(fetchStatuses, sev, qual, null, sqTags, sqNotTags, page, pageSize);
+                    total = raw.optInt("total", 0);
+                    JSONArray arr = raw.optJSONArray("issues");
+                    if (arr == null || arr.length() == 0) break;
+
+                    for (int i = 0; i < arr.length(); i++) {
+                        Issue it = Issue.from(arr.getJSONObject(i), project);
+                        if (shouldSkip(it, selectedTags, excludedTags, selectedRules, qText, statusFilter)) continue;
+                        issues.add(it);
+                    }
+                    page++;
+                    if (page > 100) break;
+                }
+            } catch (Exception e) {
+                System.out.println("[CreateJiraIssue] Limit hit or error: " + e.getMessage() + ". Falling back to fetchAllByStatuses");
+                List<Issue> allIssues;
+                if ("UNPROCESSED".equals(statusFilter)) allIssues = api.fetchAllByStatuses(SonarIssuesApi.ACTIVE_STATUSES, sev, qual);
+                else if ("PROCESSED".equals(statusFilter)) {
+                    allIssues = new ArrayList<>();
+                    for (Issue it : api.fetchAllByStatuses(null, sev, qual)) {
+                        if (!"OPEN".equals(it.status) && !"REOPENED".equals(it.status)) allIssues.add(it);
+                    }
+                } else allIssues = api.fetchAllByStatuses(null, sev, qual);
+
+                for (Issue it : allIssues) {
+                    if (shouldSkip(it, selectedTags, excludedTags, selectedRules, qText, statusFilter)) continue;
+                    issues.add(it);
+                }
             }
-            issues = filtered;
+            System.out.println("[CreateJiraIssue] After filter: " + issues.size() + " issues");
         }
 
-        // NEW: диагностика после фильтрации
-        System.out.println("[CreateJiraIssue] After filter: " + issues.size() + " issues");
-
-        if (issues.isEmpty()) { sendError(ex, 400, "Нет issues для отчёта (проверьте фильтры)"); return; }
+        if (issues.isEmpty()) { sendError(ex, 400, "Нет issues для отчета (проверьте фильтры)"); return; }
 
         Map<String, List<Issue>> issuesByFile = new TreeMap<>();
         for (Issue it : issues) issuesByFile.computeIfAbsent(it.component != null ? it.component : "(unknown)", k -> new ArrayList<>()).add(it);
@@ -431,7 +438,7 @@ public class CreateJiraIssueHandler extends BaseHandler {
             String text = "Отчёт SonarQube сформирован.\nФайлов в отчёте: " + issuesByFile.size() + "\nIssues: " + issues.size();
             try { attach.addCommentWithLinks(created.key(), text, attachments); } catch (Exception ignored) {}
         }
-        System.out.println("[CreateJiraIssue] After filter: " + issues.size() + " issues");
+
         if (issues.size() >= 10000) {
             System.out.println("[CreateJiraIssue] WARN: Large batch (" + issues.size()
                     + ") — near SonarQube 10000-result limit");

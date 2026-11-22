@@ -4,7 +4,8 @@ import { toast } from '../../common.js';
 function extForFormat(formatType) {
     switch (formatType) {
         case 'html-files':
-        case 'html-files-teams': return 'zip';
+        case 'html-files-teams':
+        case 'llm-md-zip':       return 'zip';
         case 'md':               return 'md';
         case 'jira':
         case 'txt':              return 'txt';
@@ -156,6 +157,7 @@ export async function showExportModal(keys, formatType, ctx, projectName, filter
     if (f.rules && f.rules.length > 0) p.set('selectedRules', f.rules.join(','));
     if (f.filterText) p.set('filterText', f.filterText);
     if (f.statusFilter) p.set('statusFilter', f.statusFilter);
+    if (f.expectedTotal) p.set('expectedTotal', f.expectedTotal);
 
     const url = '/api/export-stream?' + p.toString();
     console.log(`[SSE] ▶ СТАРТ: format=${formatType}, `
@@ -204,9 +206,14 @@ export async function showExportModal(keys, formatType, ctx, projectName, filter
                     const d = JSON.parse(data);
                     if (d.message) statusEl.textContent = d.message;
                     if (d.stage) stageEl.textContent = `Этап: ${d.stage}`;
-                    if (d.total) {
+
+                    // Если total < 0, значит сервер не знает точного количества, показываем только текущий прогресс
+                    if (d.total > 0) {
                         counterEl.textContent = `${d.current} / ${d.total}`;
                         fillEl.style.width = Math.min(100, Math.round((d.current / d.total) * 100)) + '%';
+                    } else {
+                        counterEl.textContent = `${d.current}`;
+                        fillEl.style.width = '100%';
                     }
                     if (typeof d.elapsedMs === 'number' && d.elapsedMs > 0) {
                         elapsedEl.textContent = `${(d.elapsedMs / 1000).toFixed(1)} с`;
@@ -214,9 +221,6 @@ export async function showExportModal(keys, formatType, ctx, projectName, filter
                 } else if (event === 'complete') {
                     const d = JSON.parse(data);
                     stopTimer();
-
-                    // ДИАГНОСТИКА: видно, что реально прислал сервер
-                    console.log('[SSE] complete event:', JSON.stringify(d));
 
                     const elapsedMs = performance.now() - startMs;
                     console.log(`[SSE] ✅ ГОТОВО за ${(elapsedMs / 1000).toFixed(2)} с`

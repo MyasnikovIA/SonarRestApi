@@ -50,6 +50,7 @@ public class ExportStreamHandler extends BaseHandler {
         String selectedRulesParam = param(q, "selectedRules", "");
         String filterText = param(q, "filterText", "");
         String statusFilter = param(q, "statusFilter", "ALL");
+        int expectedTotal = paramInt(q, "expectedTotal", -1);
 
         List<String> keys = null;
         if ("POST".equalsIgnoreCase(ex.getRequestMethod())) {
@@ -69,11 +70,18 @@ public class ExportStreamHandler extends BaseHandler {
         }
 
         long exportStartMs = System.currentTimeMillis();
+
         System.out.println("[ExportStream] ▶ СТАРТ экспорта: project=" + project
                 + ", format=" + format + ", sev=" + sev + ", qual=" + qual
                 + ", rule=" + (rule == null ? "нет" : rule)
                 + ", hideProcessed=" + hideProcessed
-                + ", keys=" + (keys == null ? "нет" : keys.size()));
+                + ", tags=" + tagsParam
+                + ", excludedTags=" + excludedTagsParam
+                + ", selectedRules=" + selectedRulesParam
+                + ", filterText=" + filterText
+                + ", statusFilter=" + statusFilter
+                + ", expectedTotal=" + expectedTotal
+                + ", keys=" + (keys == null ? "нет (запрос по фильтрам)" : keys.size() + " (отфильтровано клиентом)"));
 
         ex.getResponseHeaders().set("Content-Type", "text/event-stream; charset=utf-8");
         ex.getResponseHeaders().set("Cache-Control", "no-cache");
@@ -84,10 +92,12 @@ public class ExportStreamHandler extends BaseHandler {
         OutputStream os = ex.getResponseBody();
         try {
             if (keys != null && !keys.isEmpty()) {
+                System.out.println("[ExportStream] Режим: обработка " + keys.size() + " переданных ключей (без доп. фильтрации)");
                 runExportByKeys(os, project, format, keys, sev, qual);
             } else {
+                System.out.println("[ExportStream] Режим: серверная выборка по фильтрам (без ключей). Сервер будет запрашивать данные порциями по 3000 строк.");
                 runExport(os, project, format, sev, qual, rule, hideProcessed,
-                        tagsParam, excludedTagsParam, selectedRulesParam, filterText, statusFilter);
+                        tagsParam, excludedTagsParam, selectedRulesParam, filterText, statusFilter, expectedTotal);
             }
         } catch (Exception e) {
             System.err.println("[ExportStream] ОШИБКА: " + e.getMessage());
@@ -109,7 +119,6 @@ public class ExportStreamHandler extends BaseHandler {
         return String.format("%d мин %d с", sec / 60, sec % 60);
     }
 
-    /** Имя скачиваемого файла: <projectId>_<yyyyMMdd_HHmmss>.<ext>. */
     private static String buildDownloadName(String project, String format, long nowMs) {
         String safeProject = (project == null ? "project" : project)
                 .replaceAll("[^A-Za-z0-9._-]", "_");
@@ -121,7 +130,7 @@ public class ExportStreamHandler extends BaseHandler {
         else if ("txt".equals(format)) ext = "txt";
         else if ("confluence".equals(format)) ext = "html";
         else if ("html".equals(format)) ext = "html";
-        else if ("html-files".equals(format) || "html-files-teams".equals(format)) ext = "zip";
+        else if ("html-files".equals(format) || "html-files-teams".equals(format) || "llm-md-zip".equals(format)) ext = "zip";
 
         String stamp = new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date(nowMs));
         return safeProject + "_" + stamp + "." + ext;
@@ -141,7 +150,7 @@ public class ExportStreamHandler extends BaseHandler {
         } catch (Exception e) {
             String m = e.getMessage();
             if (m != null && m.contains("разорвала")) {
-                // Клиент отключился — не спамим
+                // Клиент отключился
             } else {
                 System.err.println("[ExportStream] Ошибка отправки события: " + m);
             }
@@ -169,25 +178,11 @@ public class ExportStreamHandler extends BaseHandler {
     }
 
     private static boolean isZipFormat(String format) {
-        return "html-files".equals(format) || "html-files-teams".equals(format);
+        return "html-files".equals(format) || "html-files-teams".equals(format) || "llm-md-zip".equals(format);
     }
 
-    /**
-     * Форматы, для которых нужен фрагмент кода (fetchSnippetsParallel).
-     * ZIP-форматы используют его для сборки per-file HTML,
-     * confluence — для inline-вставки в блок <details>.
-     */
     private static boolean needsSnippets(String format) {
-        return isZipFormat(format) || "confluence".equals(format);
-    }
-
-    /**
-     * Форматы, которые собираются в "буфер", а рендерятся одним проходом после
-     * fetchSnippetsParallel. Для zip — issuesByFile (группировка по компонентам),
-     * для confluence — плоский список (порядок сохраняется).
-     */
-    private static boolean isBufferedFormat(String format) {
-        return isZipFormat(format) || "confluence".equals(format);
+        return isZipFormat(format) && !"llm-md-zip".equals(format) || "confluence".equals(format);
     }
 
     private static boolean hasPostFilters(Set<String> selectedTags,
@@ -202,10 +197,6 @@ public class ExportStreamHandler extends BaseHandler {
                 || (statusFilter != null && !statusFilter.isEmpty() && !"ALL".equals(statusFilter));
     }
 
-    /**
-     * Параллельная загрузка сниппетов. Работает по произвольной Map<String, List<Issue>>.
-     * Для zip — issuesByFile; для confluence — Collections.singletonMap("all", bufferedIssues).
-     */
     private void fetchSnippetsParallel(OutputStream os, long startMs, String project,
                                        Map<String, List<Issue>> source,
                                        Map<String, List<String>> issueSnippets,
@@ -256,7 +247,6 @@ public class ExportStreamHandler extends BaseHandler {
                 + "/" + totalSnip + " за " + formatDuration(phaseMs));
     }
 
-    /** Inline-рендер для форматов без буферизации (jira/md/txt/html). */
     private static void appendIssueInline(StringBuilder reportContent, String format,
                                           Issue it, String project, String host) {
         if ("jira".equals(format)) reportContent.append(JiraExporter.exportSingle(it, project, host));
@@ -307,11 +297,6 @@ public class ExportStreamHandler extends BaseHandler {
         return false;
     }
 
-    /**
-     * Шапка фрагмента для confluence. Добавляет <style> с правилами подсветки,
-     * чтобы <mark class="sonar-issue-mark"> рендерился одинаково при вставке
-     * в Confluence и при открытии как standalone HTML.
-     */
     private static void appendConfluenceHeader(StringBuilder reportContent, String project) {
         reportContent.append("<style>")
                 .append("mark.sonar-issue-mark{background-color:rgba(248,81,73,0.25);")
@@ -325,9 +310,6 @@ public class ExportStreamHandler extends BaseHandler {
         reportContent.append("<h2>Проект: ").append(project).append("</h2>\n");
     }
 
-    // =========================================================
-    // runExportByKeys
-    // =========================================================
     private void runExportByKeys(OutputStream os, String project, String format,
                                  List<String> keys, String sev, String qual) throws Exception {
         long startMs = System.currentTimeMillis();
@@ -413,14 +395,19 @@ public class ExportStreamHandler extends BaseHandler {
         Path tempFile;
 
         if (zipMode) {
-            boolean useTeams = "html-files-teams".equals(format);
-            TeamMapping mapping = useTeams ? TeamMapping.load() : null;
             tempFile = Files.createTempFile("sonar_report_", ".zip");
-            int entries = HtmlPerFileExporter.writeZip(tempFile, issuesByFile, issueSnippets,
-                    project, host, useTeams, mapping);
+            int entries = 0;
+
+            if ("llm-md-zip".equals(format)) {
+                entries = LlmMdExporter.writeZip(tempFile, issuesByFile, api, project, host, os, startMs);
+            } else {
+                boolean useTeams = "html-files-teams".equals(format);
+                TeamMapping mapping = useTeams ? TeamMapping.load() : null;
+                entries = HtmlPerFileExporter.writeZip(tempFile, issuesByFile, issueSnippets,
+                        project, host, useTeams, mapping);
+            }
             System.out.println("[ExportStream] runExportByKeys ZIP: " + entries + " файлов, "
-                    + loadedCount + " issues, " + Files.size(tempFile) + " байт, "
-                    + "сниппетов " + issueSnippets.size() + ", за " + formatDuration(totalMs));
+                    + loadedCount + " issues, " + Files.size(tempFile) + " байт, за " + formatDuration(totalMs));
         } else {
             if ("html".equals(format)) reportContent.append("</body></html>");
             String ext = "html";
@@ -449,14 +436,11 @@ public class ExportStreamHandler extends BaseHandler {
                 .put("message", "Файл сформирован за " + formatDuration(totalMs)));
     }
 
-    // =========================================================
-    // runExport
-    // =========================================================
     private void runExport(OutputStream os, String project, String format,
                            String sev, String qual, String rule, boolean hideProcessed,
                            String tagsParam, String excludedTagsParam,
                            String selectedRulesParam, String filterText,
-                           String statusFilter) throws Exception {
+                           String statusFilter, int expectedTotal) throws Exception {
         long startMs = System.currentTimeMillis();
         SonarIssuesApi api = state.newApi(project);
         String host = state.getSession() != null ? state.getSession().getHost() : "sonar.bars.group";
@@ -472,23 +456,33 @@ public class ExportStreamHandler extends BaseHandler {
                 + ", tags=" + tagsParam + ", excludedTags=" + excludedTagsParam
                 + ", selectedRules=" + selectedRulesParam
                 + ", filterText=" + filterText + ", statusFilter=" + statusFilter
-                + (zipMode ? " [ZIP MODE]" : "")
+                + (zipFormatDebug(zipMode))
                 + (isConfluence ? " [CONFLUENCE MODE]" : ""));
+
+        // Очищаем теги от __NO_TAGS__ для передачи в SonarQube API
+        String sqTags = tagsParam;
+        String sqNotTags = excludedTagsParam;
+        if (sqTags != null && sqTags.contains("__NO_TAGS__")) sqTags = null;
+        if (sqNotTags != null && sqNotTags.contains("__NO_TAGS__")) sqNotTags = null;
 
         sendProgress(os, startMs, "count", 0, 0, "Подсчет общего количества замечаний…");
 
-        JSONObject firstRaw = api.fetchPageRaw(statuses, sev, qual, rule, 1, 1);
+        JSONObject firstRaw = api.fetchPageRaw(statuses, sev, qual, rule, sqTags, sqNotTags, 1, 1);
         int total = firstRaw.optInt("total", 0);
+        if (expectedTotal > 0) {
+            total = expectedTotal;
+            System.out.println("[ExportStream] Используем expectedTotal от клиента: " + total);
+        } else {
+            System.out.println("[ExportStream] Всего замечаний от SonarQube: " + total);
+        }
+
         if (total == 0) {
             sendEvent(os, "error", new JSONObject().put("message", "Нет замечаний для выгрузки"));
             return;
         }
 
-        System.out.println("[ExportStream] Всего замечаний (до post-фильтров): " + total
-                + " (подсчёт занял " + formatDuration(System.currentTimeMillis() - startMs) + ")");
-
         sendProgress(os, startMs, "start", 0, total,
-                "Начинаем сбор данных (" + total + " замечаний до post-фильтров)…");
+                "Начинаем сбор данных (" + total + " замечаний)…");
 
         StringBuilder reportContent = new StringBuilder();
         Map<String, List<Issue>> issuesByFile = zipMode ? new TreeMap<>() : null;
@@ -567,7 +561,7 @@ public class ExportStreamHandler extends BaseHandler {
                 int page = 1;
                 while (true) {
                     try {
-                        JSONObject raw = api.fetchPageRaw(statuses, sev, qual, currentRule, page, pageSize);
+                        JSONObject raw = api.fetchPageRaw(statuses, sev, qual, currentRule, sqTags, sqNotTags, page, pageSize);
                         if (ruleTotal < 0) {
                             ruleTotal = raw.optInt("total", 0);
                             System.out.println("[ExportStream] Правило " + currentRule
@@ -663,7 +657,7 @@ public class ExportStreamHandler extends BaseHandler {
                     while (true) {
                         try {
                             JSONObject raw = api.fetchPageRawForComponent(statuses, sev, qual,
-                                    currentRule, file, filePage, pageSize);
+                                    currentRule, file, sqTags, sqNotTags, filePage, pageSize);
                             if (fileTotal < 0) fileTotal = raw.optInt("total", 0);
 
                             JSONArray arr = raw.optJSONArray("issues");
@@ -717,7 +711,7 @@ public class ExportStreamHandler extends BaseHandler {
             Map<String, List<Issue>> source = zipMode
                     ? issuesByFile
                     : Collections.singletonMap("all", bufferedIssues);
-            fetchSnippetsParallel(os, startMs, project, source, issueSnippets, loadedCount, total);
+            fetchSnippetsParallel(os, startMs, project, source, issueSnippets, loadedCount, loadedCount);
         }
 
         if (isConfluence) {
@@ -731,14 +725,20 @@ public class ExportStreamHandler extends BaseHandler {
         Path tempFile;
 
         if (zipMode) {
-            boolean useTeams = "html-files-teams".equals(format);
-            TeamMapping mapping = useTeams ? TeamMapping.load() : null;
             tempFile = Files.createTempFile("sonar_report_", ".zip");
-            int entries = HtmlPerFileExporter.writeZip(tempFile, issuesByFile, issueSnippets,
-                    project, host, useTeams, mapping);
+            int entries = 0;
+
+            if ("llm-md-zip".equals(format)) {
+                entries = LlmMdExporter.writeZip(tempFile, issuesByFile, api, project, host, os, startMs);
+            } else {
+                boolean useTeams = "html-files-teams".equals(format);
+                TeamMapping mapping = useTeams ? TeamMapping.load() : null;
+                entries = HtmlPerFileExporter.writeZip(tempFile, issuesByFile, issueSnippets,
+                        project, host, useTeams, mapping);
+            }
+
             System.out.println("[ExportStream] runExport ZIP: " + entries + " файлов, "
-                    + loadedCount + " issues, " + Files.size(tempFile) + " байт, "
-                    + "сниппетов " + issueSnippets.size() + ", за " + formatDuration(totalMs));
+                    + loadedCount + " issues, " + Files.size(tempFile) + " байт, за " + formatDuration(totalMs));
         } else {
             if ("html".equals(format)) reportContent.append("</body></html>");
             String ext = "html";
@@ -782,5 +782,9 @@ public class ExportStreamHandler extends BaseHandler {
                 .put("elapsedMs", totalMs)
                 .put("elapsedText", formatDuration(totalMs))
                 .put("message", "Файл сформирован за " + formatDuration(totalMs)));
+    }
+
+    private String zipFormatDebug(boolean zipMode) {
+        return zipMode ? " [ZIP MODE]" : "";
     }
 }

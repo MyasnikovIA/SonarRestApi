@@ -91,12 +91,14 @@ export async function showJiraIssueModal(keys, ctx, projectName, filters) {
                         </select>
                     </label>
 
-                    <label style="display:flex; flex-direction:column; gap:4px;">
+                    <!-- ЗАМЕНЕН БЛОК ВЫБОРА ЭПИКА -->
+                    <label style="display:flex; flex-direction:column; gap:4px; position:relative;">
                         <span style="color:var(--text-dim);">Ссылка на эпик:</span>
-                        <select id="ji-epic" style="${inputStyle}">
-                            <option value="">Загрузка...</option>
-                        </select>
+                        <input type="text" id="ji-epic-input" placeholder="Поиск эпика..." style="${inputStyle}" autocomplete="off">
+                        <input type="hidden" id="ji-epic" value="">
+                        <div id="ji-epic-dropdown" style="display:none; position:absolute; top:100%; left:0; right:0; max-height:200px; overflow-y:auto; background:var(--bg); border:1px solid var(--border); border-radius:4px; z-index:1000; box-shadow:0 4px 12px rgba(0,0,0,0.15); margin-top:4px;"></div>
                     </label>
+                    <!-- КОНЕЦ ЗАМЕНЕННОГО БЛОКА -->
 
                     <label style="display:flex; flex-direction:column; gap:4px;">
                         <span style="color:var(--text-dim);">Приоритет:</span>
@@ -234,21 +236,105 @@ export async function showJiraIssueModal(keys, ctx, projectName, filters) {
         }
     })();
 
+    // ================= ЛОГИКА КАСТОМНОГО КОМБОБОКСА ДЛЯ ЭПИКОВ =================
+    let epicsList = [];
+
     const loadEpics = async (projectKey) => {
-        $('ji-epic').innerHTML = '<option value="">Загрузка...</option>';
+        const input = $('ji-epic-input');
+        const hiddenInput = $('ji-epic');
+        const dropdown = $('ji-epic-dropdown');
+
+        input.value = 'Загрузка...';
+        input.disabled = true;
+        dropdown.style.display = 'none';
+        hiddenInput.value = '';
+
         try {
             const res = await ctx.api('/api/jira/epics?project=' + encodeURIComponent(projectKey));
-            $('ji-epic').innerHTML = renderOpts(res.epics, cfg.configEpic, 'id', 'name', '— нет эпика —');
+            epicsList = res.epics || [];
+
+            input.value = '';
+            input.disabled = false;
+            input.placeholder = '— нет эпика — (начните вводить)';
+
+            // Установка значения по умолчанию из конфига, если оно есть
+            if (cfg.configEpic) {
+                const match = epicsList.find(e => String(e.id) === String(cfg.configEpic));
+                if (match) {
+                    hiddenInput.value = match.id;
+                    input.value = match.name ? `${match.id}: ${match.name}` : match.id;
+                }
+            }
         } catch (e) {
-            $('ji-epic').innerHTML = '<option value="">Ошибка загрузки</option>';
+            input.value = '';
+            input.placeholder = 'Ошибка загрузки';
+            input.disabled = false;
+            epicsList = [];
         }
     };
+
+    const renderEpicDropdown = (filterText = '') => {
+        const dropdown = $('ji-epic-dropdown');
+        const q = filterText.toLowerCase();
+
+        const filtered = epicsList.filter(e => {
+            const text = `${e.id}: ${e.name || ''}`.toLowerCase();
+            return text.includes(q);
+        });
+
+        if (filtered.length === 0) {
+            dropdown.innerHTML = '<div style="padding:8px; color:var(--text-dim); font-size:12px; text-align:center;">Не найдено</div>';
+        } else {
+            dropdown.innerHTML = filtered.map(e => `
+                <div class="epic-option" data-id="${esc(e.id)}" data-name="${esc(e.name || '')}" style="padding:6px 10px; cursor:pointer; font-size:12px; border-bottom:1px solid var(--border);">
+                    <b>${esc(e.id)}</b> ${e.name ? ': ' + esc(e.name) : ''}
+                </div>
+            `).join('');
+
+            dropdown.querySelectorAll('.epic-option').forEach(opt => {
+                opt.addEventListener('mouseenter', () => opt.style.background = 'var(--bg3)');
+                opt.addEventListener('mouseleave', () => opt.style.background = 'transparent');
+                opt.addEventListener('mousedown', (e) => {
+                    e.preventDefault(); // Предотвращаем blur инпута
+                    $('ji-epic').value = opt.dataset.id;
+                    $('ji-epic-input').value = opt.dataset.id + (opt.dataset.name ? ': ' + opt.dataset.name : '');
+                    dropdown.style.display = 'none';
+                });
+            });
+        }
+        dropdown.style.display = 'block';
+    };
+
+    $('ji-epic-input').addEventListener('input', (e) => {
+        $('ji-epic').value = ''; // Сбрасываем значение, если начали печатать
+        renderEpicDropdown(e.target.value);
+    });
+
+    $('ji-epic-input').addEventListener('focus', () => {
+        renderEpicDropdown($('ji-epic-input').value);
+    });
+
+    $('ji-epic-input').addEventListener('blur', () => {
+        setTimeout(() => {
+            $('ji-epic-dropdown').style.display = 'none';
+            // Если ничего не выбрано из списка, очищаем инпут
+            if (!$('ji-epic').value) {
+                $('ji-epic-input').value = '';
+            } else {
+                // Восстанавливаем красивое отображение "ID: Название"
+                const match = epicsList.find(e => String(e.id) === String($('ji-epic').value));
+                if (match) $('ji-epic-input').value = match.name ? `${match.id}: ${match.name}` : match.id;
+            }
+        }, 200);
+    });
 
     loadEpics(cfg.configProject);
 
     $('ji-project').addEventListener('change', (e) => {
         loadEpics(e.target.value);
     });
+    // ================= КОНЕЦ ЛОГИКИ КОМБОБОКСА =================
+
 
     $('ji-create').addEventListener('click', async () => {
         const summary = $('ji-summary').value.trim();
@@ -290,7 +376,7 @@ export async function showJiraIssueModal(keys, ctx, projectName, filters) {
 
         p.set('overrideProject', $('ji-project').value);
         p.set('overrideIssueType', $('ji-issueType').value);
-        p.set('overrideEpic', $('ji-epic').value);
+        p.set('overrideEpic', $('ji-epic').value); // Здесь берется значение из скрытого поля
         p.set('overridePriority', $('ji-priority').value);
         p.set('overrideSecurity', $('ji-security').value);
         p.set('overrideTeam', $('ji-team').value);
@@ -298,9 +384,6 @@ export async function showJiraIssueModal(keys, ctx, projectName, filters) {
         p.set('overrideComponents', $('ji-components').value);
         p.set('overrideAssignee', $('ji-assignee').value);
 
-        // ИСПРАВЛЕНО: при isAll клиент передаёт отфильтрованные keys в теле POST.
-        // Это гарантирует совпадение "что вижу" == "что создам", даже если
-        // URL-фильтры по какой-то причине не доедут до сервера.
         let bodyData;
         if (isAll) {
             const fk = f.filteredKeys;

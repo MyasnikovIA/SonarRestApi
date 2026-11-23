@@ -1,6 +1,5 @@
 import { toast } from '../../common.js';
 
-/** Маппинг format → расширение. */
 function extForFormat(formatType) {
     switch (formatType) {
         case 'html-files':
@@ -15,7 +14,6 @@ function extForFormat(formatType) {
     }
 }
 
-/** yyyyMMdd_HHmmss — как на сервере. */
 function timestampNow() {
     const n = new Date();
     const pad = (x) => String(x).padStart(2, '0');
@@ -23,24 +21,16 @@ function timestampNow() {
          + `_${pad(n.getHours())}${pad(n.getMinutes())}${pad(n.getSeconds())}`;
 }
 
-/**
- * Скачивает файл по URL через fetch+blob.
- * downloadName (опц.) — имя, которое увидит пользователь.
- * Если сервер его не прислал — строим локально из projectName + formatType + timestamp.
- */
 async function triggerDownload(filePath, downloadName, projectName, formatType) {
     if (!downloadName) {
         const safeProject = String(projectName || 'report')
             .replace(/[^A-Za-z0-9._-]/g, '_') || 'report';
         downloadName = `${safeProject}_${timestampNow()}.${extForFormat(formatType)}`;
-        console.warn('[SSE] downloadName не пришёл в complete-событии — сгенерирован локально:',
-            downloadName);
+        console.warn('[SSE] downloadName не пришёл — сгенерирован локально:', downloadName);
     }
-
     const qp = new URLSearchParams();
     qp.set('file', filePath);
     qp.set('name', downloadName);
-
     const downloadUrl = '/api/export-download?' + qp.toString();
     console.log(`[SSE] Скачивание: url=${downloadUrl}`);
 
@@ -53,16 +43,12 @@ async function triggerDownload(filePath, downloadName, projectName, formatType) 
         const blob = await response.blob();
         const blobUrl = URL.createObjectURL(blob);
 
-        // Итоговое имя: downloadName (уже построен выше), либо из Content-Disposition
         let filename = downloadName;
         const cd = response.headers.get('Content-Disposition');
         if (cd) {
             const mStar = cd.match(/filename\*=UTF-8''([^;]+)/i);
-            if (mStar) {
-                try { filename = decodeURIComponent(mStar[1]); } catch (_) {}
-            }
+            if (mStar) { try { filename = decodeURIComponent(mStar[1]); } catch (_) {} }
         }
-
         console.log(`[SSE] Сохраняем как: "${filename}"`);
 
         const a = document.createElement('a');
@@ -86,22 +72,27 @@ export async function showExportModal(keys, formatType, ctx, projectName, filter
     overlay.className = 'modal-overlay';
     overlay.style.zIndex = '2000';
     overlay.innerHTML = `
-        <div class="modal-content" style="max-width: 520px;">
+        <div class="modal-content" style="max-width: 560px;">
             <div class="modal-header">
                 <h3 style="margin:0;">Генерация отчета на сервере</h3>
+                <button class="modal-close" type="button" title="Свернуть">&times;</button>
             </div>
             <div class="modal-body">
-                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; font-size:12px;">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; font-size:12px;">
                     <span id="exp-status" style="color:var(--text-dim);">Инициализация…</span>
                     <span id="exp-counter" style="font-family:var(--mono); font-weight:bold;">0 / 0</span>
                 </div>
-                <div style="display:flex; justify-content:space-between; align-items:center; margin-top:6px; margin-bottom:10px; font-size:11px;">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; font-size:11px;">
                     <span id="exp-stage" style="color:var(--text-dim);">—</span>
-                    <span style="color:var(--text-dim);">Прошло: <b id="exp-elapsed" style="font-family:var(--mono); color:var(--accent);">0.0 с</b></span>
+                    <span style="color:var(--text-dim);">
+                        Прошло: <b id="exp-elapsed" style="font-family:var(--mono); color:var(--accent);">0.0 с</b>
+                        &middot; Осталось: <b id="exp-eta" style="font-family:var(--mono); color:var(--warn);">—</b>
+                    </span>
                 </div>
                 <div style="height:8px; background:var(--bg3); border-radius:4px; overflow:hidden; border:1px solid var(--border);">
                     <div id="exp-fill" style="height:100%; width:0%; background:var(--accent); transition: width 0.15s;"></div>
                 </div>
+                <div id="exp-log" style="margin-top:12px; font-size:11px; color:var(--text-dim); max-height:80px; overflow-y:auto; font-family:var(--mono); white-space:pre-wrap; border:1px solid var(--border); border-radius:4px; padding:6px; background:var(--bg3);"></div>
                 <div style="margin-top:16px; display:flex; justify-content:flex-end; gap:8px;">
                     <button id="exp-cancel" class="btn btn-danger" type="button">Остановить</button>
                 </div>
@@ -114,13 +105,16 @@ export async function showExportModal(keys, formatType, ctx, projectName, filter
     const counterEl = overlay.querySelector('#exp-counter');
     const stageEl   = overlay.querySelector('#exp-stage');
     const elapsedEl = overlay.querySelector('#exp-elapsed');
+    const etaEl     = overlay.querySelector('#exp-eta');
     const fillEl    = overlay.querySelector('#exp-fill');
+    const logEl     = overlay.querySelector('#exp-log');
     const cancelBtn = overlay.querySelector('#exp-cancel');
 
     let abortController = null;
     let elapsedTimer    = null;
     let cancelledByUser = false;
     const startMs = performance.now();
+    const logLines = [];
 
     elapsedTimer = setInterval(() => {
         elapsedEl.textContent = `${((performance.now() - startMs) / 1000).toFixed(1)} с`;
@@ -132,6 +126,21 @@ export async function showExportModal(keys, formatType, ctx, projectName, filter
         if (abortController) { abortController.abort(); abortController = null; }
         overlay.remove();
     };
+
+    const appendLog = (msg) => {
+        const line = `[${((performance.now() - startMs) / 1000).toFixed(1)}s] ${msg}`;
+        logLines.push(line);
+        if (logLines.length > 8) logLines.shift();
+        logEl.textContent = logLines.join('\n');
+        logEl.scrollTop = logEl.scrollHeight;
+    };
+
+    // × — только сворачивает окно, не убивает запрос (запрос продолжается на сервере)
+    overlay.querySelector('.modal-close').addEventListener('click', () => {
+        if (confirm('Свернуть окно? Генерация продолжится в фоне.')) {
+            overlay.remove();
+        }
+    });
 
     cancelBtn.addEventListener('click', () => {
         cancelledByUser = true;
@@ -207,17 +216,25 @@ export async function showExportModal(keys, formatType, ctx, projectName, filter
                     if (d.message) statusEl.textContent = d.message;
                     if (d.stage) stageEl.textContent = `Этап: ${d.stage}`;
 
-                    // Если total < 0, значит сервер не знает точного количества, показываем только текущий прогресс
-                    if (d.total > 0) {
-                        counterEl.textContent = `${d.current} / ${d.total}`;
-                        fillEl.style.width = Math.min(100, Math.round((d.current / d.total) * 100)) + '%';
+                    const cur   = Number(d.current || 0);
+                    const total = Number(d.total   || 0);
+                    if (total > 0) {
+                        counterEl.textContent = `${cur} / ${total}`;
+                        fillEl.style.width = Math.min(100, Math.round((cur / total) * 100)) + '%';
                     } else {
-                        counterEl.textContent = `${d.current}`;
-                        fillEl.style.width = '100%';
+                        counterEl.textContent = `${cur}`;
                     }
+
                     if (typeof d.elapsedMs === 'number' && d.elapsedMs > 0) {
                         elapsedEl.textContent = `${(d.elapsedMs / 1000).toFixed(1)} с`;
                     }
+                    if (typeof d.etaMs === 'number' && d.etaMs > 0) {
+                        etaEl.textContent = `${(d.etaMs / 1000).toFixed(0)} с`;
+                    } else if (typeof d.etaMs === 'number' && d.etaMs < 0) {
+                        etaEl.textContent = '—';
+                    }
+
+                    if (d.message) appendLog(d.message);
                 } else if (event === 'complete') {
                     const d = JSON.parse(data);
                     stopTimer();
@@ -231,15 +248,12 @@ export async function showExportModal(keys, formatType, ctx, projectName, filter
 
                     statusEl.textContent = `Готово за ${(elapsedMs / 1000).toFixed(2)} с — скачивание…`;
                     elapsedEl.textContent = `${(elapsedMs / 1000).toFixed(1)} с`;
+                    etaEl.textContent = '0 с';
                     stageEl.textContent = 'Завершено';
                     fillEl.style.width = '100%';
 
-                    await triggerDownload(
-                        d.file,
-                        d.downloadName,
-                        ctx.state.project || projectName,
-                        formatType
-                    );
+                    await triggerDownload(d.file, d.downloadName,
+                        ctx.state.project || projectName, formatType);
 
                     toast(`Отчет готов за ${(elapsedMs / 1000).toFixed(2)} с — скачивание...`);
                     setTimeout(() => close(), 2000);
@@ -252,7 +266,7 @@ export async function showExportModal(keys, formatType, ctx, projectName, filter
     } catch (err) {
         stopTimer();
         const elapsedMs = performance.now() - startMs;
-        if (cancelledByUser) { /* залогировано */ }
+        if (cancelledByUser) { /* уже залогировано */ }
         else if (err.name === 'AbortError') {
             console.log(`[SSE] ⏹ Прервано через ${(elapsedMs / 1000).toFixed(2)} с (abort)`);
         } else {

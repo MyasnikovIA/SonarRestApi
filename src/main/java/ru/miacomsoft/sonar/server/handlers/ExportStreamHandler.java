@@ -26,6 +26,9 @@ public class ExportStreamHandler extends BaseHandler {
 
     private static final int SONAR_PAGE_LIMIT = 10000;
 
+    /** Логический размер «пакета» для отображения в UI (SonarQube режет ps до 500). */
+    private static final int BATCH_SIZE = 3000;
+
     public ExportStreamHandler(ServerState state) {
         super(state);
     }
@@ -95,7 +98,8 @@ public class ExportStreamHandler extends BaseHandler {
                 System.out.println("[ExportStream] Режим: обработка " + keys.size() + " переданных ключей (без доп. фильтрации)");
                 runExportByKeys(os, project, format, keys, sev, qual);
             } else {
-                System.out.println("[ExportStream] Режим: серверная выборка по фильтрам (без ключей). Сервер будет запрашивать данные порциями по 3000 строк.");
+                System.out.println("[ExportStream] Режим: серверная выборка по фильтрам (без ключей). "
+                        + "Пакеты по " + BATCH_SIZE + " записей (SonarQube режет ps до 500).");
                 runExport(os, project, format, sev, qual, rule, hideProcessed,
                         tagsParam, excludedTagsParam, selectedRulesParam, filterText, statusFilter, expectedTotal);
             }
@@ -157,19 +161,52 @@ public class ExportStreamHandler extends BaseHandler {
         }
     }
 
+    /**
+     * Отправка прогресса в браузер.
+     * Автоматически считает:
+     *   - ETA (etaMs) по текущей скорости
+     *   - номер логического пакета по 3000 записей (batchCurrent/batchTotal)
+     *
+     * Если total > 3000, к message добавляется суффикс «· пакет X/Y».
+     */
     private void sendProgress(OutputStream os, long startMs, String stage,
                               int current, int total, String message) {
         long elapsedMs = System.currentTimeMillis() - startMs;
-        if (total > 0 && current > total) current = total;
-        int displayCurrent = (total > 0) ? Math.min(current, total) : current;
+        int safeTotal = Math.max(0, total);
+        int safeCurrent = current;
+        if (safeTotal > 0 && safeCurrent > safeTotal) safeCurrent = safeTotal;
+
+        int batchCurrent = safeCurrent > 0
+                ? (safeCurrent + BATCH_SIZE - 1) / BATCH_SIZE : 0;
+        int batchTotal = safeTotal > 0
+                ? (safeTotal + BATCH_SIZE - 1) / BATCH_SIZE : 0;
+
+        long etaMs = -1;
+        if (safeCurrent > 0 && safeTotal > 0) {
+            if (safeCurrent >= safeTotal) {
+                etaMs = 0;
+            } else {
+                etaMs = (long) (elapsedMs * ((double) safeTotal / safeCurrent - 1));
+            }
+        }
+
+        String finalMessage = message == null ? "" : message;
+        if (safeTotal > BATCH_SIZE && batchTotal > 0 && batchCurrent > 0) {
+            finalMessage += String.format(" · пакет %d/%d", batchCurrent, batchTotal);
+        }
+
         try {
             sendEvent(os, "progress", new JSONObject()
                     .put("stage", stage)
-                    .put("total", total)
-                    .put("current", displayCurrent)
+                    .put("total", safeTotal)
+                    .put("current", safeCurrent)
+                    .put("batchSize", BATCH_SIZE)
+                    .put("batchCurrent", batchCurrent)
+                    .put("batchTotal", batchTotal)
+                    .put("etaMs", etaMs)
                     .put("elapsedMs", elapsedMs)
                     .put("elapsedText", formatDuration(elapsedMs))
-                    .put("message", message));
+                    .put("message", finalMessage));
         } catch (Exception ignored) {}
     }
 
@@ -348,7 +385,9 @@ public class ExportStreamHandler extends BaseHandler {
         }
 
         int batchSize = 100;
+        int totalKeyBatches = (uniqueKeys.size() + batchSize - 1) / batchSize;
         for (int i = 0; i < uniqueKeys.size(); i += batchSize) {
+            int keyBatchNum = i / batchSize + 1;
             List<String> batch = uniqueKeys.subList(i, Math.min(i + batchSize, uniqueKeys.size()));
             String keysCsv = String.join(",", batch);
             try {
@@ -374,7 +413,8 @@ public class ExportStreamHandler extends BaseHandler {
                 System.err.println("[ExportStream] Ошибка при запросе пачки ключей: " + e.getMessage());
             }
             sendProgress(os, startMs, "fetching", loadedCount, total,
-                    "Пакет " + (i / batchSize + 1) + " из " + ((uniqueKeys.size() + batchSize - 1) / batchSize));
+                    String.format("Ключи %d/%d: загружено %d/%d",
+                            keyBatchNum, totalKeyBatches, loadedCount, total));
         }
 
         if (snippetsNeeded) {
@@ -481,8 +521,12 @@ public class ExportStreamHandler extends BaseHandler {
             return;
         }
 
+        int plannedBatches = (total + BATCH_SIZE - 1) / BATCH_SIZE;
         sendProgress(os, startMs, "start", 0, total,
-                "Начинаем сбор данных (" + total + " замечаний)…");
+                "Начинаем сбор данных: " + total + " замечаний"
+                        + (plannedBatches > 1
+                        ? String.format(" (%d пакетов по %d)", plannedBatches, BATCH_SIZE)
+                        : ""));
 
         StringBuilder reportContent = new StringBuilder();
         Map<String, List<Issue>> issuesByFile = zipMode ? new TreeMap<>() : null;
@@ -521,6 +565,7 @@ public class ExportStreamHandler extends BaseHandler {
             rulesToProcess.add(rule);
             ruleCounts.put(rule, total);
         } else {
+            sendProgress(os, startMs, "count", 0, total, "Считаем правила…");
             try {
                 Map<String, Integer> facetRules = api.facetWithStatuses(statuses, sev, qual, null, "rules");
                 for (Map.Entry<String, Integer> e : facetRules.entrySet()) {
@@ -532,6 +577,8 @@ public class ExportStreamHandler extends BaseHandler {
                 }
                 System.out.println("[ExportStream] Найдено правил: " + rulesToProcess.size()
                         + " (фасеты: " + formatDuration(System.currentTimeMillis() - startMs) + ")");
+                sendProgress(os, startMs, "count", 0, total,
+                        "Найдено правил: " + rulesToProcess.size());
             } catch (Exception e) {
                 System.err.println("[ExportStream] Не удалось получить фасеты правил: " + e.getMessage());
                 rulesToProcess.add(null);
@@ -541,16 +588,27 @@ public class ExportStreamHandler extends BaseHandler {
 
         List<String> projectFiles = null;
 
+        // ───────── цикл по правилам с индексацией ruleIdx/ruleTotal ─────────
+        int ruleIdx = 0;
+        int ruleTotal = rulesToProcess.size();
+
         for (String currentRule : rulesToProcess) {
+            ruleIdx++;
             long ruleStartMs = System.currentTimeMillis();
             int expectedCount = ruleCounts.getOrDefault(currentRule, -1);
 
-            System.out.println("[ExportStream] ▶ Обработка правила: "
-                    + (currentRule == null ? "все" : currentRule)
+            System.out.println("[ExportStream] ▶ Обработка правила " + ruleIdx + "/" + ruleTotal
+                    + ": " + (currentRule == null ? "все" : currentRule)
                     + (expectedCount >= 0 ? " (ожидается " + expectedCount + ")" : ""));
 
+            sendProgress(os, startMs, "fetching", loadedCount, total,
+                    String.format("▶ Правило %d/%d: %s (ожидается %d)",
+                            ruleIdx, ruleTotal,
+                            currentRule == null ? "все" : currentRule,
+                            Math.max(0, expectedCount)));
+
             boolean needFileSplit = expectedCount > SONAR_PAGE_LIMIT;
-            int ruleTotal = expectedCount > 0 ? expectedCount : -1;
+            int ruleTotalIssues = expectedCount > 0 ? expectedCount : -1;
             int ruleLoaded = 0;
             int pageSize = SonarIssuesApi.FETCH_PAGE_SIZE;
 
@@ -562,10 +620,10 @@ public class ExportStreamHandler extends BaseHandler {
                 while (true) {
                     try {
                         JSONObject raw = api.fetchPageRaw(statuses, sev, qual, currentRule, sqTags, sqNotTags, page, pageSize);
-                        if (ruleTotal < 0) {
-                            ruleTotal = raw.optInt("total", 0);
+                        if (ruleTotalIssues < 0) {
+                            ruleTotalIssues = raw.optInt("total", 0);
                             System.out.println("[ExportStream] Правило " + currentRule
-                                    + ": всего " + ruleTotal + " замечаний");
+                                    + ": всего " + ruleTotalIssues + " замечаний");
                         }
                         JSONArray arr = raw.optJSONArray("issues");
                         if (arr == null || arr.length() == 0) break;
@@ -587,11 +645,16 @@ public class ExportStreamHandler extends BaseHandler {
                             ruleLoaded++;
                         }
 
+                        // ★ Единый формат прогресса: правило, сколько собрано, ETA, пакет
                         sendProgress(os, startMs, "fetching", loadedCount, total,
-                                "Правило: " + (currentRule == null ? "все" : currentRule));
+                                String.format("Правило %d/%d: %s — собрано %d%s",
+                                        ruleIdx, ruleTotal,
+                                        currentRule == null ? "все" : currentRule,
+                                        ruleLoaded,
+                                        ruleTotalIssues > 0 ? "/" + ruleTotalIssues : ""));
                         page++;
 
-                        if (ruleTotal > 0 && ruleLoaded >= ruleTotal) break;
+                        if (ruleTotalIssues > 0 && ruleLoaded >= ruleTotalIssues) break;
 
                     } catch (Exception e) {
                         if (is10000LimitError(e)) {
@@ -610,6 +673,11 @@ public class ExportStreamHandler extends BaseHandler {
             }
 
             if (needFileSplit) {
+                sendProgress(os, startMs, "fetching", loadedCount, total,
+                        String.format("Правило %d/%d: %s — file-split (запрашиваем список файлов…)",
+                                ruleIdx, ruleTotal,
+                                currentRule == null ? "все" : currentRule));
+
                 Map<String, Integer> ruleFiles = new TreeMap<>();
                 int facetSum = 0;
                 try {
@@ -633,6 +701,8 @@ public class ExportStreamHandler extends BaseHandler {
                             + " файлов из фасета (быстрый путь).");
                 } else {
                     if (projectFiles == null) {
+                        sendProgress(os, startMs, "fetching", loadedCount, total,
+                                "Запрашиваем полный список файлов проекта…");
                         try {
                             long filesStartMs = System.currentTimeMillis();
                             projectFiles = api.fetchProjectFilesList();
@@ -651,14 +721,17 @@ public class ExportStreamHandler extends BaseHandler {
                             + "), fallback на полный список: " + filesToProcess.size() + " файлов.");
                 }
 
+                int fileIdx = 0;
+                int fileTotal = filesToProcess.size();
                 for (String file : filesToProcess) {
+                    fileIdx++;
                     int filePage = 1;
-                    int fileTotal = -1;
+                    int fileTotalIssues = -1;
                     while (true) {
                         try {
                             JSONObject raw = api.fetchPageRawForComponent(statuses, sev, qual,
                                     currentRule, file, sqTags, sqNotTags, filePage, pageSize);
-                            if (fileTotal < 0) fileTotal = raw.optInt("total", 0);
+                            if (fileTotalIssues < 0) fileTotalIssues = raw.optInt("total", 0);
 
                             JSONArray arr = raw.optJSONArray("issues");
                             if (arr == null || arr.length() == 0) break;
@@ -682,10 +755,14 @@ public class ExportStreamHandler extends BaseHandler {
                             filePage++;
 
                             sendProgress(os, startMs, "fetching", loadedCount, total,
-                                    "Правило: " + currentRule + " · файл: " + file
-                                            + (ruleTotal > 0 ? " (" + ruleLoaded + "/" + ruleTotal + ")" : ""));
+                                    String.format("Правило %d/%d: %s — файл %d/%d (%d%s)",
+                                            ruleIdx, ruleTotal,
+                                            currentRule == null ? "все" : currentRule,
+                                            fileIdx, fileTotal,
+                                            ruleLoaded,
+                                            ruleTotalIssues > 0 ? "/" + ruleTotalIssues : ""));
 
-                            if (fileTotal > 0 && filePage * pageSize > fileTotal) break;
+                            if (fileTotalIssues > 0 && filePage * pageSize > fileTotalIssues) break;
 
                         } catch (Exception e) {
                             if (is10000LimitError(e)) {
@@ -702,9 +779,14 @@ public class ExportStreamHandler extends BaseHandler {
             }
 
             long ruleMs = System.currentTimeMillis() - ruleStartMs;
-            System.out.println("[ExportStream] ✔ Правило " + (currentRule == null ? "все" : currentRule)
-                    + ": собрано " + ruleLoaded + (ruleTotal > 0 ? "/" + ruleTotal : "")
+            System.out.println("[ExportStream] ✔ Правило " + ruleIdx + "/" + ruleTotal
+                    + " " + (currentRule == null ? "все" : currentRule)
+                    + ": собрано " + ruleLoaded + (ruleTotalIssues > 0 ? "/" + ruleTotalIssues : "")
                     + " issues за " + formatDuration(ruleMs));
+
+            sendProgress(os, startMs, "fetching", loadedCount, total,
+                    String.format("✔ Правило %d/%d завершено: +%d (накоплено %d/%d)",
+                            ruleIdx, ruleTotal, ruleLoaded, loadedCount, total));
         }
 
         if (snippetsNeeded) {

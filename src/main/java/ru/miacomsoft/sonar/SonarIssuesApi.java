@@ -15,17 +15,19 @@ public class SonarIssuesApi {
     public static final String ACTIVE_STATUSES = "OPEN,CONFIRMED,REOPENED";
     public static final int FETCH_PAGE_SIZE = 3000;
 
+    /**
+     * Логический «пакет» для отображения прогресса в UI.
+     * SonarQube всё равно режет ps до 500 (см. effectivePsLimit),
+     * поэтому 3000 = 6 подстраниц по 500. В UI показываем «пакет X/Y».
+     */
+    private static final int BATCH_SIZE = 3000;
+
     private static final int FILE_HEAD_LINES = 50;
     private static final int SNIPPET_CONTEXT = 10;
     private static final int SAFETY_MAX_PAGES = 10_000;
 
-    /** Жёсткий лимит SonarQube: результат одного запроса ограничен 10 000. */
     private static final int HARD_LIMIT_10000 = 10_000;
-
-    /** Размер «фрагмента» для чанкования файлов при сборе статистики. */
     private static final int STATS_CHUNK_SIZE = 3_000;
-
-    /** Минимальный уровень покрытия facets=files, при котором доверяем чанкованию. */
     private static final double FACET_COVERAGE_THRESHOLD = 0.9;
 
     private static final Set<String> DEFAULT_MQR_STATUSES = Set.of(
@@ -56,7 +58,6 @@ public class SonarIssuesApi {
 
     private static boolean reopenedSupported = true;
     private static volatile int effectivePsLimit = FETCH_PAGE_SIZE;
-
     private static volatile Set<String> serverAllowedStatuses = null;
 
     public SonarIssuesApi(SonarClient client, String projectKey) {
@@ -80,6 +81,21 @@ public class SonarIssuesApi {
     @FunctionalInterface
     public interface FetchProgressListener {
         void onProgress(int fetched, int total, String message);
+    }
+
+    /**
+     * Отправляет в listener сообщение с разбивкой по «пакетам» (BATCH_SIZE=3000).
+     * Формат: "<context> — пакет 3/8, загружено 1500/4608".
+     */
+    private static void emitBatch(FetchProgressListener listener,
+                                  int current, int total, String context) {
+        if (listener == null) return;
+        int safeTotal  = Math.max(1, total);
+        int batchNum   = Math.max(1, (current + BATCH_SIZE - 1) / BATCH_SIZE);
+        int batchTotal = Math.max(1, (safeTotal + BATCH_SIZE - 1) / BATCH_SIZE);
+        listener.onProgress(current, safeTotal,
+                String.format("%s — пакет %d/%d, загружено %d/%d",
+                        context, batchNum, batchTotal, current, safeTotal));
     }
 
     private static String normalizeJsonQuotes(String msg) {
@@ -163,16 +179,10 @@ public class SonarIssuesApi {
             String t = raw.trim().toUpperCase(Locale.ROOT);
             if (t.isEmpty()) continue;
 
-            if (allowed.contains(t)) {
-                result.add(t);
-                continue;
-            }
+            if (allowed.contains(t)) { result.add(t); continue; }
 
             String mapped = LEGACY_TO_MQR_STATUS.get(t);
-            if (mapped != null && allowed.contains(mapped)) {
-                result.add(mapped);
-                continue;
-            }
+            if (mapped != null && allowed.contains(mapped)) { result.add(mapped); continue; }
 
             dropped.add(t);
         }
@@ -377,11 +387,14 @@ public class SonarIssuesApi {
             int batchIdx = i / batchSize + 1;
             List<String> batch = files.subList(i, Math.min(i + batchSize, files.size()));
             String components = String.join(",", batch);
-            if (listener != null) {
-                listener.onProgress(grandFetched + out.size(),
-                        grandTotal > 0 ? grandTotal : -1,
-                        "Пакет файлов " + batchIdx + "/" + totalBatches + " (" + batch.size() + " файлов)");
-            }
+
+            // ИСПРАВЛЕНО: emitBatch() + пачковая информация
+            emitBatch(listener, grandFetched + out.size(),
+                    grandTotal > 0 ? grandTotal : -1,
+                    String.format("Файлы %d/%d (пакет %d/%d)",
+                            Math.min(i + batch.size(), files.size()),
+                            files.size(), batchIdx, totalBatches));
+
             try {
                 out.addAll(fetchAllByComponents(statuses, impactSeverity, quality, components,
                         grandFetched, grandTotal, listener));
@@ -419,6 +432,10 @@ public class SonarIssuesApi {
         int page = 1;
         int total = -1;
         String actualStatuses = sanitizeStatuses(statuses);
+        String context = rulesCsv != null && !rulesCsv.isEmpty()
+                ? "Правило " + rulesCsv
+                : "Загрузка " + (components.length() > 40 ? components.substring(0, 40) + "…" : components);
+
         while (total < 0 || out.size() < total) {
             StringBuilder urlSb = new StringBuilder("/api/issues/search?");
             urlSb.append("components=").append(enc(components));
@@ -443,12 +460,12 @@ public class SonarIssuesApi {
                 for (int j = 0; j < arr.length(); j++) {
                     out.add(Issue.from(arr.getJSONObject(j), projectKey));
                 }
-                if (listener != null) {
-                    listener.onProgress(grandFetched + out.size(),
-                            grandTotal > 0 ? grandTotal : total,
-                            "Загружено " + (grandFetched + out.size()) + " issues"
-                                    + (grandTotal > 0 ? " из " + grandTotal : ""));
-                }
+
+                // ИСПРАВЛЕНО: пакетный прогресс с этапом
+                emitBatch(listener, grandFetched + out.size(),
+                        grandTotal > 0 ? grandTotal : total,
+                        context);
+
                 page++;
                 if (page > SAFETY_MAX_PAGES) break;
             } catch (RuntimeException e) {
@@ -956,7 +973,8 @@ public class SonarIssuesApi {
 
         int total = countWithStatuses(statuses, impactSeverity, quality);
         if (listener != null) {
-            listener.onProgress(0, total, "Всего issues: " + total);
+            listener.onProgress(0, total, "Всего issues: " + total
+                    + " (пакетов: " + ((total + BATCH_SIZE - 1) / BATCH_SIZE) + ")");
         }
         if (total == 0) return new ArrayList<>();
 
@@ -1011,10 +1029,10 @@ public class SonarIssuesApi {
             for (int i = 0; i < arr.length(); i++) {
                 out.add(Issue.from(arr.getJSONObject(i), projectKey));
             }
-            if (listener != null) {
-                listener.onProgress(out.size(), total,
-                        "Загружено " + out.size() + " из " + total);
-            }
+
+            // ИСПРАВЛЕНО: пакетный прогресс
+            emitBatch(listener, out.size(), total, "Прямая загрузка");
+
             if (arr.length() < ps) break;
             page++;
         }
@@ -1064,11 +1082,10 @@ public class SonarIssuesApi {
                 if (e.getValue() > HARD_LIMIT_10000) hasHugeFile = true;
             }
 
-            if (listener != null) {
-                listener.onProgress(out.size(), grandTotal,
-                        "Пакет " + chunkIdx + "/" + chunks.size()
-                                + " · " + keys.size() + " файлов · ~" + chunkSum + " issues");
-            }
+            // ИСПРАВЛЕНО: пакетный прогресс
+            emitBatch(listener, out.size(), grandTotal,
+                    String.format("Пакет файлов %d/%d (%d файлов, ~%d issues)",
+                            chunkIdx, chunks.size(), keys.size(), chunkSum));
 
             if (chunk.size() == 1 && hasHugeFile) {
                 out.addAll(splitFileByRules(statuses, impactSeverity, quality,

@@ -74,18 +74,38 @@ public final class HtmlPerFileExporter {
     private static String makeEntryName(String component, boolean useTeams, TeamMapping mapping) {
         String cleanPath = component;
         if (cleanPath.contains(":")) cleanPath = cleanPath.substring(cleanPath.indexOf(':') + 1);
-        String safePath = cleanPath.replaceAll("[\\\\/]", "_").replaceAll("[^A-Za-z0-9._-]", "_");
+
+        String safePath = cleanPath.replaceAll("[\\\\/]", "_")
+                .replaceAll("[^A-Za-z0-9._-]", "_");
         if (safePath.isEmpty()) safePath = "unknown";
 
         if (useTeams && mapping != null) {
-            String team = mapping.findTeam(component);
-            if (!team.isEmpty()) {
-                String safeTeam = team.replaceAll("[^A-Za-z0-9._-]", "_");
-                return "(" + safeTeam + ")_" + safePath + ".html";
+            TeamMapping.FileInfo info = mapping.findInfo(component);
+            if (info != null && !info.isEmpty()) {
+                StringBuilder prefix = new StringBuilder();
+                if (info.hasTeam()) {
+                    prefix.append("(")
+                            .append(sanitizeForFileName(info.team))
+                            .append(")");
+                }
+                if (info.hasComponent()) {
+                    prefix.append("[")
+                            .append(sanitizeForFileName(info.component))
+                            .append("]");
+                }
+                prefix.append("_");
+                return prefix + safePath + ".html";
             }
         }
         return safePath + ".html";
     }
+
+    private static String sanitizeForFileName(String s) {
+        if (s == null || s.isEmpty()) return "";
+        String out = s.replaceAll("[^A-Za-z0-9._-]", "_");
+        return out.isEmpty() ? "unknown" : out;
+    }
+
 
     public static String formatHtmlFile(List<Issue> issues,
                                         Map<String, List<String>> issueSnippets,

@@ -26,10 +26,15 @@ export const session = {
             </div>
 
             <div class="card" style="max-width:860px; margin-top:20px;">
-                <h3 style="margin-top:0;">Сопоставление файлов и команд</h3>
+                <h3 style="margin-top:0;">Сопоставление файлов, команд и компонентов</h3>
                 <p style="color:var(--text-dim); margin-top:0; font-size:13px;">
-                    Загрузите CSV-файл для автоматического добавления имени команды в отчеты.
-                    Ожидаемые колонки: A — путь к файлу (например, <code>/Forms/...</code>), C — имя команды.
+                    Загрузите CSV-файл (формат «Форма / Переопределяется формами / Компонент / Владелец тМИС»).<br>
+                    Из файла извлекаются:
+                    <b>Форма</b> — путь к файлу,
+                    <b>Владелец тМИС</b> — команда-владелец,
+                    <b>Компонент</b> — подсистема/модуль.
+                    По этим данным каждый SonarQube-файл получит префикс <code>(команда)[компонент]_</code>
+                    в отчётах «html-files-teams».
                 </p>
                 <div style="display:flex; gap:10px; align-items:center;">
                     <input type="file" id="csv-upload" accept=".csv" style="display:none;">
@@ -51,11 +56,20 @@ export const session = {
 
         const updateCsvStatus = async () => {
             try {
-                // Проверяем, есть ли файл на сервере, делая тестовый GET
-                const res = await fetch('/api/team_mapping');
+                const res = await fetch('/api/team_mapping?info=1');
                 if (res.ok) {
-                    statusEl.textContent = '✓ CSV загружен на сервер';
-                    statusEl.style.color = 'var(--ok)';
+                    const d = await res.json();
+                    if (d.exists) {
+                        statusEl.innerHTML =
+                            `✓ CSV загружен · <b>${d.pathCount || 0}</b> путей `
+                          + `(команда: <b>${d.rowsWithTeam || 0}</b>, `
+                          + `компонент: <b>${d.rowsWithComponent || 0}</b>, `
+                          + `оба: <b>${d.rowsWithBoth || 0}</b>)`;
+                        statusEl.style.color = 'var(--ok)';
+                    } else {
+                        statusEl.textContent = '— CSV не загружен';
+                        statusEl.style.color = 'var(--text-dim)';
+                    }
                 } else {
                     statusEl.textContent = '— CSV не загружен';
                     statusEl.style.color = 'var(--text-dim)';
@@ -85,9 +99,20 @@ export const session = {
             const reader = new FileReader();
             reader.onload = async (ev) => {
                 try {
-                    await ctx.apiText('/api/team_mapping', ev.target.result, 'PUT');
+                    const d = await ctx.apiText('/api/team_mapping', ev.target.result, 'PUT');
                     await updateCsvStatus();
-                    ctx.toast('CSV загружен и сохранен на сервере');
+
+                    const s = d.stats || {};
+                    if (s.pathCount === 0) {
+                        ctx.toast(
+                            'CSV сохранён, но не удалось найти колонки "Форма"/"Владелец тМИС"/"Компонент". '
+                          + 'Проверьте формат файла.', true);
+                    } else {
+                        ctx.toast(
+                            `CSV загружен: ${s.pathCount} путей `
+                          + `(команда: ${s.rowsWithTeam}, компонент: ${s.rowsWithComponent}, `
+                          + `оба: ${s.rowsWithBoth})`);
+                    }
                 } catch (err) {
                     ctx.toast('Ошибка загрузки CSV: ' + err.message, true);
                 }

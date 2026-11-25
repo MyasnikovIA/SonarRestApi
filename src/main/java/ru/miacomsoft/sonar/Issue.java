@@ -54,8 +54,11 @@ public class Issue {
     public List<String> tags = new ArrayList<>();
     public List<String> transitions = new ArrayList<>();
     public List<Impact> impacts = new ArrayList<>();
-    public List<Comment> comments = new ArrayList<>(); // НОВОЕ
+    public List<Comment> comments = new ArrayList<>();
     public TextRange textRange;
+
+    // НОВОЕ ПОЛЕ: для хранения фрагмента кода при генерации отчетов
+    public List<String> snippet = new ArrayList<>();
 
     public static Issue from(JSONObject o, String projectKey) {
         Issue i = new Issue();
@@ -100,7 +103,6 @@ public class Issue {
             i.impactSeverity = i.impacts.get(0).severity;
         }
 
-        // Парсинг комментариев
         JSONArray commentsArr = o.optJSONArray("comments");
         if (commentsArr != null) {
             for (int c = 0; c < commentsArr.length(); c++) {
@@ -171,7 +173,6 @@ public class Issue {
         o.put("tags", new JSONArray(tags));
         o.put("transitions", new JSONArray(transitions));
 
-        // Сериализация комментариев
         JSONArray commentsArr = new JSONArray();
         for (Comment cm : comments) {
             JSONObject co = new JSONObject();
@@ -208,11 +209,12 @@ public class Issue {
     public String toString() {
         return String.format("%-40s %-12s %s", component + ":" + line, rule, message);
     }
+
     public static Issue fromHotspot(JSONObject o, String projectKey) {
         Issue i = new Issue();
         i.key = o.optString("key");
         i.rule = o.optString("ruleKey", "");
-        i.severity = o.optString("vulnerabilityProbability", "");   // HIGH | MEDIUM | LOW
+        i.severity = o.optString("vulnerabilityProbability", "");
         i.impactSeverity = i.severity;
         i.component = o.optString("component", "");
         if (projectKey != null && i.component.startsWith(projectKey + ":")) {
@@ -220,8 +222,8 @@ public class Issue {
         }
         i.line = o.optInt("line", -1);
         i.message = o.optString("message", "");
-        i.status = o.optString("status", "");          // TO_REVIEW | REVIEWED
-        i.resolution = o.optString("resolution", "");  // SAFE | FIXED | ACKNOWLEDGED
+        i.status = o.optString("status", "");
+        i.resolution = o.optString("resolution", "");
         i.issueStatus = i.status;
         i.type = "SECURITY_HOTSPOT";
         i.author = o.optString("author", "");
@@ -237,7 +239,6 @@ public class Issue {
             i.textRange.endOffset = tr.optInt("endOffset");
         }
 
-        // impact — чтобы фильтры SEV/QUAL продолжали работать
         String prob = o.optString("vulnerabilityProbability", "");
         if (!prob.isEmpty()) {
             i.impacts.add(new Impact("SECURITY", prob));

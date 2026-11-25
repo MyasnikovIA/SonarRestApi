@@ -16,18 +16,6 @@ import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Locale;
 
-/**
- * Точка входа консольного интерфейса.
- *
- * Отвечает только за:
- *   - чтение stdin и диспетчеризацию команд;
- *   - базовые команды (help/status/health/project);
- *   - хранение общего {@link ConsoleContext}, через который работают остальные
- *     подкоманды из пакета {@code ru.miacomsoft.sonar.server.console}.
- *
- * Вся предметная логика вынесена в отдельные классы (Session/Report/Prompt/
- * Mark/Ollama/Auto Commands).
- */
 public class Console {
 
     private final ConsoleContext ctx;
@@ -61,8 +49,6 @@ public class Console {
 
     public void start() { thread.start(); }
     public void stop()  { ctx.setRunning(false); }
-
-    // ==================== main loop ====================
 
     private void loop() {
         BufferedReader r = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8));
@@ -101,8 +87,6 @@ public class Console {
         return "sonar" + mode + ":" + p + "> ";
     }
 
-    // ==================== dispatch ====================
-
     private void dispatch(String line) throws Exception {
         String[] tokens = line.split("\\s+");
         String cmd = tokens[0].toLowerCase(Locale.ROOT);
@@ -111,11 +95,8 @@ public class Console {
         switch (cmd) {
             case "help", "?", "h"           -> ConsoleHelp.print();
             case "quit", "exit", "q"        -> {
-                if (ctx.isAutoRunning()) {
-                    System.out.println("[auto] сначала выполните 'stop', затем 'quit'.");
-                } else {
-                    ctx.setRunning(false);
-                }
+                if (ctx.isAutoRunning()) System.out.println("[auto] сначала выполните 'stop', затем 'quit'.");
+                else ctx.setRunning(false);
             }
             case "status"                   -> cmdStatus();
             case "health"                   -> cmdHealth();
@@ -129,6 +110,8 @@ public class Console {
             case "issues"                   -> reportCmd.handleIssues(a);
             case "keys"                     -> reportCmd.handleKeys(a);
             case "snippet"                  -> reportCmd.handleSnippet(a);
+            case "team-zip"                 -> reportCmd.handleTeamZip(a);
+            case "team-html"                -> reportCmd.handleTeamHtml(a); // НОВАЯ КОМАНДА
             case "mark"                     -> markCmd.handleMark(a);
             case "cancel"                   -> markCmd.handleCancel(a);
             case "cancelall", "cancel-all"  -> markCmd.handleCancelAll(a);
@@ -139,8 +122,6 @@ public class Console {
             default -> System.out.println("Unknown command: '" + cmd + "'. Try 'help'");
         }
     }
-
-    // ==================== basic commands ====================
 
     private void cmdStatus() {
         ServerState state = ctx.state();

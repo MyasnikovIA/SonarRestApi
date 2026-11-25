@@ -283,6 +283,7 @@ export const report = {
                 <div class="ctx-item" style="border-top:1px solid var(--border); margin-top:4px; padding-top:8px;" id="ctx-html-files">📦 Выгрузить HTML (по файлам)</div>
                 <div class="ctx-item" id="ctx-html-files-teams">📦 Выгрузить HTML (с командами)</div>
                 <div class="ctx-item" id="ctx-llm-md">🤖 Отчет для LLM (MD ZIP)</div>
+                <div class="ctx-item" id="ctx-team-module-md">📦 Отчет по командам и модулям (ZIP)</div>
                 <div class="ctx-item" id="ctx-stats">📊 Статистика по проектам</div>
                 <div class="ctx-item" style="border-top:1px solid var(--border); margin-top:4px; padding-top:8px;" id="ctx-jira-issue">🎫 Создать задачу в Jira</div>
             `;
@@ -630,6 +631,7 @@ export const report = {
             ctxMenu.querySelector('#ctx-html-files').addEventListener('click', () => { ctxMenu.style.display = 'none'; startExport('html-files'); });
             ctxMenu.querySelector('#ctx-html-files-teams').addEventListener('click', () => { ctxMenu.style.display = 'none'; startExport('html-files-teams'); });
             ctxMenu.querySelector('#ctx-llm-md').addEventListener('click', () => { ctxMenu.style.display = 'none'; startExport('llm-md-zip'); });
+            ctxMenu.querySelector('#ctx-team-module-md').addEventListener('click', () => { ctxMenu.style.display = 'none'; startExport('team-module-zip'); });
             ctxMenu.querySelector('#ctx-stats').addEventListener('click', () => {
                 ctxMenu.style.display = 'none';
                 startStatsReport();

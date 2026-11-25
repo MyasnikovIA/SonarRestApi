@@ -134,7 +134,8 @@ public class ExportStreamHandler extends BaseHandler {
         else if ("txt".equals(format)) ext = "txt";
         else if ("confluence".equals(format)) ext = "html";
         else if ("html".equals(format)) ext = "html";
-        else if ("html-files".equals(format) || "html-files-teams".equals(format) || "llm-md-zip".equals(format)) ext = "zip";
+        else if ("html-files".equals(format) || "html-files-teams".equals(format) ||
+                "llm-md-zip".equals(format) || "team-module-zip".equals(format)) ext = "zip";
 
         String stamp = new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date(nowMs));
         return safeProject + "_" + stamp + "." + ext;
@@ -163,11 +164,6 @@ public class ExportStreamHandler extends BaseHandler {
 
     /**
      * Отправка прогресса в браузер.
-     * Автоматически считает:
-     *   - ETA (etaMs) по текущей скорости
-     *   - номер логического пакета по 3000 записей (batchCurrent/batchTotal)
-     *
-     * Если total > 3000, к message добавляется суффикс «· пакет X/Y».
      */
     private void sendProgress(OutputStream os, long startMs, String stage,
                               int current, int total, String message) {
@@ -215,11 +211,13 @@ public class ExportStreamHandler extends BaseHandler {
     }
 
     private static boolean isZipFormat(String format) {
-        return "html-files".equals(format) || "html-files-teams".equals(format) || "llm-md-zip".equals(format);
+        return "html-files".equals(format) || "html-files-teams".equals(format)
+                || "llm-md-zip".equals(format) || "team-module-zip".equals(format);
     }
 
     private static boolean needsSnippets(String format) {
-        return isZipFormat(format) && !"llm-md-zip".equals(format) || "confluence".equals(format);
+        return isZipFormat(format) && !"llm-md-zip".equals(format) && !"team-module-zip".equals(format)
+                || "confluence".equals(format);
     }
 
     private static boolean hasPostFilters(Set<String> selectedTags,
@@ -440,6 +438,9 @@ public class ExportStreamHandler extends BaseHandler {
 
             if ("llm-md-zip".equals(format)) {
                 entries = LlmMdExporter.writeZip(tempFile, issuesByFile, api, project, host, os, startMs);
+            } else if ("team-module-zip".equals(format)) {
+                TeamMapping mapping = TeamMapping.load();
+                entries = TeamModuleMdExporter.writeZip(tempFile, issuesByFile, api, project, host, mapping, os, startMs);
             } else {
                 boolean useTeams = "html-files-teams".equals(format);
                 TeamMapping mapping = useTeams ? TeamMapping.load() : null;
@@ -645,7 +646,6 @@ public class ExportStreamHandler extends BaseHandler {
                             ruleLoaded++;
                         }
 
-                        // ★ Единый формат прогресса: правило, сколько собрано, ETA, пакет
                         sendProgress(os, startMs, "fetching", loadedCount, total,
                                 String.format("Правило %d/%d: %s — собрано %d%s",
                                         ruleIdx, ruleTotal,
@@ -812,6 +812,9 @@ public class ExportStreamHandler extends BaseHandler {
 
             if ("llm-md-zip".equals(format)) {
                 entries = LlmMdExporter.writeZip(tempFile, issuesByFile, api, project, host, os, startMs);
+            } else if ("team-module-zip".equals(format)) {
+                TeamMapping mapping = TeamMapping.load();
+                entries = TeamModuleMdExporter.writeZip(tempFile, issuesByFile, api, project, host, mapping, os, startMs);
             } else {
                 boolean useTeams = "html-files-teams".equals(format);
                 TeamMapping mapping = useTeams ? TeamMapping.load() : null;

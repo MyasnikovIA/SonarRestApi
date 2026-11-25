@@ -4,7 +4,8 @@ function extForFormat(formatType) {
     switch (formatType) {
         case 'html-files':
         case 'html-files-teams':
-        case 'llm-md-zip':       return 'zip';
+        case 'llm-md-zip':
+        case 'team-module-zip':  return 'zip';
         case 'md':               return 'md';
         case 'jira':
         case 'txt':              return 'txt';

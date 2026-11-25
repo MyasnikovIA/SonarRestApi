@@ -42,6 +42,58 @@ public final class ConsoleHelp {
           keys     [SEV] [QUAL]              — только ключи
           snippet  <KEY>                     — один issue + код
 
+          team-zip [SEV] [имя_файла.zip]     — Формирует отчет 'Команды и Модули'
+                                               по всему проекту. Раскладывает файлы
+                                               по папкам (Отдел/Модуль) и упаковывает в ZIP.
+                                               Исключает замечания с тегом 'not-require-fix'.
+                                               [SEV] — критичность (BLOCKER, HIGH, MEDIUM, LOW, INFO, ALL).
+                                               Можно передать несколько через запятую.
+                                               Пример 1: team-zip HIGH C:\\temp\\report.zip
+                                               Пример 2: team-zip BLOCKER,HIGH,MEDIUM C:\\temp\\report.zip
+
+          team-html <каталог> [SEV]          — Формирует отчет 'Команды и Модули' в виде 
+                                               HTML-файлов (без архивации). 
+                                               Сначала все файлы генерируются во временном 
+                                               общем каталоге, а затем физически перемещаются 
+                                               в подкаталоги: <каталог>/Отдел/Модуль/.
+                                               В каждом HTML-файле есть информация об ошибке,
+                                               фрагмент кода и полный листинг исходника.
+                                               Исключает замечания с тегом 'not-require-fix'.
+                                               [SEV] — критичность (BLOCKER, HIGH, MEDIUM, LOW, INFO, ALL).
+                                               Можно передать несколько через запятую.
+                                               Пример 1: team-html C:\\Reports\\MyProj HIGH
+                                               Пример 2: team-html C:\\Reports\\MyProj BLOCKER,HIGH,MEDIUM
+
+          ─── РАСШИРЕННЫЙ ФОРМАТ ДЛЯ TEAM-ZIP / TEAM-HTML ───
+          Новый формат ввода:
+            team-zip  [SEV] [QUAL] [имя_файла.zip]
+            team-html [SEV] [QUAL] <каталог>
+
+          Доступные значения SEV (Серьезность / Severity):
+            BLOCKER, HIGH, MEDIUM, LOW, INFO, ALL
+          Доступные значения QUAL (Качество ПО / impactSoftwareQualities):
+            SECURITY, RELIABILITY, MAINTAINABILITY, SECURITY_HOTSPOT, ALL
+
+          Перечисления фильтров реализуются через запятую (,) без пробелов.
+          
+          ВАРИАНТЫ УКАЗАНИЯ QUAL (можно комбинировать через запятую):
+            - Одно значение:       SECURITY
+            - Два значения:        SECURITY,RELIABILITY
+            - Три значения:        SECURITY,RELIABILITY,MAINTAINABILITY
+            - Все значения:        ALL (или перечислить все 4)
+
+          Примеры комбинаций для team-zip:
+            team-zip HIGH ALL report.zip
+            team-zip BLOCKER RELIABILITY C:\\reports\\sonar.zip
+            team-zip BLOCKER,MEDIUM RELIABILITY,SECURITY C:\\reports\\sonar.zip
+            team-zip ALL SECURITY,MAINTAINABILITY C:\\reports\\sonar.zip
+
+          Примеры комбинаций для team-html:
+            team-html HIGH ALL C:\\Reports\\MyProj
+            team-html BLOCKER SECURITY C:\\Reports\\MyProj
+            team-html MEDIUM,BLOCKER MAINTAINABILITY,RELIABILITY C:\\Reports\\MyProj
+            team-html ALL ALL C:\\Reports\\MyProj
+
         Пометки:
           mark <KEY> <transition> [comment...]  — пометить один issue
           mark <transition> [SEV] [QUAL] [--yes] — пометить всё по фильтру
@@ -79,47 +131,10 @@ public final class ConsoleHelp {
           ollama reload                       — перечитать *.properties с диска
 
         Авто-обработка (массовая, аналог кнопки «Добавить автоматически комментарий»):
-
-          Синтаксис:
-            auto [SEV] [QUAL]           — dry-run: показать, что будет обработано
-            auto [SEV] [QUAL] --yes     — запустить обработку (синхронно)
-            auto key <KEY>              — dry-run по одному issue
-            auto key <KEY> --yes        — обработать один issue
-
-          Примеры комбинаций:
-            auto ALL ALL                        → dry-run всех OPEN/REOPENED
-            auto ALL ALL --yes                  → обработать ВСЁ
-            auto HIGH ALL --yes                 → только HIGH (любое качество)
-            auto HIGH SECURITY --yes            → только HIGH + SECURITY
-            auto MEDIUM ALL --yes               → только MEDIUM
-            auto MEDIUM MAINTAINABILITY --yes   → только MEDIUM + MAINTAINABILITY
-            auto LOW ALL --yes                  → только LOW
-            auto INFO ALL --yes                 → только INFO
-            auto ALL SECURITY --yes             → любые SEV, но только SECURITY
-            auto ALL MAINTAINABILITY --yes      → любые SEV, только MAINTAINABILITY
-            auto ALL RELIABILITY --yes          → любые SEV, только RELIABILITY
-            auto key MYPROJ-1234                → dry-run одного issue
-            auto key MYPROJ-1234 --yes          → обработать один issue
-
-          Допустимые SEV:   HIGH | MEDIUM | LOW | INFO | ALL
-          Допустимые QUAL:  MAINTAINABILITY | RELIABILITY | SECURITY | ALL
-
-          Промпт берётся из prompts/auto-resolve.txt — тот же, что и в web.
-          Если файла нет (или он пуст) — используется встроенный fallback.
-          Теги: сохраняются существующие + добавляются предложенные LLM
-          (require-fix ↔ not-require-fix заменяют друг друга).
-
-          Во время выполнения:
-            * обработка идёт СИНХРОННО — консоль не принимает других команд;
-            * результат по каждому issue печатается в stdout:
-                [N/M] KEY → OK  accept [tags] (12.4s)
-                [N/M] KEY → FAIL: reason (0.3s)
-            * для досрочной остановки используйте Ctrl+C.
-
-          После завершения:
-            * итоговая статистика печатается в stdout;
-            * если не было 401/сетевых ошибок — снимок пересобирается в фоне
-              (status — прогресс).
+          auto [SEV] [QUAL]           — dry-run: показать, что будет обработано
+          auto [SEV] [QUAL] --yes     — запустить обработку (синхронно)
+          auto key <KEY>              — dry-run по одному issue
+          auto key <KEY> --yes        — обработать один issue
         """);
     }
 }

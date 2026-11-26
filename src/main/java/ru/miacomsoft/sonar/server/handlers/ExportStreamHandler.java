@@ -486,7 +486,15 @@ public class ExportStreamHandler extends BaseHandler {
         SonarIssuesApi api = state.newApi(project);
         String host = state.getSession() != null ? state.getSession().getHost() : "sonar.bars.group";
 
-        String statuses = hideProcessed ? SonarIssuesApi.ACTIVE_STATUSES : null;
+        // ИЗМЕНЕНО: раньше при hideProcessed=false передавалось statuses=null,
+        // и SonarQube отбрасывал ACCEPTED/FALSE_POSITIVE/FIXED. Теперь для
+        // полного отчёта передаём явный ALL_STATUSES (включает ACCEPTED).
+        // sanitizeStatuses() внутри SonarIssuesApi сам смапит legacy → MQR
+        // и уберёт то, что сервер не поддерживает.
+        String statuses = hideProcessed
+                ? SonarIssuesApi.ACTIVE_STATUSES
+                : SonarIssuesApi.ALL_STATUSES;
+
         boolean zipMode = isZipFormat(format);
         boolean isConfluence = "confluence".equals(format);
         boolean snippetsNeeded = needsSnippets(format);
@@ -494,6 +502,7 @@ public class ExportStreamHandler extends BaseHandler {
         System.out.println("[ExportStream] Фильтры: sev=" + sev + ", qual=" + qual
                 + ", rule=" + (rule == null ? "нет" : rule)
                 + ", hideProcessed=" + hideProcessed
+                + ", statuses=" + (statuses == null ? "<все>" : statuses)
                 + ", tags=" + tagsParam + ", excludedTags=" + excludedTagsParam
                 + ", selectedRules=" + selectedRulesParam
                 + ", filterText=" + filterText + ", statusFilter=" + statusFilter

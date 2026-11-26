@@ -42,16 +42,30 @@ public final class ConsoleHelp {
           keys     [SEV] [QUAL]              — только ключи
           snippet  <KEY>                     — один issue + код
 
-          team-zip [SEV] [имя_файла.zip]     — Формирует отчет 'Команды и Модули'
+          qual-summary [QUAL]:[SEV]...       — Сводный отчет по категориям (Quality) и уровням (Severity).
+                                               Показывает количество ошибок для каждой категории в проекте.
+                                               Исключает замечания с тегом 'not-require-fix'.
+                                               Если аргументы не указаны, выводит все категории со всеми уровнями.
+                                               [QUAL] — SECURITY, RELIABILITY, MAINTAINABILITY, SECURITY_HOTSPOT, ALL
+                                               [SEV] — BLOCKER, HIGH, MEDIUM, LOW, INFO, ALL
+                                               Пример 1 (все категории, все уровни):
+                                                 qual-summary
+                                               Пример 2 (конкретные категории и уровни):
+                                                 qual-summary SECURITY:HIGH,BLOCKER RELIABILITY:LOW
+                                               Пример 3 (одна категория, все уровни):
+                                                 qual-summary SECURITY:ALL
+
+          team-zip [SEV] [QUAL] [имя_файла.zip] — Формирует отчет 'Команды и Модули'
                                                по всему проекту. Раскладывает файлы
                                                по папкам (Отдел/Модуль) и упаковывает в ZIP.
                                                Исключает замечания с тегом 'not-require-fix'.
                                                [SEV] — критичность (BLOCKER, HIGH, MEDIUM, LOW, INFO, ALL).
+                                               [QUAL] — качество (SECURITY, RELIABILITY, MAINTAINABILITY, SECURITY_HOTSPOT, ALL).
                                                Можно передать несколько через запятую.
-                                               Пример 1: team-zip HIGH C:\\temp\\report.zip
-                                               Пример 2: team-zip BLOCKER,HIGH,MEDIUM C:\\temp\\report.zip
+                                               Пример 1: team-zip HIGH ALL report.zip
+                                               Пример 2: team-zip BLOCKER,MEDIUM RELIABILITY,SECURITY C:\\reports\\sonar.zip
 
-          team-html <каталог> [SEV]          — Формирует отчет 'Команды и Модули' в виде 
+          team-html [SEV] [QUAL] <каталог>    — Формирует отчет 'Команды и Модули' в виде 
                                                HTML-файлов (без архивации). 
                                                Сначала все файлы генерируются во временном 
                                                общем каталоге, а затем физически перемещаются 
@@ -59,40 +73,9 @@ public final class ConsoleHelp {
                                                В каждом HTML-файле есть информация об ошибке,
                                                фрагмент кода и полный листинг исходника.
                                                Исключает замечания с тегом 'not-require-fix'.
-                                               [SEV] — критичность (BLOCKER, HIGH, MEDIUM, LOW, INFO, ALL).
-                                               Можно передать несколько через запятую.
-                                               Пример 1: team-html C:\\Reports\\MyProj HIGH
-                                               Пример 2: team-html C:\\Reports\\MyProj BLOCKER,HIGH,MEDIUM
-
-          ─── РАСШИРЕННЫЙ ФОРМАТ ДЛЯ TEAM-ZIP / TEAM-HTML ───
-          Новый формат ввода:
-            team-zip  [SEV] [QUAL] [имя_файла.zip]
-            team-html [SEV] [QUAL] <каталог>
-
-          Доступные значения SEV (Серьезность / Severity):
-            BLOCKER, HIGH, MEDIUM, LOW, INFO, ALL
-          Доступные значения QUAL (Качество ПО / impactSoftwareQualities):
-            SECURITY, RELIABILITY, MAINTAINABILITY, SECURITY_HOTSPOT, ALL
-
-          Перечисления фильтров реализуются через запятую (,) без пробелов.
-          
-          ВАРИАНТЫ УКАЗАНИЯ QUAL (можно комбинировать через запятую):
-            - Одно значение:       SECURITY
-            - Два значения:        SECURITY,RELIABILITY
-            - Три значения:        SECURITY,RELIABILITY,MAINTAINABILITY
-            - Все значения:        ALL (или перечислить все 4)
-
-          Примеры комбинаций для team-zip:
-            team-zip HIGH ALL report.zip
-            team-zip BLOCKER RELIABILITY C:\\reports\\sonar.zip
-            team-zip BLOCKER,MEDIUM RELIABILITY,SECURITY C:\\reports\\sonar.zip
-            team-zip ALL SECURITY,MAINTAINABILITY C:\\reports\\sonar.zip
-
-          Примеры комбинаций для team-html:
-            team-html HIGH ALL C:\\Reports\\MyProj
-            team-html BLOCKER SECURITY C:\\Reports\\MyProj
-            team-html MEDIUM,BLOCKER MAINTAINABILITY,RELIABILITY C:\\Reports\\MyProj
-            team-html ALL ALL C:\\Reports\\MyProj
+                                               [SEV] и [QUAL] аналогичны team-zip.
+                                               Пример 1: team-html HIGH ALL C:\\Reports\\MyProj
+                                               Пример 2: team-html BLOCKER,MEDIUM MAINTAINABILITY C:\\Reports\\MyProj
 
         Пометки:
           mark <KEY> <transition> [comment...]  — пометить один issue

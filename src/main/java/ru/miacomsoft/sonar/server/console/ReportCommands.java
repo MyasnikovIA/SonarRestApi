@@ -15,13 +15,26 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
-import java.util.TreeMap;
+import java.util.*;
 
 /**
  * Команды отчётов и обновления снимка.
+ *
+ * ИЗМЕНЕНО: везде, где раньше запрашивались issues/фасеты по статусам
+ * SonarIssuesApi.ACTIVE_STATUSES (OPEN,CONFIRMED,REOPENED — БЕЗ ACCEPTED),
+ * теперь используется SonarIssuesApi.ALL_STATUSES (OPEN,CONFIRMED,REOPENED,
+ * ACCEPTED,FALSE_POSITIVE,RESOLVED,CLOSED,WONTFIX). Это касается:
+ *   - handleSummary(...)          — сводка (count + facets);
+ *   - countIssuesBySeverity(...)  — используется qual-summary;
+ *   - collectIssues(...)          — используется team-zip и team-html.
+ *
+ * sanitizeStatuses() внутри SonarIssuesApi сам смапит legacy → MQR
+ * (REOPENED→OPEN, RESOLVED→FIXED, CLOSED→FIXED, WONTFIX→FALSE_POSITIVE)
+ * и отбросит статусы, неподдерживаемые сервером.
+ *
+ * Методы handleMatrix / handlePerFile / handleDetails / handleIssues /
+ * handleKeys идут через ctx.fetchIssues(...) / ctx.fetchIssuesByFile(...),
+ * которые уже исправлены в ConsoleContext на ALL_STATUSES.
  */
 public class ReportCommands {
 
@@ -96,10 +109,12 @@ public class ReportCommands {
             bySev   = snap.facetSeverities(sq[0], sq[1]);
         } else {
             SonarIssuesApi api = ctx.state().newApi(project);
-            total   = api.count(sq[0], sq[1]);
-            byRules = api.facet(sq[0], sq[1], "rules");
-            byFiles = api.facet(sq[0], sq[1], "files");
-            bySev   = api.facet(sq[0], sq[1], "severities");
+            // ИЗМЕНЕНО: было api.count(...) / api.facet(...) — внутри ACTIVE_STATUSES
+            // (без ACCEPTED). Теперь явно ALL_STATUSES для всех четырёх вызовов.
+            total   = api.countWithStatuses(SonarIssuesApi.ALL_STATUSES, sq[0], sq[1]);
+            byRules = api.facetWithStatuses(SonarIssuesApi.ALL_STATUSES, sq[0], sq[1], null, "rules");
+            byFiles = api.facetWithStatuses(SonarIssuesApi.ALL_STATUSES, sq[0], sq[1], null, "files");
+            bySev   = api.facetWithStatuses(SonarIssuesApi.ALL_STATUSES, sq[0], sq[1], null, "severities");
         }
         System.out.printf("%nВсего %s/%s: %d%n", sq[0], sq[1], total);
         Reporter.printFacet("По правилам", byRules);
@@ -107,10 +122,181 @@ public class ReportCommands {
         Reporter.printFacet("По severity", bySev);
     }
 
+    public void handleQualSummary(String[] a) throws Exception {
+        if (!ctx.requireProject()) return;
+        String project = ctx.getProject();
+        SonarIssuesApi api = ctx.state().newApi(project);
+
+        Map<String, String> qualToSevMap = new LinkedHashMap<>();
+        if (a.length == 0) {
+            qualToSevMap.put("SECURITY", "ALL");
+            qualToSevMap.put("RELIABILITY", "ALL");
+            qualToSevMap.put("MAINTAINABILITY", "ALL");
+        } else {
+            for (String arg : a) {
+                if (arg.contains(":")) {
+                    String[] parts = arg.split(":", 2);
+                    qualToSevMap.put(parts[0].toUpperCase(), parts[1].toUpperCase());
+                } else {
+                    qualToSevMap.put(arg.toUpperCase(), "ALL");
+                }
+            }
+        }
+
+        System.out.println("\nПроект: " + project);
+        for (Map.Entry<String, String> entry : qualToSevMap.entrySet()) {
+            String qual = entry.getKey();
+            String sevFilter = entry.getValue();
+
+            System.out.println("  " + qual);
+
+            Map<String, Integer> counts = countIssuesBySeverity(api, project, qual, sevFilter);
+            for (Map.Entry<String, Integer> c : counts.entrySet()) {
+                System.out.printf("    %-15s : %d\n", c.getKey(), c.getValue());
+            }
+        }
+        System.out.println();
+    }
+
+    private Map<String, Integer> countIssuesBySeverity(SonarIssuesApi api, String project,
+                                                       String qual, String sevFilter) throws Exception {
+        // ИЗМЕНЕНО: заранее парсим набор запрошенных severity.
+        // В counts будем класть ТОЛЬКО эти ключи — никакого автоматического
+        // добавления MEDIUM/LOW, если их не запросили.
+        Set<String> requestedSeverities = new LinkedHashSet<>();
+        if ("ALL".equalsIgnoreCase(sevFilter)) {
+            Collections.addAll(requestedSeverities, "BLOCKER", "HIGH", "MEDIUM", "LOW", "INFO");
+        } else {
+            for (String s : sevFilter.split(",")) {
+                String t = s.trim().toUpperCase();
+                if (!t.isEmpty()) requestedSeverities.add(t);
+            }
+        }
+
+        Map<String, Integer> counts = new TreeMap<>(Collections.reverseOrder());
+        for (String s : requestedSeverities) counts.put(s, 0);
+
+        // ИЗМЕНЕНО: ALL_STATUSES (в нашем проекте это "") — без фильтра по статусу,
+        // сервер вернёт все статусы; фильтрация — только по notTags=not-require-fix.
+        Map<String, Integer> ruleCounts = api.facetWithStatuses(
+                SonarIssuesApi.ALL_STATUSES, sevFilter, qual, null, "rules");
+        if (ruleCounts == null || ruleCounts.isEmpty()) return counts;
+
+        List<Map.Entry<String, Integer>> sortedRules = new ArrayList<>(ruleCounts.entrySet());
+        sortedRules.sort((e1, e2) -> e2.getValue().compareTo(e1.getValue()));
+
+        int CHUNK_SIZE = 3000;
+        List<List<String>> ruleChunks = new ArrayList<>();
+        List<String> currentChunk = new ArrayList<>();
+        int currentSum = 0;
+
+        for (Map.Entry<String, Integer> entry : sortedRules) {
+            if (currentSum + entry.getValue() > CHUNK_SIZE && !currentChunk.isEmpty()) {
+                ruleChunks.add(currentChunk);
+                currentChunk = new ArrayList<>();
+                currentSum = 0;
+            }
+            currentChunk.add(entry.getKey());
+            currentSum += entry.getValue();
+        }
+        if (!currentChunk.isEmpty()) ruleChunks.add(currentChunk);
+
+        for (List<String> chunk : ruleChunks) {
+            String rulesCsv = String.join(",", chunk);
+            int page = 1;
+            while (true) {
+                try {
+                    JSONObject raw = api.fetchPageRaw(
+                            SonarIssuesApi.ALL_STATUSES, sevFilter, qual,
+                            rulesCsv, null, "not-require-fix", page, 500
+                    );
+                    JSONArray arr = raw.optJSONArray("issues");
+                    if (arr == null || arr.length() == 0) break;
+
+                    for (int j = 0; j < arr.length(); j++) {
+                        Issue it = Issue.from(arr.getJSONObject(j), project);
+                        if (it.tags != null && it.tags.contains("not-require-fix")) continue;
+
+                        // ИСПРАВЛЕНО: считаем только issues, у которых есть impact
+                        // с (quality == qual И severity в requestedSeverities).
+                        String matchedSev = matchImpactSeverity(it, qual, requestedSeverities);
+                        if (matchedSev != null) {
+                            counts.put(matchedSev, counts.get(matchedSev) + 1);
+                        }
+                    }
+
+                    if (arr.length() < 500) break;
+                    page++;
+                } catch (Exception e) {
+                    if (e.getMessage() != null && e.getMessage().contains("10000")) {
+                        Map<String, Integer> fileCounts = api.facetWithStatuses(
+                                SonarIssuesApi.ALL_STATUSES, sevFilter, qual, rulesCsv, "files");
+                        if (fileCounts != null) {
+                            for (String file : fileCounts.keySet()) {
+                                int fPage = 1;
+                                while (true) {
+                                    JSONObject fRaw = api.fetchPageRawForComponent(
+                                            SonarIssuesApi.ALL_STATUSES, sevFilter, qual,
+                                            rulesCsv, file, null, "not-require-fix", fPage, 500
+                                    );
+                                    JSONArray fArr = fRaw.optJSONArray("issues");
+                                    if (fArr == null || fArr.length() == 0) break;
+                                    for (int j = 0; j < fArr.length(); j++) {
+                                        Issue it = Issue.from(fArr.getJSONObject(j), project);
+                                        if (it.tags != null && it.tags.contains("not-require-fix")) continue;
+                                        // ИСПРАВЛЕНО: та же логика — только matched impact.
+                                        String matchedSev = matchImpactSeverity(it, qual, requestedSeverities);
+                                        if (matchedSev != null) {
+                                            counts.put(matchedSev, counts.get(matchedSev) + 1);
+                                        }
+                                    }
+                                    if (fArr.length() < 500) break;
+                                    fPage++;
+                                }
+                            }
+                        }
+                        break;
+                    } else {
+                        throw e;
+                    }
+                }
+            }
+        }
+        return counts;
+    }
+
+    /**
+     * Возвращает severity того impact'а, у которого одновременно:
+     *   - softwareQuality == qual (без учёта регистра);
+     *   - severity входит в requestedSeverities.
+     * Если ни один impact не подошёл — null (issue не учитывается).
+     *
+     * Для legacy-issues без массива impacts используется старое поле severity.
+     */
+    private static String matchImpactSeverity(Issue it, String qual, Set<String> requestedSeverities) {
+        if (it.impacts != null && !it.impacts.isEmpty()) {
+            for (Issue.Impact im : it.impacts) {
+                if (im == null) continue;
+                if (im.softwareQuality == null || im.severity == null) continue;
+                if (qual.equalsIgnoreCase(im.softwareQuality)
+                        && requestedSeverities.contains(im.severity)) {
+                    return im.severity;
+                }
+            }
+            return null;
+        }
+        // legacy-mode
+        String sev = it.severity != null ? it.severity.toUpperCase() : "";
+        return requestedSeverities.contains(sev) ? sev : null;
+    }
+
+
+
     public void handleMatrix(String[] a) throws Exception {
         if (!ctx.requireProject()) return;
         String project = ctx.getProject();
         String[] sq = ConsoleContext.sevQual(a, 0);
+        // ctx.fetchIssues → уже использует ALL_STATUSES (см. ConsoleContext).
         List<Issue> issues = ctx.fetchIssues(project, sq[0], sq[1]);
         System.out.println("Всего: " + issues.size());
         Reporter.printMatrix(issues);
@@ -120,6 +306,7 @@ public class ReportCommands {
         if (!ctx.requireProject()) return;
         String project = ctx.getProject();
         String[] sq = ConsoleContext.sevQual(a, 0);
+        // ctx.fetchIssuesByFile → уже использует ALL_STATUSES.
         Map<String, List<Issue>> byFile = ctx.fetchIssuesByFile(project, sq[0], sq[1]);
         Reporter.printPerFile(byFile);
     }
@@ -132,6 +319,7 @@ public class ReportCommands {
         if (a.length > 2) {
             try { snippets = Integer.parseInt(a[2]); } catch (NumberFormatException ignore) {}
         }
+        // ctx.fetchIssuesByFile → уже использует ALL_STATUSES.
         Map<String, List<Issue>> byFile = ctx.fetchIssuesByFile(project, sq[0], sq[1]);
         SonarIssuesApi api = ctx.state().newApi(project);
         Reporter.printDetailedByFileWithSnippets(byFile, api, snippets);
@@ -141,6 +329,7 @@ public class ReportCommands {
         if (!ctx.requireProject()) return;
         String project = ctx.getProject();
         String[] sq = ConsoleContext.sevQual(a, 0);
+        // ctx.fetchIssues → уже использует ALL_STATUSES.
         List<Issue> issues = ctx.fetchIssues(project, sq[0], sq[1]);
         System.out.printf("%n%d issues (%s/%s)%n", issues.size(), sq[0], sq[1]);
         for (Issue it : issues) {
@@ -156,6 +345,7 @@ public class ReportCommands {
         if (!ctx.requireProject()) return;
         String project = ctx.getProject();
         String[] sq = ConsoleContext.sevQual(a, 0);
+        // ctx.fetchIssues → уже использует ALL_STATUSES.
         List<Issue> issues = ctx.fetchIssues(project, sq[0], sq[1]);
         System.out.printf("%n%d keys (%s/%s)%n", issues.size(), sq[0], sq[1]);
         for (Issue it : issues) System.out.println("  " + it.key);
@@ -194,22 +384,22 @@ public class ReportCommands {
 
     // ==================== TEAM REPORTS ====================
 
-    /**
-     * Сбор issues с учетом фильтров SEV и QUAL.
-     * Обратите внимание: qual передается напрямую в методы SonarIssuesApi:
-     *  - api.facetWithStatuses(..., sev, qual, ...)
-     *  - api.fetchPageRaw(..., sev, qual, ...)
-     *  - api.fetchPageRawForComponent(..., sev, qual, ...)
-     */
-    private Map<String, List<Issue>> collectIssues(SonarIssuesApi api, String project, String sev, String qual) throws Exception {
+    private Map<String, List<Issue>> collectIssues(SonarIssuesApi api, String project,
+                                                   String sev, String qual) throws Exception {
         Map<String, List<Issue>> issuesByFile = new TreeMap<>();
         int totalDownloaded = 0;
         int totalFilteredOut = 0;
         int totalKept = 0;
 
+        // ИЗМЕНЕНО: заранее парсим фильтры sev/qual в множества для клиентской
+        // проверки. null означает "ALL" (без ограничения).
+        Set<String> sevSet  = parseFilter(sev);
+        Set<String> qualSet = parseFilter(qual);
+
         System.out.println("[team-report] 1. Запрос списка всех правил в проекте...");
-        // ИСПОЛЬЗОВАНИЕ QUAL:
-        Map<String, Integer> ruleCounts = api.facetWithStatuses(SonarIssuesApi.ACTIVE_STATUSES, sev, qual, null, "rules");
+        // ALL_STATUSES (в нашем проекте пустая строка) — без фильтра по статусу.
+        Map<String, Integer> ruleCounts = api.facetWithStatuses(
+                SonarIssuesApi.ALL_STATUSES, sev, qual, null, "rules");
         if (ruleCounts == null || ruleCounts.isEmpty()) {
             throw new Exception("Не удалось получить список правил. Проверьте доступ к SonarQube.");
         }
@@ -238,14 +428,14 @@ public class ReportCommands {
         for (int i = 0; i < ruleChunks.size(); i++) {
             List<String> chunk = ruleChunks.get(i);
             String rulesCsv = String.join(",", chunk);
-            System.out.printf("[team-report] --- Блок %d/%d (правил: %d) ---\n", i + 1, ruleChunks.size(), chunk.size());
+            System.out.printf("[team-report] --- Блок %d/%d (правил: %d) ---\n",
+                    i + 1, ruleChunks.size(), chunk.size());
 
             int page = 1;
             while (true) {
                 try {
-                    // ИСПОЛЬЗОВАНИЕ QUAL:
                     JSONObject raw = api.fetchPageRaw(
-                            SonarIssuesApi.ACTIVE_STATUSES, sev, qual,
+                            SonarIssuesApi.ALL_STATUSES, sev, qual,
                             rulesCsv, null, "not-require-fix", page, 500
                     );
                     JSONArray arr = raw.optJSONArray("issues");
@@ -255,6 +445,17 @@ public class ReportCommands {
                         Issue it = Issue.from(arr.getJSONObject(j), project);
                         totalDownloaded++;
                         if (it.tags != null && it.tags.contains("not-require-fix")) {
+                            totalFilteredOut++;
+                            continue;
+                        }
+                        // ИСПРАВЛЕНО: клиентская фильтрация по (quality, severity).
+                        // Серверный фильтр impactSoftwareQualities/impactSeverities
+                        // в SonarQube трактуется как независимые И (issue попадает
+                        // в ответ, если есть хоть один impact нужного quality
+                        // И хоть один impact нужной severity — даже у разных
+                        // quality). Поэтому дополнительно проверяем, что у issue
+                        // есть impact с ОДНОВРЕМЕННО quality==qual И severity∈sev.
+                        if (!matchesSevQual(it, sevSet, qualSet)) {
                             totalFilteredOut++;
                             continue;
                         }
@@ -268,15 +469,14 @@ public class ReportCommands {
                 } catch (Exception e) {
                     if (e.getMessage() != null && e.getMessage().contains("10000")) {
                         System.out.println("[team-report]   !!! Достигнут лимит (10000). Разбиваем по файлам...");
-                        // ИСПОЛЬЗОВАНИЕ QUAL:
-                        Map<String, Integer> fileCounts = api.facetWithStatuses(SonarIssuesApi.ACTIVE_STATUSES, sev, qual, rulesCsv, "files");
+                        Map<String, Integer> fileCounts = api.facetWithStatuses(
+                                SonarIssuesApi.ALL_STATUSES, sev, qual, rulesCsv, "files");
                         if (fileCounts != null) {
                             for (String file : fileCounts.keySet()) {
                                 int fPage = 1;
                                 while (true) {
-                                    // ИСПОЛЬЗОВАНИЕ QUAL:
                                     JSONObject fRaw = api.fetchPageRawForComponent(
-                                            SonarIssuesApi.ACTIVE_STATUSES, sev, qual,
+                                            SonarIssuesApi.ALL_STATUSES, sev, qual,
                                             rulesCsv, file, null, "not-require-fix", fPage, 500
                                     );
                                     JSONArray fArr = fRaw.optJSONArray("issues");
@@ -285,6 +485,11 @@ public class ReportCommands {
                                         Issue it = Issue.from(fArr.getJSONObject(j), project);
                                         totalDownloaded++;
                                         if (it.tags != null && it.tags.contains("not-require-fix")) {
+                                            totalFilteredOut++;
+                                            continue;
+                                        }
+                                        // ИСПРАВЛЕНО: та же клиентская проверка.
+                                        if (!matchesSevQual(it, sevSet, qualSet)) {
                                             totalFilteredOut++;
                                             continue;
                                         }
@@ -309,6 +514,46 @@ public class ReportCommands {
         return issuesByFile;
     }
 
+    /**
+     * Парсит значение фильтра (sev или qual) в множество.
+     * null / пусто / "ALL" → null (= без ограничения).
+     */
+    private static Set<String> parseFilter(String v) {
+        if (v == null || "ALL".equalsIgnoreCase(v)) return null;
+        Set<String> set = new LinkedHashSet<>();
+        for (String s : v.split(",")) {
+            String t = s.trim().toUpperCase();
+            if (!t.isEmpty()) set.add(t);
+        }
+        return set.isEmpty() ? null : set;
+    }
+
+    /**
+     * Проверяет, есть ли у issue impact с ОДНОВРЕМЕННО
+     *   (quality в qualSet ИЛИ qualSet==null)
+     *   И (severity в sevSet ИЛИ sevSet==null).
+     *
+     * Это повторяет семантику SonarQube, где impact'ы сравниваются попарно,
+     * а не независимо по quality и severity. Для legacy-issues без impacts
+     * используется старое поле severity.
+     */
+    private static boolean matchesSevQual(Issue it, Set<String> sevSet, Set<String> qualSet) {
+        if (it.impacts != null && !it.impacts.isEmpty()) {
+            for (Issue.Impact im : it.impacts) {
+                if (im == null) continue;
+                boolean qOk = qualSet == null
+                        || (im.softwareQuality != null && qualSet.contains(im.softwareQuality.toUpperCase()));
+                boolean sOk = sevSet == null
+                        || (im.severity != null && sevSet.contains(im.severity.toUpperCase()));
+                if (qOk && sOk) return true;
+            }
+            return false;
+        }
+        // legacy-mode: только severity
+        if (sevSet == null) return true;
+        return it.severity != null && sevSet.contains(it.severity.toUpperCase());
+    }
+
     public void handleTeamZip(String[] a) throws Exception {
         if (!ctx.requireProject()) return;
         String project = ctx.getProject();
@@ -319,7 +564,6 @@ public class ReportCommands {
         String qual = "ALL";
         String outName = null;
 
-        // Регулярные выражения для SEV (включая BLOCKER) и QUAL
         String validSevsRegex = "(?i)^(BLOCKER|CRITICAL|MAJOR|MINOR|INFO|HIGH|MEDIUM|LOW|ALL)(,(BLOCKER|CRITICAL|MAJOR|MINOR|INFO|HIGH|MEDIUM|LOW|ALL))*$";
         String validQualsRegex = "(?i)^(MAINTAINABILITY|RELIABILITY|SECURITY|SECURITY_HOTSPOT|ALL)(,(MAINTAINABILITY|RELIABILITY|SECURITY|SECURITY_HOTSPOT|ALL))*$";
 
@@ -354,7 +598,6 @@ public class ReportCommands {
         String qual = "ALL";
         String outDirStr = null;
 
-        // Регулярные выражения для SEV (включая BLOCKER) и QUAL
         String validSevsRegex = "(?i)^(BLOCKER|CRITICAL|MAJOR|MINOR|INFO|HIGH|MEDIUM|LOW|ALL)(,(BLOCKER|CRITICAL|MAJOR|MINOR|INFO|HIGH|MEDIUM|LOW|ALL))*$";
         String validQualsRegex = "(?i)^(MAINTAINABILITY|RELIABILITY|SECURITY|SECURITY_HOTSPOT|ALL)(,(MAINTAINABILITY|RELIABILITY|SECURITY|SECURITY_HOTSPOT|ALL))*$";
 

@@ -15,6 +15,29 @@ public class SonarIssuesApi {
     public static final String ACTIVE_STATUSES = "OPEN,CONFIRMED,REOPENED";
     public static final int FETCH_PAGE_SIZE = 3000;
 
+
+    /**
+     * ИЗМЕНЕНО: пустая строка = «БЕЗ фильтра по статусам».
+     *
+     * При передаче в fetchPageRaw / countWithStatuses / facetWithStatuses
+     * параметр issueStatuses НЕ добавляется в запрос, и SonarQube возвращает
+     * issues во ВСЕХ статусах (OPEN, CONFIRMED, REOPENED, ACCEPTED,
+     * FALSE_POSITIVE, FIXED и любых других, которые есть в проекте).
+     *
+     * Фильтрация в отчётах (qual-summary, team-zip, team-html, экспорт)
+     * выполняется ТОЛЬКО по тегу 'not-require-fix' — через параметр notTags
+     * (issues с этим тегом исключаются), а также по sev/qual/rules.
+     *
+     * Почему не "OPEN,CONFIRMED,REOPENED,ACCEPTED,FALSE_POSITIVE,FIXED":
+     *   - REOPENED не поддерживается сервером 10.x+ (MQR-модель),
+     *     что вызывало вечный retry и IllegalStateException в fetchPageRaw;
+     *   - явный список не нужен: без issueStatuses SonarQube и так
+     *     возвращает всё, включая ACCEPTED.
+     */
+    public static final String ALL_STATUSES = "";
+    // public static final String ALL_STATUSES =
+    //        "OPEN,CONFIRMED,ACCEPTED,FALSE_POSITIVE,FIXED";
+
     /**
      * Логический «пакет» для отображения прогресса в UI.
      * SonarQube всё равно режет ps до 500 (см. effectivePsLimit),
@@ -179,12 +202,26 @@ public class SonarIssuesApi {
             String t = raw.trim().toUpperCase(Locale.ROOT);
             if (t.isEmpty()) continue;
 
-            if (allowed.contains(t)) { result.add(t); continue; }
-
+            // ИЗМЕНЕНО: сначала ВСЕГДА мапим legacy → MQR (REOPENED→OPEN,
+            // RESOLVED/CLOSED→FIXED, WONTFIX→FALSE_POSITIVE) и только потом
+            // сверяемся с allowed. Это гарантирует, что REOPENED никогда
+            // не уйдёт на сервер в MQR-модели, даже если он случайно
+            // попал в serverAllowedStatuses.
             String mapped = LEGACY_TO_MQR_STATUS.get(t);
-            if (mapped != null && allowed.contains(mapped)) { result.add(mapped); continue; }
+            if (mapped != null) {
+                if (allowed.contains(mapped)) {
+                    result.add(mapped);
+                } else {
+                    dropped.add(t);
+                }
+                continue;
+            }
 
-            dropped.add(t);
+            if (allowed.contains(t)) {
+                result.add(t);
+            } else {
+                dropped.add(t);
+            }
         }
 
         if (!dropped.isEmpty()) {
@@ -232,33 +269,51 @@ public class SonarIssuesApi {
 
     public JSONObject fetchPageRaw(String statuses, String impactSeverity, String quality,
                                    String rule, String tags, String notTags, int p, int ps) throws Exception {
+        // ИЗМЕНЕНО: работаем с локальной копией, чтобы на retry пересобрать запрос
+        // с другим набором статусов. Раньше catch-блок печатал "Переключаемся на …",
+        // но `continue` крутил тот же запрос, и через 3 попытки летел
+        // IllegalStateException. Теперь при retry реально пересобираем statuses.
+        String effectiveStatuses = statuses;
         int attempt = 0;
         while (attempt++ < 3) {
             String template = "/api/issues/search?"
-                    + buildQueryWithStatuses(statuses, impactSeverity, quality, rule, tags, notTags)
+                    + buildQueryWithStatuses(effectiveStatuses, impactSeverity, quality, rule, tags, notTags)
                     + "&ps={PS}&p=" + p;
             try {
                 return getJsonWithPsFallback(template, ps, "issues/search");
             } catch (RuntimeException e) {
                 String msg = e.getMessage();
 
+                // 1) Сервер сообщил список допустимых статусов — обновляем кэш
+                //    И пересобираем запрос через sanitizeStatuses.
                 if (msg != null && msg.contains("issueStatuses")
                         && msg.toLowerCase().contains("must be one of")) {
                     Set<String> parsed = parseAllowedStatusesFromError(msg);
                     if (parsed != null && !parsed.isEmpty()
                             && !parsed.equals(serverAllowedStatuses)) {
                         serverAllowedStatuses = parsed;
+                        String sanitized = sanitizeStatuses(effectiveStatuses);
                         System.err.println("[SonarIssuesApi] Сервер сообщил допустимые статусы: "
-                                + parsed + ". Повторяем запрос с фильтрацией.");
+                                + parsed + ". Пересобираю " + effectiveStatuses
+                                + " → " + (sanitized.isEmpty() ? "<без фильтра>" : sanitized));
+                        effectiveStatuses = sanitized;
                         continue;
                     }
                 }
 
+                // 2) Сервер не поддерживает legacy-статус (REOPENED и т.п.) —
+                //    пересобираем запрос, чтобы убрать его из issueStatuses.
                 if (msg != null && (msg.contains("REOPENED") || msg.contains("issueStatuses"))) {
                     reopenedSupported = false;
-                    System.err.println("[SonarIssuesApi] Сервер не поддерживает REOPENED. "
-                            + "Переключаемся на OPEN,CONFIRMED.");
-                    continue;
+                    String sanitized = sanitizeStatuses(effectiveStatuses);
+                    if (!sanitized.equals(effectiveStatuses) && !sanitized.isEmpty()) {
+                        System.err.println("[SonarIssuesApi] Сервер не поддерживает legacy-статус. "
+                                + "Пересобираю " + effectiveStatuses + " → " + sanitized);
+                        effectiveStatuses = sanitized;
+                        continue;
+                    }
+                    System.err.println("[SonarIssuesApi] Санитизация не изменила запрос ("
+                            + effectiveStatuses + "). Пробрасываю ошибку.");
                 }
 
                 throw e;

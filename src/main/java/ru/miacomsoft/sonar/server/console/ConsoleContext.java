@@ -1,6 +1,7 @@
 package ru.miacomsoft.sonar.server.console;
 
 import ru.miacomsoft.sonar.Issue;
+import ru.miacomsoft.sonar.SonarIssuesApi;
 import ru.miacomsoft.sonar.server.BootstrapFiles;
 import ru.miacomsoft.sonar.server.OllamaConfig;
 import ru.miacomsoft.sonar.server.PromptTemplate;
@@ -134,17 +135,37 @@ public class ConsoleContext {
         return (s != null && s.projectKey.equals(projectKey)) ? s : null;
     }
 
+    /**
+     * ИЗМЕНЕНО: раньше без снимка вызывался {@code api.fetchAll(sev, qual)},
+     * который внутри использует ACTIVE_STATUSES (OPEN,CONFIRMED,REOPENED)
+     * — то есть БЕЗ ACCEPTED. Из-за этого команды qual-summary / summary /
+     * details / perfile / matrix / issues не учитывали принятые замечания
+     * (и другие resolved-статусы). Теперь явно запрашиваем ALL_STATUSES
+     * (OPEN,CONFIRMED,REOPENED,ACCEPTED,FALSE_POSITIVE,RESOLVED,CLOSED,WONTFIX).
+     * sanitizeStatuses() в SonarIssuesApi сам смапит legacy → MQR и отбросит
+     * неподдерживаемые сервером статусы.
+     *
+     * Если снимок уже построен — по-прежнему используем его (снимок содержит
+     * ровно те статусы, с которыми он собирался через Snapshot.build()).
+     */
     public List<Issue> fetchIssues(String project, String sev, String qual) throws Exception {
         Snapshot s = snapshotFor(project);
         if (s != null) return s.filter(sev, qual);
-        return state.newApi(project).fetchAll(sev, qual);
+        return state.newApi(project)
+                .fetchAllByStatuses(SonarIssuesApi.ALL_STATUSES, sev, qual);
     }
 
+    /**
+     * ИЗМЕНЕНО: аналогично fetchIssues() — issuesByFile(sev, qual) использует
+     * ACTIVE_STATUSES. Заменено на issuesByFileByStatuses(ALL_STATUSES, …),
+     * чтобы ACCEPTED попадал в отчёты по файлам.
+     */
     public Map<String, List<Issue>> fetchIssuesByFile(String project, String sev, String qual)
             throws Exception {
         Snapshot s = snapshotFor(project);
         if (s != null) return s.filterByFile(sev, qual);
-        return state.newApi(project).issuesByFile(sev, qual);
+        return state.newApi(project)
+                .issuesByFileByStatuses(SonarIssuesApi.ALL_STATUSES, sev, qual);
     }
 
     public List<String> fetchSnippetCached(String project, String key) throws Exception {

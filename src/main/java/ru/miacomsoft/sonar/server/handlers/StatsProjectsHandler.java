@@ -28,7 +28,7 @@ import java.util.concurrent.*;
  *   "includedTags": ["tagA"],            // опционально
  *   "excludedTags": ["tagB"],            // опционально
  *   "rules":        ["php:S116", ...],   // опционально (новая поддержка)
- *   "statuses":     "OPEN,CONFIRMED",    // опционально
+ *   "statuses":     "OPEN,CONFIRMED",    // опционально; по умолчанию ALL_STATUSES
  *   "branch":       "master"             // опционально (для ссылок на SonarQube)
  * }
  *
@@ -89,9 +89,14 @@ public class StatsProjectsHandler extends BaseHandler {
         Set<String> excludedTags  = parseSet(req.optJSONArray("excludedTags"));
         Set<String> selectedRules = parseSet(req.optJSONArray("rules"));  // NEW
 
-        String statusesParam = req.optString("statuses", SonarIssuesApi.ACTIVE_STATUSES);
+        // ИЗМЕНЕНО: было optString("statuses", SonarIssuesApi.ACTIVE_STATUSES)
+        // — сводная статистика по проектам по умолчанию не включала ACCEPTED.
+        // Теперь по умолчанию — полный набор (OPEN,CONFIRMED,REOPENED,ACCEPTED,
+        // FALSE_POSITIVE,RESOLVED,CLOSED,WONTFIX). sanitizeStatuses() внутри
+        // SonarIssuesApi сам смапит legacy → MQR и отбросит неподдерживаемые.
+        String statusesParam = req.optString("statuses", SonarIssuesApi.ALL_STATUSES);
         final String statuses = (statusesParam == null || statusesParam.isBlank())
-                ? SonarIssuesApi.ACTIVE_STATUSES
+                ? SonarIssuesApi.ALL_STATUSES
                 : statusesParam.trim();
 
         final String branch = req.optString("branch", "");

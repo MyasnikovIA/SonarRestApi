@@ -402,53 +402,28 @@ public class ReportExportService {
             throw new IllegalArgumentException("Для отчета Qual+Team HTML необходимо указать каталог сохранения.");
         }
 
+        // 1. Создаем корневую папку сразу, чтобы пользователь видел процесс
+        Files.createDirectories(targetDir);
+
         String project = ctx.getProject();
         String host = hostOf();
         SonarIssuesApi api = ctx.state().newApi(project);
-
-        // 1. Загрузка полных исходников для каждого уникального файла
-        Set<String> uniqueFiles = new HashSet<>();
-        for (Issue it : issues) uniqueFiles.add(it.component);
-
-        Map<String, String> fullSources = new HashMap<>();
-        int loadedSrc = 0;
-        for (String file : uniqueFiles) {
-            if (cancelled) throw new InterruptedException("cancelled");
-            try {
-                fullSources.put(file, api.fetchFullSource(project + ":" + file));
-            } catch (Exception e) {
-                System.err.println("[ReportExportService] Не удалось получить исходник для " + file);
-            }
-            loadedSrc++;
-            if (listener != null && loadedSrc % 10 == 0) {
-                listener.onProgress(loadedSrc, uniqueFiles.size(), "sources", "Загрузка исходников: " + loadedSrc + "/" + uniqueFiles.size());
-            }
-        }
-
-        // 2. Загрузка фрагментов кода (сниппетов) для всех issues
-        Map<String, List<String>> snippets = new HashMap<>();
-        int loadedSnip = 0;
-        for (Issue it : issues) {
-            if (cancelled) throw new InterruptedException("cancelled");
-            try {
-                List<String> s = api.fetchSnippet(it.key);
-                if (!s.isEmpty()) snippets.put(it.key, s);
-            } catch (Exception ignored) {}
-            loadedSnip++;
-            if (listener != null && loadedSnip % 10 == 0) {
-                listener.onProgress(loadedSnip, issues.size(), "snippets", "Загрузка фрагментов: " + loadedSnip + "/" + issues.size());
-            }
-        }
-
-        // 3. Запуск многопоточной генерации
-        if (listener != null) listener.onProgress(issues.size(), issues.size(), "generating", "Сохранение файлов (4 потока)…");
-
         TeamMapping mapping = TeamMapping.load();
 
+        if (listener != null) {
+            listener.onProgress(0, issues.size(), "generating", "Запуск 4 потоков генерации HTML…");
+        }
+
+        // 2. Передаем API напрямую в экспортер, который будет качать исходники и сниппеты прямо в потоках
         QualTeamHtmlExporter.writeDirectory(
-                targetDir, issues, snippets, fullSources, project, host, mapping,
+                targetDir,
+                issues,
+                api,
+                project,
+                host,
+                mapping,
                 (cur, tot, msg) -> { if (listener != null) listener.onProgress(cur, tot, "writing", msg); },
-                () -> cancelled // Передаем BooleanSupplier для корректной отмены из потоков
+                () -> cancelled
         );
 
         return targetDir;

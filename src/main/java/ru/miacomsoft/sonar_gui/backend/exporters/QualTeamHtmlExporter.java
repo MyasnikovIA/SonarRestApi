@@ -1,6 +1,7 @@
 package ru.miacomsoft.sonar_gui.backend.exporters;
 
 import ru.miacomsoft.sonar_gui.backend.Issue;
+import ru.miacomsoft.sonar_gui.backend.SonarIssuesApi;
 import ru.miacomsoft.sonar_gui.backend.TeamMapping;
 
 import java.io.IOException;
@@ -51,7 +52,7 @@ public class QualTeamHtmlExporter {
                     }
                 }
             } else if (it.severity != null) {
-                // Fallback для старых версий
+                // Fallback для старых версий SonarQube
                 int score = getSeverityScore(it.severity) * 10;
                 if (score > maxScore) {
                     maxScore = score;
@@ -87,8 +88,7 @@ public class QualTeamHtmlExporter {
 
     public static int writeDirectory(Path rootDir,
                                      List<Issue> issues,
-                                     Map<String, List<String>> issueSnippets,
-                                     Map<String, String> fullSources,
+                                     SonarIssuesApi api,
                                      String projectName, String host,
                                      TeamMapping mapping,
                                      ProgressCallback progress,
@@ -149,18 +149,33 @@ public class QualTeamHtmlExporter {
 
                     Files.createDirectories(targetDir);
 
-                    // 4. Генерируем HTML
-                    String fullSource = fullSources.getOrDefault(file, "");
+                    // 4. Загружаем исходники и сниппеты прямо в потоке (чтобы файлы появлялись сразу)
+                    String fullSource = "";
+                    try {
+                        fullSource = api.fetchFullSource(projectName + ":" + file);
+                    } catch (Exception e) {
+                        System.err.println("[QualTeamHtmlExporter] Не удалось получить исходник для " + file + ": " + e.getMessage());
+                    }
+
+                    Map<String, List<String>> snippets = new HashMap<>();
+                    for (Issue it : fileIssues) {
+                        try {
+                            List<String> s = api.fetchSnippet(it.key);
+                            if (s != null && !s.isEmpty()) snippets.put(it.key, s);
+                        } catch (Exception ignored) {}
+                    }
+
+                    // 5. Генерируем HTML
                     String html = formatHtmlFile(
-                            fileIssues, issueSnippets, projectName, host, file,
+                            fileIssues, snippets, projectName, host, file,
                             fullSource, team, module, qual, sev
                     );
 
-                    // 5. Сохраняем файл
+                    // 6. Сохраняем файл
                     String safeFileName = sanitizeFileName(file) + ".html";
                     Path targetFile = targetDir.resolve(safeFileName);
 
-                    // Ограничение длины пути для Windows
+                    // Ограничение длины пути для Windows (MAX_PATH = 260)
                     if (targetFile.toString().length() > 250) {
                         String hash = Integer.toHexString(file.hashCode());
                         safeFileName = hash + "_" + safeFileName;

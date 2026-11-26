@@ -5,6 +5,7 @@ import ru.miacomsoft.sonar_gui.common.GuiStyle;
 import ru.miacomsoft.sonar_gui.common.Reloadable;
 import ru.miacomsoft.sonar_gui.common.UiHelpers;
 import ru.miacomsoft.sonar_gui.tabs.perfile.PerFilePanel;
+import ru.miacomsoft.sonar_gui.tabs.report.ReportFilterPanel;
 import ru.miacomsoft.sonar_gui.tabs.report.ReportPanel;
 
 import javax.swing.*;
@@ -18,7 +19,8 @@ public class MainFrame extends JFrame {
     private final JLabel statusBarText;
 
     private final PerFilePanel perFilePanel;
-    private final ReportPanel  reportPanel;
+    private final ReportPanel reportPanel;
+    private final ReportFilterPanel reportFilterPanel;
 
     public MainFrame(GuiContext ctx) {
         super("Sonar GUI — Web Interface Clone");
@@ -44,10 +46,12 @@ public class MainFrame extends JFrame {
         tabs.setFont(GuiStyle.FONT_BOLD);
 
         perFilePanel = new PerFilePanel(ctx);
-        reportPanel  = new ReportPanel(ctx);
+        reportPanel = new ReportPanel(ctx);
+        reportFilterPanel = new ReportFilterPanel(ctx);
 
         tabs.addTab("  Отчет по файлам (Per-File)  ", perFilePanel);
         tabs.addTab("  Отчет (Jira/MD/TXT)  ",       reportPanel);
+        tabs.addTab("  Выгрузка отчетов  ",          reportFilterPanel);
 
         add(tabs, BorderLayout.CENTER);
 

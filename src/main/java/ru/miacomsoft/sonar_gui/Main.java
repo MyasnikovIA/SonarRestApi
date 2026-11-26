@@ -4,6 +4,7 @@ import ru.miacomsoft.sonar_gui.backend.BootstrapFiles;
 import ru.miacomsoft.sonar_gui.backend.PromptTemplate;
 import ru.miacomsoft.sonar_gui.backend.ServerState;
 import ru.miacomsoft.sonar_gui.backend.ollama.OllamaConfig;
+import ru.miacomsoft.sonar_gui.common.DarkTitleBarUtil;
 import ru.miacomsoft.sonar_gui.common.GuiContext;
 import ru.miacomsoft.sonar_gui.common.GuiStyle;
 import ru.miacomsoft.sonar_gui.frame.MainFrame;
@@ -26,27 +27,28 @@ public class Main {
         }
 
         Path sessionPath = Path.of(sessionArg).toAbsolutePath().normalize();
-        Path promptsDir  = BootstrapFiles.resolvePromptsDir();
         Path ollamaPath  = Path.of(ollamaArg).toAbsolutePath().normalize();
+        Path promptsDir  = BootstrapFiles.resolvePromptsDir();
 
-        BootstrapFiles.ensureAll(sessionPath, promptsDir);
+        // === Bootstrap: создать ВСЕ конфиги по умолчанию при первом запуске ===
+        BootstrapFiles.ensureAll(sessionPath, ollamaPath, promptsDir);
 
-        ServerState state = new ServerState(sessionPath);
-        OllamaConfig ollama = new OllamaConfig(ollamaPath);
+        ServerState  state    = new ServerState(sessionPath);
+        OllamaConfig ollama   = new OllamaConfig(ollamaPath);
         PromptTemplate template = new PromptTemplate(promptsDir);
 
         GuiContext ctx = new GuiContext(state, ollama, template, sessionPath, promptsDir);
 
         SwingUtilities.invokeLater(() -> {
             try {
-                // ВАЖНО: системный LAF (Windows/macOS) игнорирует цвета для JComboBox и JTabbedPane.
-                // Используем CrossPlatform (Metal), чтобы тёмная тема работала везде.
+                // Кросс-платформенный LAF, чтобы тёмная тема работала стабильно.
                 UIManager.setLookAndFeel(UIManager.getCrossPlatformLookAndFeelClassName());
             } catch (Exception ignored) {}
 
             GuiStyle.applyGlobalTheme();
 
             MainFrame frame = new MainFrame(ctx);
+            DarkTitleBarUtil.apply(frame);
             frame.setVisible(true);
         });
     }

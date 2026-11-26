@@ -2,9 +2,11 @@ package ru.miacomsoft.sonar_gui.frame;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
-import ru.miacomsoft.sonar_gui.backend.SessionManager;
+import ru.miacomsoft.sonar_gui.backend.jira.JiraConfig;
+import ru.miacomsoft.sonar_gui.backend.jira.SessionLoader;
 import ru.miacomsoft.sonar_gui.backend.ollama.OllamaClient;
 import ru.miacomsoft.sonar_gui.backend.ollama.OllamaConfig;
+import ru.miacomsoft.sonar_gui.common.DarkTitleBarUtil;
 import ru.miacomsoft.sonar_gui.common.GuiContext;
 import ru.miacomsoft.sonar_gui.common.GuiStyle;
 import ru.miacomsoft.sonar_gui.common.UiHelpers;
@@ -18,6 +20,20 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.Properties;
 
+/**
+ * Единое модальное окно настроек приложения.
+ *
+ * Вкладки:
+ *   1. SonarQube  — подключение к Sonar (url/auth/token/cookie).
+ *   2. Jira       — вставка текста запроса из браузера (session.txt)
+ *                    + параметры jira.properties.
+ *   3. Команды    — загрузка team_mapping.csv.
+ *   4. Ollama     — url/model/timeout/temperature + проверка.
+ *   5. Промпты    — редактор prompts/*.txt.
+ *
+ * Все изменения сохраняются на диск и применяются к работающему
+ * приложению (ServerState.reload, OllamaConfig, JiraConfig.reload).
+ */
 public class SettingsDialog extends JDialog {
 
     private final GuiContext ctx;
@@ -34,7 +50,14 @@ public class SettingsDialog extends JDialog {
     private final JLabel sqCookieStatusLbl = UiHelpers.dimLabel("");
 
     // ========== Jira ==========
-    private final JLabel jiraStatusLbl = UiHelpers.dimLabel("Файл не загружен");
+    private final JTextArea jiraSessionArea = new JTextArea(20, 100);
+    private final JTextField jiraUrlField       = UiHelpers.darkField("");
+    private final JTextField jiraIssueTypeField = UiHelpers.darkField("");
+    private final JTextField jiraProjectField   = UiHelpers.darkField("");
+    private final JTextField jiraTeamField      = UiHelpers.darkField("");
+    private final JTextField jiraAssigneeField  = UiHelpers.darkField("");
+    private final JLabel     jiraStatusLbl      = UiHelpers.dimLabel("не загружено");
+    private final JLabel     jiraSessionFileLbl = UiHelpers.dimLabel("session.txt");
 
     // ========== Team CSV ==========
     private final JLabel csvStatusLbl = UiHelpers.dimLabel("Файл не загружен");
@@ -60,7 +83,7 @@ public class SettingsDialog extends JDialog {
         this.olTestBtn = UiHelpers.secondaryButton("Проверить");
 
         setDefaultCloseOperation(DISPOSE_ON_CLOSE);
-        setSize(950, 750);
+        setSize(1000, 820);
         setLocationRelativeTo(getOwner());
 
         JPanel root = new JPanel(new BorderLayout());
@@ -72,11 +95,11 @@ public class SettingsDialog extends JDialog {
         tabs.setForeground(GuiStyle.TEXT);
         tabs.setFont(GuiStyle.FONT_BOLD);
 
-        tabs.addTab("  SonarQube  ", buildSonarQubePanel());
-        tabs.addTab("  Jira  ", buildJiraPanel());
-        tabs.addTab("  Команды (CSV)  ", buildCsvPanel());
-        tabs.addTab("  Ollama  ", buildOllamaPanel());
-        tabs.addTab("  Промпты  ", buildPromptsPanel());
+        tabs.addTab("  SonarQube  ",      buildSonarQubePanel());
+        tabs.addTab("  Jira  ",           buildJiraPanel());
+        tabs.addTab("  Команды (CSV)  ",  buildCsvPanel());
+        tabs.addTab("  Ollama  ",         buildOllamaPanel());
+        tabs.addTab("  Промпты  ",        buildPromptsPanel());
 
         root.add(tabs, BorderLayout.CENTER);
 
@@ -94,6 +117,7 @@ public class SettingsDialog extends JDialog {
         root.add(footer, BorderLayout.SOUTH);
 
         loadAll();
+        DarkTitleBarUtil.apply(this);
     }
 
     // ================================================================
@@ -162,29 +186,113 @@ public class SettingsDialog extends JDialog {
     }
 
     // ================================================================
-    // 2. Jira
+    // 2. Jira — вставка текста запроса из браузера
     // ================================================================
     private JPanel buildJiraPanel() {
-        JPanel p = new JPanel();
-        p.setLayout(new BoxLayout(p, BoxLayout.Y_AXIS));
+        JPanel p = new JPanel(new BorderLayout(0, 8));
         p.setBackground(GuiStyle.BG);
         p.setBorder(BorderFactory.createEmptyBorder(14, 14, 14, 14));
 
         JLabel desc = new JLabel(UiHelpers.wrapHtml(
-                "<html>Для работы с Jira требуется файл <b>session.txt</b>.<br>Загрузите его с локального диска. Файл будет сохранён в корне программы.</html>"));
+                "<html>Вставьте ниже текст запроса из браузера целиком "
+                        + "(DevTools → Network → правый клик по запросу → <b>Copy request headers</b> "
+                        + "или <b>Copy as cURL</b>).<br>"
+                        + "Содержимое сохраняется в <b>session.txt</b>. "
+                        + "Парсер ищет: <code>Cookie:</code>, <code>X-AUSERNAME:</code>, "
+                        + "<code>Request URL</code>.</html>"));
         desc.setForeground(GuiStyle.TEXT);
-        p.add(desc);
-        p.add(Box.createVerticalStrut(16));
+        p.add(desc, BorderLayout.NORTH);
 
-        JPanel row = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
-        row.setOpaque(false);
-        JButton loadBtn = UiHelpers.primaryButton("📂 Загрузить session.txt");
-        loadBtn.addActionListener(e -> loadJiraSession());
-        row.add(loadBtn);
-        row.add(jiraStatusLbl);
-        p.add(row);
+        jiraSessionArea.setFont(GuiStyle.FONT_MONO);
+        jiraSessionArea.setBackground(GuiStyle.BG2);
+        jiraSessionArea.setForeground(GuiStyle.TEXT);
+        jiraSessionArea.setLineWrap(false);
+        JScrollPane scroll = new JScrollPane(jiraSessionArea);
+        scroll.setBorder(BorderFactory.createLineBorder(GuiStyle.BORDER));
+        p.add(scroll, BorderLayout.CENTER);
 
+        // Нижний блок: jira.properties + кнопки
+        JPanel bottom = new JPanel();
+        bottom.setLayout(new BoxLayout(bottom, BoxLayout.Y_AXIS));
+        bottom.setOpaque(false);
+        bottom.setBorder(BorderFactory.createEmptyBorder(8, 0, 0, 0));
+
+        bottom.add(row("jira.url", jiraUrlField));
+        bottom.add(Box.createVerticalStrut(6));
+        bottom.add(row("jira.issueType", jiraIssueTypeField));
+        bottom.add(Box.createVerticalStrut(6));
+        bottom.add(row("jira.defaultProject", jiraProjectField));
+        bottom.add(Box.createVerticalStrut(6));
+        bottom.add(row("jira.team", jiraTeamField));
+        bottom.add(Box.createVerticalStrut(6));
+        bottom.add(row("jira.assignee", jiraAssigneeField));
+        bottom.add(Box.createVerticalStrut(8));
+
+        JPanel btns = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
+        btns.setOpaque(false);
+
+        JButton loadFileBtn = UiHelpers.secondaryButton("📂 Загрузить с диска");
+        loadFileBtn.addActionListener(e -> loadJiraSessionFromFile());
+        btns.add(loadFileBtn);
+
+        JButton checkBtn = UiHelpers.secondaryButton("🔍 Проверить");
+        checkBtn.addActionListener(e -> updateJiraStatus());
+        btns.add(checkBtn);
+
+        JButton saveNowBtn = UiHelpers.primaryButton("💾 Сохранить session.txt сейчас");
+        saveNowBtn.addActionListener(e -> saveJiraSessionToFile());
+        btns.add(saveNowBtn);
+
+        btns.add(jiraStatusLbl);
+        btns.add(jiraSessionFileLbl);
+        bottom.add(btns);
+
+        p.add(bottom, BorderLayout.SOUTH);
         return p;
+    }
+
+    private void loadJiraSessionFromFile() {
+        JFileChooser chooser = new JFileChooser();
+        chooser.setDialogTitle("Выберите session.txt");
+        if (chooser.showOpenDialog(this) == JFileChooser.APPROVE_OPTION) {
+            try {
+                String content = Files.readString(
+                        chooser.getSelectedFile().toPath(), StandardCharsets.UTF_8);
+                jiraSessionArea.setText(content);
+                jiraSessionArea.setCaretPosition(0);
+                updateJiraStatus();
+            } catch (Exception e) {
+                UiHelpers.showError(this, "Ошибка чтения: " + e.getMessage());
+            }
+        }
+    }
+
+    private void saveJiraSessionToFile() {
+        try {
+            Path target = Path.of("session.txt").toAbsolutePath();
+            Files.writeString(target, jiraSessionArea.getText(), StandardCharsets.UTF_8);
+            jiraStatusLbl.setText("✓ session.txt сохранён");
+            jiraStatusLbl.setForeground(GuiStyle.OK);
+            updateJiraStatus();
+        } catch (Exception e) {
+            UiHelpers.showError(this, "Ошибка сохранения session.txt: " + e.getMessage());
+        }
+    }
+
+    private void updateJiraStatus() {
+        try {
+            // сохраняем текст в файл, чтобы SessionLoader прочитал актуальное
+            Path target = Path.of("session.txt").toAbsolutePath();
+            Files.writeString(target, jiraSessionArea.getText(), StandardCharsets.UTF_8);
+            SessionLoader.SessionInfo info = SessionLoader.loadDefault();
+            String u = info.username() == null ? "?" : info.username();
+            String b = info.baseUrl() == null ? "?" : info.baseUrl();
+            jiraStatusLbl.setText("✓ " + u + " @ " + b);
+            jiraStatusLbl.setForeground(GuiStyle.OK);
+        } catch (Exception e) {
+            jiraStatusLbl.setText("⚠ " + e.getMessage());
+            jiraStatusLbl.setForeground(GuiStyle.WARN);
+        }
     }
 
     // ================================================================
@@ -197,7 +305,9 @@ public class SettingsDialog extends JDialog {
         p.setBorder(BorderFactory.createEmptyBorder(14, 14, 14, 14));
 
         JLabel desc = new JLabel(UiHelpers.wrapHtml(
-                "<html>Файл <b>team_mapping.csv</b> используется для привязки файлов к командам и модулям.<br>Загрузите его с локального диска. Файл будет сохранён в корне программы.</html>"));
+                "<html>Файл <b>team_mapping.csv</b> используется для привязки файлов к командам "
+                        + "и модулям.<br>Загрузите с локального диска — файл будет сохранён в корне программы "
+                        + "под именем <code>team_mapping.csv</code>.</html>"));
         desc.setForeground(GuiStyle.TEXT);
         p.add(desc);
         p.add(Box.createVerticalStrut(16));
@@ -213,9 +323,22 @@ public class SettingsDialog extends JDialog {
         return p;
     }
 
-    // ================================================================
-    // Заглушки для вкладок Ollama и Промпты (будут реализованы в части 2)
-    // ================================================================
+    private void loadTeamMappingCsv() {
+        JFileChooser chooser = new JFileChooser();
+        chooser.setDialogTitle("Выберите team_mapping.csv");
+        if (chooser.showOpenDialog(this) == JFileChooser.APPROVE_OPTION) {
+            try {
+                Path target = Path.of("team_mapping.csv").toAbsolutePath();
+                Files.copy(chooser.getSelectedFile().toPath(), target,
+                        StandardCopyOption.REPLACE_EXISTING);
+                csvStatusLbl.setText("✓ Загружен");
+                csvStatusLbl.setForeground(GuiStyle.OK);
+            } catch (Exception e) {
+                UiHelpers.showError(this, "Ошибка загрузки team_mapping.csv: " + e.getMessage());
+            }
+        }
+    }
+
     // ================================================================
     // 4. Ollama
     // ================================================================
@@ -253,7 +376,6 @@ public class SettingsDialog extends JDialog {
         return p;
     }
 
-
     private void testAndLoadOllamaModels() {
         String url = olUrlField.getText().trim();
         if (url.isEmpty()) {
@@ -267,7 +389,6 @@ public class SettingsDialog extends JDialog {
 
         new SwingWorker<JSONArray, Void>() {
             @Override protected JSONArray doInBackground() throws Exception {
-                // Временный конфиг для проверки
                 OllamaConfig tmp = new OllamaConfig(ctx.ollamaConfig().getConfigFile());
                 tmp.setUrl(url);
                 OllamaClient client = new OllamaClient(tmp);
@@ -298,19 +419,20 @@ public class SettingsDialog extends JDialog {
         }.execute();
     }
 
-
+    // ================================================================
+    // 5. Промпты
+    // ================================================================
     private JPanel buildPromptsPanel() {
         JPanel p = new JPanel(new BorderLayout(10, 10));
         p.setBackground(GuiStyle.BG);
         p.setBorder(BorderFactory.createEmptyBorder(14, 14, 14, 14));
 
-        // Левая панель - список файлов
+        // Левая панель — список файлов
         JPanel leftPanel = new JPanel(new BorderLayout(0, 8));
         leftPanel.setOpaque(false);
-        leftPanel.setPreferredSize(new Dimension(200, 0));
+        leftPanel.setPreferredSize(new Dimension(220, 0));
 
-        JLabel listLabel = UiHelpers.dimLabel("Доступные промпты:");
-        leftPanel.add(listLabel, BorderLayout.NORTH);
+        leftPanel.add(UiHelpers.dimLabel("Доступные промпты:"), BorderLayout.NORTH);
 
         promptsList.setBackground(GuiStyle.BG2);
         promptsList.setForeground(GuiStyle.TEXT);
@@ -331,10 +453,9 @@ public class SettingsDialog extends JDialog {
         btnPanel.add(deleteBtn);
 
         leftPanel.add(btnPanel, BorderLayout.SOUTH);
-
         p.add(leftPanel, BorderLayout.WEST);
 
-        // Правая панель - редактор
+        // Правая панель — редактор
         JPanel rightPanel = new JPanel(new BorderLayout(0, 8));
         rightPanel.setOpaque(false);
 
@@ -353,23 +474,20 @@ public class SettingsDialog extends JDialog {
         editorScroll.setBorder(BorderFactory.createLineBorder(GuiStyle.BORDER));
         rightPanel.add(editorScroll, BorderLayout.CENTER);
 
+        JPanel bottomPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 0, 0));
+        bottomPanel.setOpaque(false);
         JButton savePromptBtn = UiHelpers.primaryButton("💾 Сохранить текущий промпт");
         savePromptBtn.addActionListener(e -> {
             saveCurrentPrompt();
             UiHelpers.showToast(this, "Промпт сохранён", false);
         });
-        JPanel bottomPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 0, 0));
-        bottomPanel.setOpaque(false);
         bottomPanel.add(savePromptBtn);
         rightPanel.add(bottomPanel, BorderLayout.SOUTH);
 
         p.add(rightPanel, BorderLayout.CENTER);
 
-        // Обработчик выбора файла в списке
         promptsList.addListSelectionListener(e -> {
-            if (!e.getValueIsAdjusting()) {
-                loadSelectedPrompt();
-            }
+            if (!e.getValueIsAdjusting()) loadSelectedPrompt();
         });
 
         return p;
@@ -405,7 +523,8 @@ public class SettingsDialog extends JDialog {
             Path file = ctx.promptsDir().resolve(fileName);
             try {
                 if (!Files.exists(file)) {
-                    Files.writeString(file, "Текст промпта по умолчанию...", StandardCharsets.UTF_8);
+                    Files.writeString(file, "Текст промпта по умолчанию...",
+                            StandardCharsets.UTF_8);
                     refreshPromptsList();
                     promptsList.setSelectedValue(fileName, true);
                 } else {
@@ -440,7 +559,7 @@ public class SettingsDialog extends JDialog {
     }
 
     // ================================================================
-    // Вспомогательные методы (загрузка / сохранение)
+    // Общие утилиты
     // ================================================================
     private JPanel row(String label, JComponent field) {
         JPanel p = new JPanel(new BorderLayout(8, 0));
@@ -452,38 +571,19 @@ public class SettingsDialog extends JDialog {
         return p;
     }
 
-    private void loadJiraSession() {
-        JFileChooser chooser = new JFileChooser();
-        chooser.setDialogTitle("Выберите session.txt");
-        if (chooser.showOpenDialog(this) == JFileChooser.APPROVE_OPTION) {
-            try {
-                Path target = Path.of("session.txt").toAbsolutePath();
-                Files.copy(chooser.getSelectedFile().toPath(), target, StandardCopyOption.REPLACE_EXISTING);
-                jiraStatusLbl.setText("✓ Загружен");
-                jiraStatusLbl.setForeground(GuiStyle.OK);
-            } catch (Exception e) {
-                UiHelpers.showError(this, "Ошибка загрузки session.txt: " + e.getMessage());
-            }
-        }
-    }
-
-    private void loadTeamMappingCsv() {
-        JFileChooser chooser = new JFileChooser();
-        chooser.setDialogTitle("Выберите team_mapping.csv");
-        if (chooser.showOpenDialog(this) == JFileChooser.APPROVE_OPTION) {
-            try {
-                Path target = Path.of("team_mapping.csv").toAbsolutePath();
-                Files.copy(chooser.getSelectedFile().toPath(), target, StandardCopyOption.REPLACE_EXISTING);
-                csvStatusLbl.setText("✓ Загружен");
-                csvStatusLbl.setForeground(GuiStyle.OK);
-            } catch (Exception e) {
-                UiHelpers.showError(this, "Ошибка загрузки team_mapping.csv: " + e.getMessage());
-            }
-        }
-    }
-
+    // ================================================================
+    // Загрузка / сохранение всего
+    // ================================================================
     private void loadAll() {
-        // SonarQube
+        loadSonar();
+        loadJiraSession();
+        loadJiraConfig();
+        loadCsvStatus();
+        loadOllama();
+        refreshPromptsList();
+    }
+
+    private void loadSonar() {
         Path file = ctx.sessionFile();
         if (file != null && Files.exists(file)) {
             try {
@@ -493,24 +593,43 @@ public class SettingsDialog extends JDialog {
                 sqUserField.setText(p.getProperty("sonar.user", ""));
                 String auth = p.getProperty("sonar.auth", "bearer");
                 sqAuthCombo.setSelectedItem(auth);
-                sqTokenStatusLbl.setText(p.getProperty("sonar.token", "").isBlank() ? "— не задан" : "✓ установлен");
-                sqCookieStatusLbl.setText(p.getProperty("sonar.cookie", "").isBlank() ? "— не задан" : "✓ установлен");
+                sqTokenStatusLbl.setText(p.getProperty("sonar.token", "").isBlank()
+                        ? "— не задан" : "✓ установлен");
+                sqCookieStatusLbl.setText(p.getProperty("sonar.cookie", "").isBlank()
+                        ? "— не задан" : "✓ установлен");
             } catch (Exception ignored) {}
         }
+    }
 
-        // Jira
-        if (Files.exists(Path.of("session.txt"))) {
-            jiraStatusLbl.setText("✓ Файл найден");
-            jiraStatusLbl.setForeground(GuiStyle.OK);
+    private void loadJiraSession() {
+        Path sTxt = Path.of("session.txt").toAbsolutePath();
+        jiraSessionFileLbl.setText(sTxt.getFileName().toString());
+        if (Files.exists(sTxt)) {
+            try {
+                jiraSessionArea.setText(Files.readString(sTxt, StandardCharsets.UTF_8));
+                jiraSessionArea.setCaretPosition(0);
+                updateJiraStatus();
+            } catch (Exception ignored) {}
         }
+    }
 
-        // CSV
+    private void loadJiraConfig() {
+        JiraConfig jcfg = JiraConfig.getInstance();
+        jiraUrlField.setText(jcfg.baseUrl());
+        jiraIssueTypeField.setText(jcfg.issueType());
+        jiraProjectField.setText(jcfg.defaultProject());
+        jiraTeamField.setText(jcfg.team());
+        jiraAssigneeField.setText(jcfg.assignee());
+    }
+
+    private void loadCsvStatus() {
         if (Files.exists(Path.of("team_mapping.csv"))) {
             csvStatusLbl.setText("✓ Файл найден");
             csvStatusLbl.setForeground(GuiStyle.OK);
         }
+    }
 
-        // Ollama
+    private void loadOllama() {
         OllamaConfig cfg = ctx.ollamaConfig();
         olUrlField.setText(cfg.getUrl());
         olTimeoutSpinner.setValue(cfg.getTimeoutSeconds());
@@ -519,13 +638,21 @@ public class SettingsDialog extends JDialog {
             olModelCombo.addItem(cfg.getModel());
             olModelCombo.setSelectedItem(cfg.getModel());
         }
-
-        // Prompts
-        refreshPromptsList();
     }
 
     private void saveAll() {
-        // --- 1. SonarQube ---
+        if (!saveSonar()) return;
+        saveJiraSessionToFile();
+        saveJiraConfig();
+        saveOllama();
+        saveCurrentPrompt();
+
+        UiHelpers.showToast(this, "Настройки сохранены", false);
+        if (onSaved != null) onSaved.run();
+        dispose();
+    }
+
+    private boolean saveSonar() {
         String url = sqUrlField.getText().trim();
         String user = sqUserField.getText().trim();
         String auth = (String) sqAuthCombo.getSelectedItem();
@@ -534,7 +661,7 @@ public class SettingsDialog extends JDialog {
 
         if (url.isEmpty()) {
             UiHelpers.showError(this, "Укажите sonar.url");
-            return;
+            return false;
         }
         if (!url.matches("^https?://.*")) url = "https://" + url;
 
@@ -557,12 +684,32 @@ public class SettingsDialog extends JDialog {
                 ctx.state().update(sb.toString());
                 ctx.state().reload();
             }
+            return true;
         } catch (Exception e) {
             UiHelpers.showError(this, "Ошибка сохранения SonarQube: " + e.getMessage());
-            return;
+            return false;
         }
+    }
 
-        // --- 2. Ollama ---
+    private void saveJiraConfig() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("# jira.properties\n");
+        sb.append("jira.url=").append(jiraUrlField.getText().trim()).append('\n');
+        sb.append("jira.session=session.txt\n");
+        sb.append("jira.issueType=").append(jiraIssueTypeField.getText().trim()).append('\n');
+        sb.append("jira.defaultProject=").append(jiraProjectField.getText().trim()).append('\n');
+        sb.append("jira.team=").append(jiraTeamField.getText().trim()).append('\n');
+        sb.append("jira.assignee=").append(jiraAssigneeField.getText().trim()).append('\n');
+        try {
+            Files.writeString(Path.of("jira.properties"), sb.toString(),
+                    StandardCharsets.UTF_8);
+            JiraConfig.getInstance().reload();
+        } catch (Exception e) {
+            System.err.println("[SettingsDialog] jira.properties: " + e.getMessage());
+        }
+    }
+
+    private void saveOllama() {
         OllamaConfig cfg = ctx.ollamaConfig();
         cfg.setUrl(olUrlField.getText().trim());
         Object m = olModelCombo.getSelectedItem();
@@ -570,13 +717,6 @@ public class SettingsDialog extends JDialog {
         cfg.setTimeoutSeconds((Integer) olTimeoutSpinner.getValue());
         cfg.setTemperature(((Number) olTempSpinner.getValue()).doubleValue());
         cfg.save();
-
-        // --- 3. Prompts (сохранение текущего открытого) ---
-        saveCurrentPrompt();
-
-        UiHelpers.showToast(this, "Настройки сохранены", false);
-        if (onSaved != null) onSaved.run();
-        dispose();
     }
 
     private void refreshPromptsList() {

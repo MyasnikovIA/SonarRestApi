@@ -4,15 +4,51 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
-/** Копия ru.miacomsoft.sonar.server.BootstrapFiles. */
+/**
+ * Создание конфигурационных файлов при первом запуске.
+ *
+ * Создаются (если отсутствуют):
+ *   - session.properties  (SonarQube)
+ *   - ollama.properties   (LLM)
+ *   - jira.properties     (Jira)
+ *   - session.txt         (Cookies Jira)
+ *   - team_mapping.csv    (Команды/Модули)
+ *   - prompts/*.txt       (4 шаблона промптов)
+ *
+ * Существующие файлы никогда не перезаписываются.
+ */
 public final class BootstrapFiles {
 
     private BootstrapFiles() {}
 
-    public static void ensureAll(Path sessionFile, Path promptsDir) {
+    // ============================================================
+    // Публичное API
+    // ============================================================
+
+    /**
+     * Полный bootstrap. Вызывается из Main один раз при старте.
+     *
+     * @param sessionFile абсолютный путь к session.properties (SonarQube)
+     * @param ollamaFile  абсолютный путь к ollama.properties
+     * @param promptsDir  каталог prompts/
+     */
+    public static void ensureAll(Path sessionFile, Path ollamaFile, Path promptsDir) {
         ensureSession(sessionFile);
+        ensureOllama(ollamaFile);
+        ensureJira();
+        ensureTeamMapping();
+        ensureSessionTxt();
         ensurePrompts(promptsDir);
     }
+
+    /** Обратная совместимость: старый вызов без ollamaFile. */
+    public static void ensureAll(Path sessionFile, Path promptsDir) {
+        ensureAll(sessionFile, Path.of("ollama.properties"), promptsDir);
+    }
+
+    // ============================================================
+    // SonarQube
+    // ============================================================
 
     public static void ensureSession(Path sessionFile) {
         if (sessionFile == null) return;
@@ -23,12 +59,62 @@ public final class BootstrapFiles {
             Files.writeString(sessionFile, Defaults.SESSION_PROPERTIES_TEMPLATE,
                     StandardCharsets.UTF_8);
             System.out.println("[Bootstrap] Создан " + sessionFile.toAbsolutePath()
-                    + " — заполните sonar.url/sonar.token.");
+                    + " — заполните sonar.url/sonar.token через меню «Файл → Настройки…».");
         } catch (Exception e) {
             System.err.println("[Bootstrap] не удалось создать " + sessionFile
                     + ": " + e.getMessage());
         }
     }
+
+    // ============================================================
+    // Ollama
+    // ============================================================
+
+    public static void ensureOllama(Path ollamaFile) {
+        if (ollamaFile == null) return;
+        try {
+            if (Files.exists(ollamaFile)) return;
+            Path parent = ollamaFile.toAbsolutePath().getParent();
+            if (parent != null) Files.createDirectories(parent);
+            Files.writeString(ollamaFile, Defaults.OLLAMA_PROPERTIES_TEMPLATE,
+                    StandardCharsets.UTF_8);
+            System.out.println("[Bootstrap] Создан " + ollamaFile.toAbsolutePath()
+                    + " — укажите url/model через меню «Файл → Настройки…».");
+        } catch (Exception e) {
+            System.err.println("[Bootstrap] не удалось создать " + ollamaFile
+                    + ": " + e.getMessage());
+        }
+    }
+
+    // ============================================================
+    // Jira
+    // ============================================================
+
+    public static void ensureJira() {
+        createIfMissing(Path.of("jira.properties"),
+                Defaults.JIRA_PROPERTIES_TEMPLATE,
+                "jira.properties");
+    }
+
+    public static void ensureSessionTxt() {
+        createIfMissing(Path.of("session.txt"),
+                Defaults.SESSION_TXT_TEMPLATE,
+                "session.txt");
+    }
+
+    // ============================================================
+    // Команды (CSV)
+    // ============================================================
+
+    public static void ensureTeamMapping() {
+        createIfMissing(Path.of("team_mapping.csv"),
+                Defaults.TEAM_MAPPING_CSV_TEMPLATE,
+                "team_mapping.csv");
+    }
+
+    // ============================================================
+    // Prompts
+    // ============================================================
 
     public static void ensurePrompts(Path promptsDir) {
         if (promptsDir == null) return;
@@ -48,6 +134,24 @@ public final class BootstrapFiles {
             System.out.println("[Bootstrap] created " + file.toAbsolutePath());
         } catch (Exception e) {
             System.err.println("[Bootstrap] " + name + ".txt: " + e.getMessage());
+        }
+    }
+
+    // ============================================================
+    // Утилиты
+    // ============================================================
+
+    private static void createIfMissing(Path file, String template, String label) {
+        try {
+            Path abs = file.toAbsolutePath().normalize();
+            if (Files.exists(abs)) return;
+            Path parent = abs.getParent();
+            if (parent != null) Files.createDirectories(parent);
+            Files.writeString(abs, template, StandardCharsets.UTF_8);
+            System.out.println("[Bootstrap] создан " + label + " → " + abs);
+        } catch (Exception e) {
+            System.err.println("[Bootstrap] не удалось создать " + label + ": "
+                    + e.getMessage());
         }
     }
 

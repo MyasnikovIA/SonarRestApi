@@ -72,8 +72,7 @@ public class MainFrame extends JFrame {
         JMenuBar bar = new JMenuBar();
 
         JMenu file = new JMenu("Файл");
-        file.add(menuItem("Настройки SonarQube…", this::openSessionDialog));
-        file.add(menuItem("Настройки Ollama…",    this::openOllamaDialog));
+        file.add(menuItem("Настройки…", this::openSettings));
         file.addSeparator();
         file.add(menuItem("Перезагрузить сессию", this::reloadSession));
         file.addSeparator();
@@ -97,25 +96,26 @@ public class MainFrame extends JFrame {
         return item;
     }
 
-    private void openSessionDialog() {
-        new SessionDialog(ctx, () -> {
-            setStatusText("session.properties обновлён");
+    /**
+     * Единое окно настроек: SonarQube / Jira / CSV / Ollama / Промпты.
+     * После сохранения перезагружает активную вкладку.
+     */
+    private void openSettings() {
+        new SettingsDialog(ctx, () -> {
+            setStatusText("Настройки применены");
             reloadActiveTab();
         }).setVisible(true);
-    }
-
-    private void openOllamaDialog() {
-        new OllamaSettingsDialog(ctx, () ->
-                setStatusText("настройки Ollama обновлены")).setVisible(true);
     }
 
     private void reloadSession() {
         try {
             ctx.state().reload();
-            UiHelpers.showToast(this, "Сессия перезагружена", false);
+            ctx.ollamaConfig().reload();
+            ru.miacomsoft.sonar_gui.backend.jira.JiraConfig.getInstance().reload();
+            UiHelpers.showToast(this, "Конфигурация перезагружена", false);
             reloadActiveTab();
         } catch (Exception e) {
-            UiHelpers.showError(this, "Ошибка перезагрузки сессии: " + e.getMessage());
+            UiHelpers.showError(this, "Ошибка перезагрузки: " + e.getMessage());
         }
     }
 

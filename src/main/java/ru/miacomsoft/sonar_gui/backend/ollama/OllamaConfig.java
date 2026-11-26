@@ -9,7 +9,12 @@ import java.util.Properties;
 
 /**
  * Персистентная конфигурация Ollama (файл ollama.properties).
- * Копия ru.miacomsoft.sonar.server.OllamaConfig.
+ *
+ * Поддерживает:
+ *   - загрузку из файла при старте (конструктор);
+ *   - reload() — перечитывание файла без пересоздания объекта
+ *     (используется в MainFrame при смене настроек);
+ *   - save() — запись в файл (вызывается из SettingsDialog).
  */
 public class OllamaConfig {
 
@@ -29,9 +34,18 @@ public class OllamaConfig {
         load();
     }
 
+    /**
+     * Перечитывает файл ollama.properties. Вызывается из меню
+     * «Файл → Перезагрузить сессию», чтобы применить ручные правки
+     * файла без перезапуска приложения.
+     */
+    public synchronized void reload() {
+        load();
+    }
+
     private void load() {
         Properties p = new Properties();
-        if (Files.exists(configFile)) {
+        if (configFile != null && Files.exists(configFile)) {
             try (InputStream in = Files.newInputStream(configFile)) {
                 p.load(in);
             } catch (IOException e) {
@@ -46,12 +60,13 @@ public class OllamaConfig {
 
     public void save() {
         Properties p = new Properties();
-        p.setProperty("url",         url);
-        p.setProperty("model",       model);
+        p.setProperty("url",         url == null ? "" : url);
+        p.setProperty("model",       model == null ? "" : model);
         p.setProperty("timeout",     String.valueOf(timeoutSeconds));
         p.setProperty("temperature", String.valueOf(temperature));
         try {
-            Path parent = configFile.getParent();
+            if (configFile == null) return;
+            Path parent = configFile.toAbsolutePath().getParent();
             if (parent != null) Files.createDirectories(parent);
             try (OutputStream out = Files.newOutputStream(configFile)) {
                 p.store(out, "Ollama configuration");
@@ -65,11 +80,11 @@ public class OllamaConfig {
         return url != null && !url.isBlank() && model != null && !model.isBlank();
     }
 
-    public Path getConfigFile() { return configFile; }
-    public String  getUrl()          { return url; }
-    public String  getModel()        { return model; }
-    public int     getTimeoutSeconds() { return timeoutSeconds; }
-    public double  getTemperature()  { return temperature; }
+    public Path   getConfigFile()     { return configFile; }
+    public String getUrl()            { return url; }
+    public String getModel()          { return model; }
+    public int    getTimeoutSeconds() { return timeoutSeconds; }
+    public double getTemperature()    { return temperature; }
 
     public void setUrl(String url)       { this.url = url; }
     public void setModel(String model)   { this.model = model; }

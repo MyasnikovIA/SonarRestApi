@@ -17,9 +17,6 @@ import java.awt.event.MouseEvent;
 import java.util.ArrayList;
 import java.util.List;
 
-/**
- * Вкладка «Отчет по файлам» — аналог web/tabs/perfile.
- */
 public class PerFilePanel extends JPanel implements Reloadable {
 
     private static final int PAGE_SIZE = 100;
@@ -131,14 +128,11 @@ public class PerFilePanel extends JPanel implements Reloadable {
 
         add(pageBar, BorderLayout.SOUTH);
 
-        // ---------- listeners ----------
         ctx.onProjectChanged(c -> { page = 1; reload(); });
         ctx.onFiltersChanged(c -> { page = 1; reload(); });
 
         reload();
     }
-
-    // ============ RELOAD ============
 
     @Override
     public void reload() {
@@ -209,8 +203,6 @@ public class PerFilePanel extends JPanel implements Reloadable {
         cardsContainer.repaint();
     }
 
-    // ============ selection ============
-
     private List<IssueService.IssueDto> collectSelected() {
         List<IssueService.IssueDto> out = new ArrayList<>();
         for (PerFileCard c : cards) out.addAll(c.getSelectedIssues());
@@ -222,8 +214,6 @@ public class PerFilePanel extends JPanel implements Reloadable {
         bulkButton.setVisible(n > 0);
         bulkButton.setText("Действия с выбранными (" + n + ")");
     }
-
-    // ============ actions ============
 
     private void openIssueDialog(IssueService.IssueDto issue) {
         new PerFileIssueDialog(ctx, issue, this::reload).setVisible(true);
@@ -290,7 +280,7 @@ public class PerFilePanel extends JPanel implements Reloadable {
         new SwingWorker<int[], Void>() {
             @Override protected int[] doInBackground() {
                 int ok = 0, fail = 0;
-                MarkService markService = new MarkService(ctx.api());
+                MarkService markService = new MarkService(ctx); // ← БЫЛО: new MarkService(ctx.api())
                 for (IssueService.IssueDto it : reopenable) {
                     try {
                         String transition = "CONFIRMED".equals(it.status())
@@ -333,8 +323,6 @@ public class PerFilePanel extends JPanel implements Reloadable {
         cardsContainer.revalidate();
         cardsContainer.repaint();
     }
-
-    // ============ UI helpers ============
 
     private JLabel emptyLabel(String text) {
         JLabel l = new JLabel(UiHelpers.wrapHtml(text), SwingConstants.CENTER);

@@ -14,7 +14,6 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 
-/** Редактор тегов для вкладки Report. */
 public class ReportTagsDialog extends JDialog {
 
     private final GuiContext ctx;
@@ -89,7 +88,7 @@ public class ReportTagsDialog extends JDialog {
     private void loadTags() {
         new SwingWorker<List<String>, Void>() {
             @Override protected List<String> doInBackground() throws Exception {
-                return new TagsService(ctx.api()).fetchTags(ctx.getProject());
+                return new TagsService(ctx).fetchTags(ctx.getProject());
             }
             @Override protected void done() {
                 try {
@@ -138,7 +137,7 @@ public class ReportTagsDialog extends JDialog {
         new SwingWorker<int[], Void>() {
             @Override protected int[] doInBackground() {
                 int ok = 0, fail = 0;
-                SetTagsService setTags = new SetTagsService(ctx.api());
+                SetTagsService setTags = new SetTagsService(ctx);
                 for (IssueService.IssueDto it : issues) {
                     try {
                         setTags.setTags(ctx.getProject(), it.key(), tags);
@@ -159,7 +158,8 @@ public class ReportTagsDialog extends JDialog {
                     dispose();
                     if (onDone != null) onDone.run();
                 } catch (Exception e) {
-                    UiHelpers.showError(ReportTagsDialog.this, "Ошибка: " + e.getMessage());
+                    UiHelpers.showError(ReportTagsDialog.this,
+                            "Ошибка: " + e.getMessage());
                 }
             }
         }.execute();

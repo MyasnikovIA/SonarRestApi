@@ -1,46 +1,43 @@
 package ru.miacomsoft.sonar_gui.common.services;
 
-import org.json.JSONArray;
 import org.json.JSONObject;
-import ru.miacomsoft.sonar_gui.client.SonarApiClient;
+import ru.miacomsoft.sonar_gui.backend.Issue;
+import ru.miacomsoft.sonar_gui.backend.SonarIssuesApi;
+import ru.miacomsoft.sonar_gui.common.GuiContext;
 
 import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Обёртка над GET /api/snippet.
- *
- * Возвращает данные issue, её ruleName и фрагмент кода
- * в виде списка строк (с маркерами §HL_START§/§HL_END§).
+ * Данные issue + ruleName + snippet — напрямую через SonarIssuesApi.
  */
 public class SnippetService {
 
     public record SnippetResult(JSONObject issue, String ruleName, List<String> snippet) {}
 
-    private final SonarApiClient api;
+    private final GuiContext ctx;
 
-    public SnippetService(SonarApiClient api) {
-        this.api = api;
+    public SnippetService(GuiContext ctx) {
+        this.ctx = ctx;
     }
 
     public SnippetResult fetchSnippet(String projectKey, String issueKey) throws Exception {
-        StringBuilder url = new StringBuilder("/api/snippet?");
-        if (projectKey != null && !projectKey.isBlank()) {
-            url.append("project=").append(SonarApiClient.enc(projectKey)).append('&');
-        }
-        url.append("issueKey=").append(SonarApiClient.enc(issueKey));
+        if (!ctx.isSessionReady()) throw new IllegalStateException("Сессия SonarQube не готова");
 
-        JSONObject root = api.getJson(url.toString());
-        JSONObject issue = root.optJSONObject("issue");
-        String ruleName = root.optString("ruleName", "");
-
-        JSONArray arr = root.optJSONArray("snippet");
-        List<String> snippet = new ArrayList<>();
-        if (arr != null) {
-            for (int i = 0; i < arr.length(); i++) {
-                snippet.add(arr.optString(i, ""));
-            }
+        SonarIssuesApi api = ctx.state().newApi(projectKey);
+        Issue issue = api.fetchIssue(issueKey);
+        if (issue == null) {
+            return new SnippetResult(new JSONObject(), "", List.of());
         }
-        return new SnippetResult(issue, ruleName, snippet);
+
+        String ruleName = "";
+        try { ruleName = api.fetchRuleName(issue.rule); }
+        catch (Exception ignored) {}
+
+        List<String> snippet;
+        try { snippet = api.fetchSnippet(issueKey); }
+        catch (Exception e) { snippet = new ArrayList<>(); }
+
+        return new SnippetResult(issue.toJson(), ruleName, snippet);
     }
 }

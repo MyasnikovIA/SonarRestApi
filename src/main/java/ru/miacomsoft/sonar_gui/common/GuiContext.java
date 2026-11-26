@@ -1,35 +1,85 @@
 package ru.miacomsoft.sonar_gui.common;
 
+import ru.miacomsoft.sonar_gui.backend.ServerState;
+import ru.miacomsoft.sonar_gui.backend.PromptTemplate;
+import ru.miacomsoft.sonar_gui.backend.ollama.OllamaConfig;
 import ru.miacomsoft.sonar_gui.client.SonarApiClient;
 
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Consumer;
 
 /**
- * Общий контекст GUI: единственный клиент к Sonar REST API,
- * текущие project/sev/qual/hideProcessed и подписчики на их изменения.
- * Аналог state + ctx из web/app.js.
+ * Общий контекст GUI.
+ *
+ * Держит:
+ *   - ServerState (SessionManager + SonarClient) — прямой доступ к SonarQube;
+ *   - OllamaConfig — настройки LLM;
+ *   - PromptTemplate — каталог prompts/*.txt;
+ *   - project / sev / qual / hideProcessed — состояние верхней панели.
+ *
+ * Не содержит HTTP-клиента к промежуточному серверу (6060) — все запросы
+ * к SonarQube идут напрямую. Метод {@link #api()} сохранён временно
+ * для совместимости с ReportExportService/Dialog (переделываются в части 9).
  */
 public class GuiContext {
 
-    private final SonarApiClient api;
+    private final ServerState state;
+    private final OllamaConfig ollamaConfig;
+    private final PromptTemplate template;
+    private final Path sessionFile;
+    private final Path promptsDir;
 
     private String project        = "";
     private String severity       = "MEDIUM";
     private String quality        = "MAINTAINABILITY";
     private boolean hideProcessed = true;
 
-    private final List<Consumer<GuiContext>> projectListeners  = new ArrayList<>();
-    private final List<Consumer<GuiContext>> filtersListeners  = new ArrayList<>();
+    private final List<Consumer<GuiContext>> projectListeners = new ArrayList<>();
+    private final List<Consumer<GuiContext>> filtersListeners = new ArrayList<>();
 
-    public GuiContext(String baseUrl) {
-        this.api = new SonarApiClient(baseUrl);
+    /** @deprecated временно — до переработки ReportExportService в части 9. */
+    @Deprecated
+    private volatile SonarApiClient legacyApi;
+
+    public GuiContext(ServerState state, OllamaConfig ollamaConfig,
+                      PromptTemplate template,
+                      Path sessionFile, Path promptsDir) {
+        this.state = state;
+        this.ollamaConfig = ollamaConfig;
+        this.template = template;
+        this.sessionFile = sessionFile;
+        this.promptsDir = promptsDir;
     }
 
-    // ============ getters ============
+    // ============ backend access ============
 
-    public SonarApiClient api()      { return api; }
+    public ServerState    state()        { return state; }
+    public OllamaConfig   ollamaConfig() { return ollamaConfig; }
+    public PromptTemplate template()     { return template; }
+    public Path           sessionFile()  { return sessionFile; }
+    public Path           promptsDir()   { return promptsDir; }
+
+    public boolean isSessionReady() {
+        return state != null && state.isSessionReady();
+    }
+
+    /** @deprecated использовать state().newApi(project) / state().newBulk(). */
+    @Deprecated
+    public SonarApiClient api() {
+        if (legacyApi == null) {
+            synchronized (this) {
+                if (legacyApi == null) {
+                    legacyApi = new SonarApiClient("http://localhost:6060");
+                }
+            }
+        }
+        return legacyApi;
+    }
+
+    // ============ state ============
+
     public String  getProject()      { return project; }
     public String  getSeverity()     { return severity; }
     public String  getQuality()      { return quality; }
@@ -38,8 +88,6 @@ public class GuiContext {
     public boolean hasProject() {
         return project != null && !project.isBlank();
     }
-
-    // ============ setters ============
 
     public void setProject(String p) {
         String v = (p == null) ? "" : p.trim();
@@ -70,27 +118,29 @@ public class GuiContext {
 
     // ============ listeners ============
 
-    public void onProjectChanged(Consumer<GuiContext> l)  { if (l != null) projectListeners.add(l); }
-    public void onFiltersChanged(Consumer<GuiContext> l)  { if (l != null) filtersListeners.add(l); }
+    public void onProjectChanged(Consumer<GuiContext> l) { if (l != null) projectListeners.add(l); }
+    public void onFiltersChanged(Consumer<GuiContext> l) { if (l != null) filtersListeners.add(l); }
 
     private void fire(List<Consumer<GuiContext>> list) {
         for (Consumer<GuiContext> l : list) {
-            try { l.accept(this); } catch (Exception ignored) { /* UI callback */ }
+            try { l.accept(this); } catch (Exception ignored) { /* UI */ }
         }
     }
 
-    // ============ query helpers ============
+    // ============ helpers ============
 
-    /** Базовый набор параметров: project + sev + qual + hideProcessed. */
     public String commonQuery() {
         StringBuilder sb = new StringBuilder();
-        if (hasProject()) {
-            sb.append("project=").append(SonarApiClient.enc(project));
-        }
+        if (hasProject()) sb.append("project=").append(urlEnc(project));
         if (sb.length() > 0) sb.append('&');
-        sb.append("sev=").append(SonarApiClient.enc(severity));
-        sb.append("&qual=").append(SonarApiClient.enc(quality));
+        sb.append("sev=").append(urlEnc(severity));
+        sb.append("&qual=").append(urlEnc(quality));
         sb.append("&hideProcessed=").append(hideProcessed);
         return sb.toString();
+    }
+
+    private static String urlEnc(String s) {
+        try { return java.net.URLEncoder.encode(s == null ? "" : s, "UTF-8"); }
+        catch (Exception e) { return s == null ? "" : s; }
     }
 }

@@ -23,24 +23,12 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 
-/**
- * Вкладка «Отчет (Jira/MD/TXT)» — аналог web/tabs/report.
- *
- * Особенности:
- *   - загружает ВСЕ issues одним запросом (ps=10000);
- *   - фильтры: status (ALL/UNPROCESSED/PROCESSED), tags, excludedTags,
- *     rules, text;
- *   - карточки по файлам с чекбоксами;
- *   - контекстное меню с экспортом (Jira/MD/TXT/Confluence/HTML/LLM/Team).
- */
 public class ReportPanel extends JPanel implements Reloadable {
 
     private static final String NO_TAGS_KEY = "__NO_TAGS__";
-    private static final String NO_TAGS_LABEL = "(Без тегов)";
 
     private final GuiContext ctx;
 
-    // top
     private final JCheckBox masterCheckbox;
     private final JComboBox<String> statusCombo;
     private final MultiSelectDropdown tagsDropdown;
@@ -52,7 +40,6 @@ public class ReportPanel extends JPanel implements Reloadable {
     private final JPanel cardsContainer;
     private final JLabel headerLabel;
 
-    // data
     private List<IssueService.IssueDto> allIssues = new ArrayList<>();
     private List<ReportFileCard> cards = new ArrayList<>();
     private String filterText = "";
@@ -64,13 +51,11 @@ public class ReportPanel extends JPanel implements Reloadable {
         setLayout(new BorderLayout());
         setBackground(GuiStyle.BG);
 
-        // ---------- TOP ----------
         JPanel top = new JPanel();
         top.setLayout(new BoxLayout(top, BoxLayout.Y_AXIS));
         top.setBackground(GuiStyle.BG2);
         top.setBorder(BorderFactory.createEmptyBorder(10, 12, 10, 12));
 
-        // Row 1: master + header + export
         JPanel row1 = new JPanel(new BorderLayout(8, 0));
         row1.setOpaque(false);
 
@@ -104,7 +89,6 @@ public class ReportPanel extends JPanel implements Reloadable {
         row1.add(row1Right, BorderLayout.EAST);
         top.add(row1);
 
-        // Row 2: filters
         JPanel row2 = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 4));
         row2.setOpaque(false);
 
@@ -141,10 +125,8 @@ public class ReportPanel extends JPanel implements Reloadable {
         row2.add(textField);
 
         top.add(row2);
-
         add(top, BorderLayout.NORTH);
 
-        // ---------- CENTER ----------
         cardsContainer = new JPanel();
         cardsContainer.setLayout(new BoxLayout(cardsContainer, BoxLayout.Y_AXIS));
         cardsContainer.setBackground(GuiStyle.BG);
@@ -156,7 +138,6 @@ public class ReportPanel extends JPanel implements Reloadable {
         scroll.getVerticalScrollBar().setUnitIncrement(16);
         add(scroll, BorderLayout.CENTER);
 
-        // ---------- LISTENERS ----------
         ctx.onProjectChanged(c -> reload());
         ctx.onFiltersChanged(c -> reload());
 
@@ -196,7 +177,6 @@ public class ReportPanel extends JPanel implements Reloadable {
     }
 
     private void rebuildCards() {
-        // группировка по файлу
         Map<String, List<IssueService.IssueDto>> byFile = new TreeMap<>();
         for (IssueService.IssueDto it : allIssues) {
             byFile.computeIfAbsent(it.component(), k -> new ArrayList<>()).add(it);
@@ -231,7 +211,7 @@ public class ReportPanel extends JPanel implements Reloadable {
     private void loadFiltersAsync() {
         new SwingWorker<List<String>, Void>() {
             @Override protected List<String> doInBackground() throws Exception {
-                return new TagsService(ctx.api()).fetchTags(ctx.getProject());
+                return new TagsService(ctx).fetchTags(ctx.getProject());
             }
             @Override protected void done() {
                 try {
@@ -244,15 +224,12 @@ public class ReportPanel extends JPanel implements Reloadable {
             }
         }.execute();
 
-        // rules — уникальные из всех issues
         Set<String> rules = new LinkedHashSet<>();
         for (IssueService.IssueDto it : allIssues) {
             if (it.rule() != null && !it.rule().isBlank()) rules.add(it.rule());
         }
         rulesDropdown.setItems(new ArrayList<>(rules));
     }
-
-    // ---------- filters ----------
 
     private void applyFilters() {
         Set<String> tags = tagsDropdown.getSelected();
@@ -285,8 +262,6 @@ public class ReportPanel extends JPanel implements Reloadable {
                 + " · файлов: " + cards.size() + " · issues: " + allIssues.size());
     }
 
-    // ---------- selection ----------
-
     private List<IssueService.IssueDto> collectSelected() {
         List<IssueService.IssueDto> out = new ArrayList<>();
         for (ReportFileCard c : cards) out.addAll(c.getSelectedIssues());
@@ -296,22 +271,16 @@ public class ReportPanel extends JPanel implements Reloadable {
     private void updateExportBtn() {
         int n = collectSelected().size();
         exportBtn.setVisible(n > 0 || isAllSelected);
-        if (isAllSelected) {
-            exportBtn.setText("Действия со всеми (" + visibleCount() + ")");
-        } else {
-            exportBtn.setText("Действия с выбранными (" + n + ")");
-        }
+        exportBtn.setText(isAllSelected
+                ? "Действия со всеми (" + visibleCount() + ")"
+                : "Действия с выбранными (" + n + ")");
     }
 
     private int visibleCount() {
         int total = 0;
-        for (ReportFileCard c : cards) {
-            if (c.isVisible()) total += c.getAllIssues().size();
-        }
+        for (ReportFileCard c : cards) if (c.isVisible()) total += c.getAllIssues().size();
         return total;
     }
-
-    // ---------- context menu ----------
 
     private void showContextMenu(MouseEvent e, IssueService.IssueDto issue,
                                  List<IssueService.IssueDto> selected) {
@@ -351,8 +320,6 @@ public class ReportPanel extends JPanel implements Reloadable {
         menu.show(e.getComponent(), e.getX(), e.getY());
     }
 
-    // ---------- export ----------
-
     private void openExportMenu() {
         JPopupMenu menu = new JPopupMenu();
         menu.setBackground(GuiStyle.BG2);
@@ -382,21 +349,20 @@ public class ReportPanel extends JPanel implements Reloadable {
             expectedTotal = visibleCount();
         }
 
-        String baseQuery = ReportExportService.buildBaseQuery(
-                ctx.getProject(),
-                ctx.getSeverity(),
-                ctx.getQuality(),
-                statusFilter,
-                tagsDropdown.getSelected(),
-                excludedTagsDropdown.getSelected(),
-                rulesDropdown.getSelected(),
-                filterText,
-                expectedTotal);
+        ReportExportService.BaseFilter filter = new ReportExportService.BaseFilter();
+        filter.project        = ctx.getProject();
+        filter.severity       = ctx.getSeverity();
+        filter.quality        = ctx.getQuality();
+        filter.hideProcessed  = ctx.isHideProcessed();
+        filter.tags           = tagsDropdown.getSelected();
+        filter.excludedTags   = excludedTagsDropdown.getSelected();
+        filter.rules          = rulesDropdown.getSelected();
+        filter.filterText     = filterText;
+        filter.statusFilter   = statusFilter;
+        filter.expectedTotal  = expectedTotal;
 
-        new ReportExportDialog(ctx, type, baseQuery, keysCsv).setVisible(true);
+        new ReportExportDialog(ctx, type, keysCsv, filter).setVisible(true);
     }
-
-    // ---------- ui helpers ----------
 
     private JLabel emptyLabel(String text) {
         JLabel l = new JLabel(UiHelpers.wrapHtml(text), SwingConstants.CENTER);

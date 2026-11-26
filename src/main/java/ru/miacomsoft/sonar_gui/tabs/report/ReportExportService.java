@@ -1,140 +1,448 @@
 package ru.miacomsoft.sonar_gui.tabs.report;
 
-import org.json.JSONObject;
-import ru.miacomsoft.sonar_gui.client.SonarApiClient;
-import ru.miacomsoft.sonar_gui.client.SseListener;
+import ru.miacomsoft.sonar_gui.backend.Issue;
+import ru.miacomsoft.sonar_gui.backend.SonarIssuesApi;
+import ru.miacomsoft.sonar_gui.backend.TeamMapping;
+import ru.miacomsoft.sonar_gui.backend.exporters.ConfluenceExporter;
+import ru.miacomsoft.sonar_gui.backend.exporters.HtmlPerFileExporter;
+import ru.miacomsoft.sonar_gui.backend.exporters.JiraExporter;
+import ru.miacomsoft.sonar_gui.backend.exporters.LlmMdExporter;
+import ru.miacomsoft.sonar_gui.backend.exporters.MdExporter;
+import ru.miacomsoft.sonar_gui.backend.exporters.TeamModuleMdExporter;
+import ru.miacomsoft.sonar_gui.backend.exporters.TxtExporter;
+import ru.miacomsoft.sonar_gui.common.GuiContext;
 
-import java.io.InputStream;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.time.Duration;
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 
 /**
- * Обёртка над /api/export-stream + /api/export-download.
- * Блокирующий вызов (выполняется из SwingWorker).
+ * Локальный экспорт (без HTTP-сервера).
+ *
+ * Источники:
+ *   - keysCsv — конкретные issue, выбранные пользователем;
+ *   - BaseFilter — сбор issue по фильтрам SonarQube.
+ *
+ * Форматы: JIRA / MARKDOWN / TXT / CONFLUENCE — построчно;
+ *          HTML_FILES / HTML_FILES_TEAMS / LLM_MD_ZIP / TEAM_MODULE_ZIP — ZIP.
+ *
+ * Прогресс отдаётся через {@link ProgressListener}. Отмена — {@link #setCancelled(boolean)}.
  */
 public class ReportExportService {
 
     public interface ProgressListener {
-        void onProgress(JSONObject data);
-        void onComplete(JSONObject data);
+        void onProgress(int current, int total, String stage, String message);
+        void onDone(Path file, String suggestedName);
         void onError(Throwable t);
     }
 
-    private static final Duration DOWNLOAD_TIMEOUT = Duration.ofMinutes(30);
-
-    private final SonarApiClient api;
-    private final HttpClient downloadHttp = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(10)).build();
-
-    public ReportExportService(SonarApiClient api) {
-        this.api = api;
+    public static class BaseFilter {
+        public String project;
+        public String severity = "ALL";
+        public String quality  = "ALL";
+        public boolean hideProcessed = false;
+        public Set<String> tags         = new LinkedHashSet<>();
+        public Set<String> excludedTags = new LinkedHashSet<>();
+        public Set<String> rules        = new LinkedHashSet<>();
+        public String filterText        = "";
+        public String statusFilter      = "ALL";
+        public int expectedTotal        = -1;
     }
 
-    /**
-     * Запускает SSE-экспорт.
-     * @param keysCsv null → сервер соберёт по фильтрам (GET);
-     *                не null → POST с {"keys":[...]} (только выбранные).
-     */
-    public void streamExport(ReportExportType type, String baseQuery,
-                             List<String> keysCsv, ProgressListener listener) throws Exception {
-        StringBuilder url = new StringBuilder("/api/export-stream?");
-        url.append(baseQuery);
-        url.append("&format=").append(SonarApiClient.enc(type.code));
+    private static final String NO_TAGS_MARKER = "__NO_TAGS__";
 
-        SseListener sse = new SseListener() {
-            @Override public void onEvent(String event, JSONObject data) {
-                if ("progress".equals(event)) {
-                    if (listener != null) listener.onProgress(data);
-                } else if ("complete".equals(event)) {
-                    if (listener != null) listener.onComplete(data);
-                } else if ("error".equals(event)) {
-                    String msg = data.optString("message", "Неизвестная ошибка сервера");
-                    if (listener != null) listener.onError(new RuntimeException(msg));
+    private final GuiContext ctx;
+    private final ProgressListener listener;
+    private volatile boolean cancelled = false;
+
+    public ReportExportService(GuiContext ctx, ProgressListener listener) {
+        this.ctx = ctx;
+        this.listener = listener;
+    }
+
+    public void setCancelled(boolean c) { this.cancelled = c; }
+    public boolean isCancelled() { return cancelled; }
+
+    // ============================================================
+    // ПУБЛИЧНЫЙ ВХОД
+    // ============================================================
+
+    public void export(ReportExportType type, List<String> keysCsv, BaseFilter filter) {
+        try {
+            doExport(type, keysCsv, filter);
+        } catch (Throwable t) {
+            if (listener != null) listener.onError(t);
+        }
+    }
+
+    private void doExport(ReportExportType type, List<String> keysCsv, BaseFilter filter)
+            throws Exception {
+        if (!ctx.isSessionReady()) {
+            throw new IllegalStateException(
+                    "Сессия SonarQube не готова — заполните session.properties");
+        }
+
+        List<Issue> issues;
+        if (keysCsv != null && !keysCsv.isEmpty()) {
+            issues = loadByKeys(filter != null ? filter.project : ctx.getProject(), keysCsv);
+        } else {
+            if (filter == null) throw new IllegalArgumentException("Нет ни keys, ни фильтров");
+            issues = collectByFilters(filter);
+        }
+
+        if (cancelled) return;
+        if (issues.isEmpty()) {
+            if (listener != null)
+                listener.onError(new IllegalStateException("Нет данных для экспорта"));
+            return;
+        }
+
+        Path outFile;
+        switch (type) {
+            case JIRA, MARKDOWN, TXT, CONFLUENCE -> outFile = exportTextFormat(type, issues);
+            case HTML_FILES                       -> outFile = exportHtmlZip(issues, false);
+            case HTML_FILES_TEAMS                 -> outFile = exportHtmlZip(issues, true);
+            case LLM_MD_ZIP                       -> outFile = exportLlmMdZip(issues);
+            case TEAM_MODULE_ZIP                  -> outFile = exportTeamModuleZip(issues);
+            default -> throw new IllegalArgumentException("Неизвестный формат: " + type);
+        }
+
+        if (cancelled) {
+            try { Files.deleteIfExists(outFile); } catch (Exception ignored) {}
+            return;
+        }
+
+        if (listener != null) {
+            listener.onDone(outFile, suggestedName(type,
+                    filter != null ? filter.project : ctx.getProject()));
+        }
+    }
+
+    // ============================================================
+    // СБОР ISSUES
+    // ============================================================
+
+    private List<Issue> loadByKeys(String project, List<String> keys) throws Exception {
+        SonarIssuesApi api = ctx.state().newApi(project);
+        List<Issue> out = new ArrayList<>();
+        int batchSize = 100;
+        int total = keys.size();
+
+        for (int i = 0; i < keys.size(); i += batchSize) {
+            if (cancelled) return out;
+            int end = Math.min(i + batchSize, keys.size());
+            List<String> batch = keys.subList(i, end);
+            String keysCsv = String.join(",", batch);
+
+            try {
+                org.json.JSONObject raw = new org.json.JSONObject(
+                        ctx.state().getClient().get("/api/issues/search?issues="
+                                + urlEnc(keysCsv) + "&additionalFields=" + urlEnc("_all")));
+                org.json.JSONArray arr = raw.optJSONArray("issues");
+                if (arr != null) {
+                    for (int j = 0; j < arr.length(); j++) {
+                        out.add(Issue.from(arr.getJSONObject(j), project));
+                    }
+                }
+            } catch (Exception e) {
+                for (String k : batch) {
+                    try {
+                        Issue it = api.fetchIssue(k);
+                        if (it != null) out.add(it);
+                    } catch (Exception ignored) {}
                 }
             }
-            @Override public void onComplete() { /* уже обработано в onEvent */ }
-            @Override public void onError(Throwable t) {
-                if (listener != null) listener.onError(t);
-            }
-        };
-
-        if (keysCsv == null || keysCsv.isEmpty()) {
-            api.streamSse(url.toString(), sse);
-        } else {
-            JSONObject body = new JSONObject();
-            body.put("keys", keysCsv);
-            api.streamSsePost(url.toString(), body.toString(), sse);
-        }
-    }
-
-    /**
-     * Скачивает файл, отданный сервером (после события complete).
-     */
-    public void downloadFile(String serverFilePath, String downloadName, Path targetFile)
-            throws Exception {
-        StringBuilder url = new StringBuilder(api.getBaseUrl())
-                .append("/api/export-download?file=").append(SonarApiClient.enc(serverFilePath));
-        if (downloadName != null && !downloadName.isBlank()) {
-            url.append("&name=").append(SonarApiClient.enc(downloadName));
-        }
-
-        HttpRequest req = HttpRequest.newBuilder()
-                .uri(URI.create(url.toString()))
-                .timeout(DOWNLOAD_TIMEOUT)
-                .header("User-Agent", "SonarGui/1.0")
-                .GET()
-                .build();
-        HttpResponse<InputStream> resp = downloadHttp.send(req,
-                HttpResponse.BodyHandlers.ofInputStream());
-        if (resp.statusCode() < 200 || resp.statusCode() >= 300) {
-            try (InputStream es = resp.body()) {
-                String err = new String(es.readAllBytes(), StandardCharsets.UTF_8);
-                throw new RuntimeException("HTTP " + resp.statusCode() + ": " + err);
+            if (listener != null) {
+                listener.onProgress(out.size(), total, "fetching",
+                        String.format("Загрузка issues: %d/%d", out.size(), total));
             }
         }
-        try (InputStream in = resp.body()) {
-            Files.copy(in, targetFile, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-        }
+        return out;
     }
 
-    /** Построение query-строки для экспорта из текущих фильтров. */
-    public static String buildBaseQuery(String project, String severity, String quality,
-                                        String statusFilter, Set<String> tags,
-                                        Set<String> excludedTags, Set<String> rules,
-                                        String filterText, int expectedTotal) {
+    private List<Issue> collectByFilters(BaseFilter f) throws Exception {
+        SonarIssuesApi api = ctx.state().newApi(f.project);
+        String statuses = f.hideProcessed
+                ? SonarIssuesApi.ACTIVE_STATUSES
+                : SonarIssuesApi.ALL_STATUSES;
+
+        if (listener != null)
+            listener.onProgress(0, 0, "fetching", "Загрузка issues из SonarQube…");
+
+        List<Issue> all = api.fetchAllByStatuses(statuses, f.severity, f.quality);
+        if (cancelled) return List.of();
+
+        List<Issue> filtered = new ArrayList<>();
+        String q = f.filterText == null ? "" : f.filterText.trim().toLowerCase();
+
+        for (Issue it : all) {
+            if (cancelled) return filtered;
+
+            // statusFilter
+            if (f.statusFilter != null && !f.statusFilter.isEmpty()
+                    && !"ALL".equalsIgnoreCase(f.statusFilter)) {
+                boolean isProcessed = it.status != null
+                        && !it.status.equals("OPEN") && !it.status.equals("REOPENED");
+                if ("PROCESSED".equalsIgnoreCase(f.statusFilter) && !isProcessed) continue;
+                if ("UNPROCESSED".equalsIgnoreCase(f.statusFilter) && isProcessed) continue;
+            }
+
+            // tags
+            if (!f.tags.isEmpty()) {
+                List<String> itTags = it.tags != null ? it.tags : List.of();
+                boolean hasMatch = false;
+                for (String t : f.tags) {
+                    if (NO_TAGS_MARKER.equals(t)) {
+                        if (itTags.isEmpty()) hasMatch = true;
+                    } else if (itTags.contains(t)) {
+                        hasMatch = true;
+                    }
+                    if (hasMatch) break;
+                }
+                if (!hasMatch) continue;
+            }
+
+            // rules
+            if (!f.rules.isEmpty() && !f.rules.contains(it.rule)) continue;
+
+            // text
+            if (!q.isEmpty()) {
+                boolean m = (it.key != null && it.key.toLowerCase().contains(q))
+                        || (it.message != null && it.message.toLowerCase().contains(q))
+                        || (it.component != null && it.component.toLowerCase().contains(q));
+                if (!m) continue;
+            }
+
+            // excludedTags
+            if (!f.excludedTags.isEmpty()) {
+                List<String> itTags = it.tags != null ? it.tags : List.of();
+                boolean hasExcluded = false;
+                for (String t : f.excludedTags) {
+                    if (NO_TAGS_MARKER.equals(t)) {
+                        if (itTags.isEmpty()) hasExcluded = true;
+                    } else if (itTags.contains(t)) {
+                        hasExcluded = true;
+                    }
+                    if (hasExcluded) break;
+                }
+                if (hasExcluded) continue;
+            }
+
+            filtered.add(it);
+        }
+
+        if (listener != null)
+            listener.onProgress(filtered.size(), filtered.size(), "filtered",
+                    String.format("Отобрано %d из %d", filtered.size(), all.size()));
+        return filtered;
+    }
+
+    // ============================================================
+    // ТЕКСТОВЫЕ ФОРМАТЫ
+    // ============================================================
+
+    private Path exportTextFormat(ReportExportType type, List<Issue> issues) throws Exception {
+        int total = issues.size();
+        String project = ctx.getProject();
+        String host = hostOf();
+
         StringBuilder sb = new StringBuilder();
-        if (project != null && !project.isBlank()) {
-            sb.append("project=").append(SonarApiClient.enc(project));
+        String now = new SimpleDateFormat("dd.MM.yyyy HH:mm:ss").format(new Date());
+
+        switch (type) {
+            case JIRA -> {
+                sb.append("h3. Проект: ").append(project).append("\n");
+                sb.append("*Всего issues:* ").append(total)
+                        .append("\n*Сгенерировано:* ").append(now).append("\n\n");
+            }
+            case MARKDOWN -> {
+                sb.append("# Отчет по проекту: ").append(project).append("\n\n");
+                sb.append("**Сгенерировано:** ").append(now)
+                        .append("\n**Всего issues:** ").append(total).append("\n\n---\n\n");
+            }
+            case TXT -> {
+                sb.append("=== Отчет по проекту: ").append(project).append(" ===\n");
+                sb.append("Сгенерировано: ").append(now)
+                        .append("\nВсего issues: ").append(total).append("\n\n");
+            }
+            case CONFLUENCE -> {
+                sb.append("<style>mark.sonar-issue-mark{background-color:rgba(248,81,73,.25);")
+                        .append("border-bottom:2px solid #f85149;}</style>\n");
+                sb.append("<h2>Проект: ").append(esc(project)).append("</h2>\n");
+                sb.append("<p><em>Сгенерировано: ").append(esc(now))
+                        .append(" · Всего: ").append(total).append("</em></p>\n<hr/>\n");
+            }
+            default -> {}
         }
-        if (sb.length() > 0) sb.append('&');
-        sb.append("sev=").append(SonarApiClient.enc(severity == null ? "ALL" : severity));
-        sb.append("&qual=").append(SonarApiClient.enc(quality == null ? "ALL" : quality));
-        if (statusFilter != null && !statusFilter.isBlank() && !"ALL".equals(statusFilter)) {
-            sb.append("&statusFilter=").append(SonarApiClient.enc(statusFilter));
+
+        SonarIssuesApi api = ctx.state().newApi(project);
+
+        for (int i = 0; i < issues.size(); i++) {
+            if (cancelled) break;
+            Issue it = issues.get(i);
+
+            List<String> snippet;
+            try { snippet = api.fetchSnippet(it.key); }
+            catch (Exception e) { snippet = List.of(); }
+            it.snippet = snippet;
+
+            switch (type) {
+                case JIRA -> sb.append(JiraExporter.exportSingle(it, project, host)).append("\n");
+                case MARKDOWN -> {
+                    sb.append(MdExporter.exportSingle(it, project, host));
+                    if (snippet != null && !snippet.isEmpty()) {
+                        sb.append("**Фрагмент кода:**\n```\n");
+                        for (String line : snippet)
+                            sb.append(line.replace("§HL_START§", ">>> ")
+                                    .replace("§HL_END§", " <<<")).append('\n');
+                        sb.append("```\n\n");
+                    }
+                    sb.append("---\n\n");
+                }
+                case TXT -> {
+                    sb.append(TxtExporter.exportSingle(it, project, host));
+                    if (snippet != null && !snippet.isEmpty()) {
+                        sb.append("Код:\n");
+                        for (String line : snippet)
+                            sb.append(line.replace("§HL_START§", ">>> ")
+                                    .replace("§HL_END§", " <<<")).append('\n');
+                    }
+                    sb.append("\n----------------------------------------\n\n");
+                }
+                case CONFLUENCE -> sb.append(ConfluenceExporter.exportSingle(it, project, host, snippet));
+                default -> {}
+            }
+
+            if (listener != null) {
+                listener.onProgress(i + 1, total, "generating",
+                        String.format("Формат %s: %d/%d", type.title, i + 1, total));
+            }
         }
-        if (tags != null && !tags.isEmpty()) {
-            sb.append("&tags=").append(SonarApiClient.enc(String.join(",", tags)));
+
+        Path out = Files.createTempFile("sonar_report_", "." + type.ext);
+        Files.writeString(out, sb.toString(), StandardCharsets.UTF_8);
+        return out;
+    }
+
+    // ============================================================
+    // ZIP-ФОРМАТЫ
+    // ============================================================
+
+    private Path exportHtmlZip(List<Issue> issues, boolean withTeams) throws Exception {
+        int total = issues.size();
+        String project = ctx.getProject();
+        String host = hostOf();
+
+        Map<String, List<Issue>> byFile = groupByFile(issues);
+
+        SonarIssuesApi api = ctx.state().newApi(project);
+        Map<String, List<String>> snippets = new HashMap<>();
+        int loaded = 0;
+        for (List<Issue> lst : byFile.values()) {
+            for (Issue it : lst) {
+                if (cancelled) throw new InterruptedException("cancelled");
+                try {
+                    List<String> s = api.fetchSnippet(it.key);
+                    if (!s.isEmpty()) snippets.put(it.key, s);
+                } catch (Exception ignored) {}
+                loaded++;
+                if (listener != null && (loaded % 10 == 0 || loaded == total)) {
+                    listener.onProgress(loaded, total, "snippets",
+                            String.format("Фрагменты кода: %d/%d", loaded, total));
+                }
+            }
         }
-        if (excludedTags != null && !excludedTags.isEmpty()) {
-            sb.append("&excludedTags=").append(SonarApiClient.enc(String.join(",", excludedTags)));
+
+        Path zip = Files.createTempFile("sonar_report_", ".zip");
+        TeamMapping mapping = withTeams ? TeamMapping.load() : null;
+
+        if (listener != null)
+            listener.onProgress(total, total, "generating", "Сборка ZIP…");
+
+        HtmlPerFileExporter.writeZip(zip, byFile, snippets, project, host, withTeams, mapping);
+        return zip;
+    }
+
+    private Path exportLlmMdZip(List<Issue> issues) throws Exception {
+        String project = ctx.getProject();
+        String host = hostOf();
+        Map<String, List<Issue>> byFile = groupByFile(issues);
+
+        if (listener != null)
+            listener.onProgress(issues.size(), issues.size(), "generating",
+                    "Сборка LLM MD ZIP…");
+
+        Path zip = Files.createTempFile("sonar_llm_", ".zip");
+        SonarIssuesApi api = ctx.state().newApi(project);
+        LlmMdExporter.writeZip(zip, byFile, api, project, host);
+        return zip;
+    }
+
+    private Path exportTeamModuleZip(List<Issue> issues) throws Exception {
+        String project = ctx.getProject();
+        String host = hostOf();
+        Map<String, List<Issue>> byFile = groupByFile(issues);
+
+        if (listener != null)
+            listener.onProgress(issues.size(), issues.size(), "generating",
+                    "Сборка Team/Module ZIP…");
+
+        Path zip = Files.createTempFile("sonar_team_", ".zip");
+        SonarIssuesApi api = ctx.state().newApi(project);
+        TeamMapping mapping = TeamMapping.load();
+        TeamModuleMdExporter.writeZip(zip, byFile, api, project, host, mapping);
+        return zip;
+    }
+
+    // ============================================================
+    // UTILS
+    // ============================================================
+
+    private Map<String, List<Issue>> groupByFile(List<Issue> issues) {
+        Map<String, List<Issue>> byFile = new TreeMap<>();
+        for (Issue it : issues) {
+            String comp = it.component != null ? it.component : "(unknown)";
+            byFile.computeIfAbsent(comp, k -> new ArrayList<>()).add(it);
         }
-        if (rules != null && !rules.isEmpty()) {
-            sb.append("&selectedRules=").append(SonarApiClient.enc(String.join(",", rules)));
-        }
-        if (filterText != null && !filterText.isBlank()) {
-            sb.append("&filterText=").append(SonarApiClient.enc(filterText));
-        }
-        if (expectedTotal > 0) {
-            sb.append("&expectedTotal=").append(expectedTotal);
-        }
-        return sb.toString();
+        return byFile;
+    }
+
+    private String hostOf() {
+        try {
+            String url = ctx.state().getSession().getUrl();
+            java.net.URI u = java.net.URI.create(url);
+            String h = u.getHost();
+            int p = u.getPort();
+            if (h == null || h.isBlank()) return "sonar";
+            return (p > 0 && p != 80 && p != 443) ? h + ":" + p : h;
+        } catch (Exception e) { return "sonar"; }
+    }
+
+    private static String suggestedName(ReportExportType type, String project) {
+        String safe = (project == null ? "report" : project)
+                .replaceAll("[^A-Za-z0-9._-]", "_");
+        if (safe.isEmpty()) safe = "report";
+        String stamp = new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date());
+        return safe + "_" + stamp + "." + type.ext;
+    }
+
+    private static String urlEnc(String s) {
+        try { return java.net.URLEncoder.encode(s == null ? "" : s, "UTF-8"); }
+        catch (Exception e) { return s == null ? "" : s; }
+    }
+
+    private static String esc(String s) {
+        if (s == null) return "";
+        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                .replace("\"", "&quot;").replace("'", "&#39;");
     }
 }

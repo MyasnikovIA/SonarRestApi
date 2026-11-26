@@ -10,7 +10,6 @@ import javax.swing.*;
 import java.awt.*;
 import java.awt.datatransfer.StringSelection;
 
-/** Диалог промпта для вкладки Report. */
 public class ReportPromptDialog extends JDialog {
 
     private final JTextArea promptArea = new JTextArea(20, 80);
@@ -67,7 +66,7 @@ public class ReportPromptDialog extends JDialog {
 
         new SwingWorker<String, Void>() {
             @Override protected String doInBackground() throws Exception {
-                return new PromptService(ctx.api()).buildForIssue(
+                return new PromptService(ctx).buildForIssue(
                         ctx.getProject(), "status-comment",
                         issue.key(), "accept", null);
             }

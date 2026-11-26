@@ -1,6 +1,5 @@
 package ru.miacomsoft.sonar_gui.tabs.report.dialogs;
 
-import org.json.JSONObject;
 import ru.miacomsoft.sonar_gui.common.GuiContext;
 import ru.miacomsoft.sonar_gui.common.GuiStyle;
 import ru.miacomsoft.sonar_gui.common.UiHelpers;
@@ -9,42 +8,38 @@ import ru.miacomsoft.sonar_gui.tabs.report.ReportExportType;
 
 import javax.swing.*;
 import java.awt.*;
+import java.io.File;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.List;
 
-/**
- * Диалог экспорта с SSE-прогрессом.
- *
- * Шаги:
- *   1. Показываем прогресс-бар;
- *   2. По complete — JFileChooser (default = downloadName);
- *   3. Скачиваем файл и сохраняем.
- */
 public class ReportExportDialog extends JDialog {
 
     private final GuiContext ctx;
     private final ReportExportType type;
-    private final String baseQuery;
     private final List<String> keysCsv;
+    private final ReportExportService.BaseFilter filter;
 
     private final JProgressBar progressBar = new JProgressBar(0, 100);
     private final JLabel statusLbl = UiHelpers.dimLabel("Инициализация…");
     private final JLabel counterLbl = UiHelpers.dimLabel("0 / 0");
-    private final JLabel elapsedLbl = UiHelpers.dimLabel("0.0 с");
+    private final JLabel stageLbl = UiHelpers.dimLabel("—");
     private final JButton cancelBtn;
 
+    private volatile ReportExportService service;
     private volatile boolean cancelled = false;
 
     public ReportExportDialog(GuiContext ctx, ReportExportType type,
-                              String baseQuery, List<String> keysCsv) {
+                              List<String> keysCsv, ReportExportService.BaseFilter filter) {
         super((Frame) null, "Экспорт: " + type.title, true);
         this.ctx = ctx;
         this.type = type;
-        this.baseQuery = baseQuery;
         this.keysCsv = keysCsv;
+        this.filter = filter;
 
         setDefaultCloseOperation(DISPOSE_ON_CLOSE);
-        setSize(560, 220);
+        setSize(620, 240);
         setLocationRelativeTo(getOwner());
 
         JPanel root = new JPanel(new BorderLayout(10, 10));
@@ -54,18 +49,23 @@ public class ReportExportDialog extends JDialog {
 
         JPanel info = new JPanel(new BorderLayout(0, 6));
         info.setOpaque(false);
-        info.add(statusLbl, BorderLayout.NORTH);
+
+        JPanel metaTop = new JPanel(new BorderLayout());
+        metaTop.setOpaque(false);
+        metaTop.add(statusLbl, BorderLayout.WEST);
+        metaTop.add(stageLbl, BorderLayout.EAST);
+        info.add(metaTop, BorderLayout.NORTH);
 
         progressBar.setBackground(GuiStyle.BG3);
         progressBar.setForeground(GuiStyle.ACCENT);
         progressBar.setStringPainted(false);
         info.add(progressBar, BorderLayout.CENTER);
 
-        JPanel meta = new JPanel(new BorderLayout());
-        meta.setOpaque(false);
-        meta.add(counterLbl, BorderLayout.WEST);
-        meta.add(elapsedLbl, BorderLayout.EAST);
-        info.add(meta, BorderLayout.SOUTH);
+        JPanel metaBottom = new JPanel(new BorderLayout());
+        metaBottom.setOpaque(false);
+        metaBottom.add(counterLbl, BorderLayout.WEST);
+        metaBottom.add(UiHelpers.dimLabel("формат: " + type.title), BorderLayout.EAST);
+        info.add(metaBottom, BorderLayout.SOUTH);
 
         root.add(info, BorderLayout.CENTER);
 
@@ -76,99 +76,81 @@ public class ReportExportDialog extends JDialog {
             cancelled = true;
             cancelBtn.setEnabled(false);
             cancelBtn.setText("Остановка…");
+            if (service != null) service.setCancelled(true);
         });
         footer.add(cancelBtn);
         root.add(footer, BorderLayout.SOUTH);
 
-        // Стартуем SSE в фоне.
+        startExport();
+    }
+
+    private void startExport() {
         new SwingWorker<Void, Void>() {
             @Override protected Void doInBackground() {
-                ReportExportService svc = new ReportExportService(ctx.api());
-                try {
-                    svc.streamExport(type, baseQuery, keysCsv, new ReportExportService.ProgressListener() {
-                        @Override public void onProgress(JSONObject data) {
-                            if (cancelled) return;
-                            SwingUtilities.invokeLater(() -> updateProgress(data));
-                        }
-                        @Override public void onComplete(JSONObject data) {
-                            if (cancelled) return;
-                            SwingUtilities.invokeLater(() -> onSseComplete(data));
-                        }
-                        @Override public void onError(Throwable t) {
-                            if (cancelled) return;
-                            SwingUtilities.invokeLater(() -> showError(t));
-                        }
-                    });
-                } catch (Exception ex) {
-                    if (!cancelled) {
-                        SwingUtilities.invokeLater(() -> showError(ex));
+                service = new ReportExportService(ctx, new ReportExportService.ProgressListener() {
+                    @Override public void onProgress(int current, int total, String stage, String message) {
+                        SwingUtilities.invokeLater(() -> updateProgress(current, total, stage, message));
                     }
-                }
+                    @Override public void onDone(Path file, String suggestedName) {
+                        SwingUtilities.invokeLater(() -> onExportComplete(file, suggestedName));
+                    }
+                    @Override public void onError(Throwable t) {
+                        SwingUtilities.invokeLater(() -> onExportError(t));
+                    }
+                });
+                service.export(type, keysCsv, filter);
                 return null;
             }
         }.execute();
     }
 
-    private void updateProgress(JSONObject d) {
-        String msg = d.optString("message", "");
-        if (!msg.isEmpty()) statusLbl.setText(msg);
-        int cur = d.optInt("current", 0);
-        int total = d.optInt("total", 0);
+    private void updateProgress(int current, int total, String stage, String message) {
+        if (cancelled) return;
+        if (message != null) statusLbl.setText(message);
+        if (stage != null) stageLbl.setText("этап: " + stage);
         if (total > 0) {
-            progressBar.setValue((int) Math.min(100, (cur * 100L) / total));
-            counterLbl.setText(cur + " / " + total);
+            progressBar.setIndeterminate(false);
+            progressBar.setValue((int) Math.min(100, (current * 100L) / total));
+            counterLbl.setText(current + " / " + total);
         } else {
             progressBar.setIndeterminate(true);
-            counterLbl.setText(String.valueOf(cur));
-        }
-        if (d.has("elapsedMs")) {
-            long ms = d.optLong("elapsedMs", 0);
-            elapsedLbl.setText(String.format("%.1f с", ms / 1000.0));
-        }
-        if (d.has("etaMs")) {
-            long eta = d.optLong("etaMs", -1);
-            if (eta > 0) statusLbl.setText(msg + " · осталось " + (eta / 1000) + " с");
+            counterLbl.setText(String.valueOf(current));
         }
     }
 
-    private void onSseComplete(JSONObject d) {
+    private void onExportComplete(Path tempFile, String suggestedName) {
+        if (cancelled) {
+            try { Files.deleteIfExists(tempFile); } catch (Exception ignored) {}
+            dispose();
+            return;
+        }
         progressBar.setIndeterminate(false);
         progressBar.setValue(100);
-        String serverFile = d.optString("file", "");
-        String downloadName = d.optString("downloadName", "report." + type.ext);
         statusLbl.setText("Готово. Выбор места сохранения…");
 
         JFileChooser chooser = new JFileChooser();
         chooser.setDialogTitle("Куда сохранить отчёт?");
-        chooser.setSelectedFile(new java.io.File(downloadName));
+        chooser.setSelectedFile(new File(suggestedName));
         int r = chooser.showSaveDialog(this);
         if (r != JFileChooser.APPROVE_OPTION) {
+            try { Files.deleteIfExists(tempFile); } catch (Exception ignored) {}
             dispose();
             return;
         }
         Path target = chooser.getSelectedFile().toPath();
 
-        new SwingWorker<Void, Void>() {
-            @Override protected Void doInBackground() throws Exception {
-                ReportExportService svc = new ReportExportService(ctx.api());
-                svc.downloadFile(serverFile, downloadName, target);
-                return null;
-            }
-            @Override protected void done() {
-                try {
-                    get();
-                    UiHelpers.showToast(ReportExportDialog.this,
-                            "Сохранено: " + target.toAbsolutePath(), false);
-                    dispose();
-                } catch (Exception e) {
-                    UiHelpers.showError(ReportExportDialog.this,
-                            "Ошибка скачивания: " + e.getMessage());
-                }
-            }
-        }.execute();
+        try {
+            Files.copy(tempFile, target, StandardCopyOption.REPLACE_EXISTING);
+            Files.deleteIfExists(tempFile);
+            UiHelpers.showToast(this, "Сохранено: " + target.toAbsolutePath(), false);
+            dispose();
+        } catch (Exception e) {
+            UiHelpers.showError(this, "Ошибка сохранения: " + e.getMessage());
+        }
     }
 
-    private void showError(Throwable t) {
+    private void onExportError(Throwable t) {
+        if (cancelled) { dispose(); return; }
         progressBar.setIndeterminate(false);
         statusLbl.setText("Ошибка: " + t.getMessage());
         statusLbl.setForeground(GuiStyle.ERR);

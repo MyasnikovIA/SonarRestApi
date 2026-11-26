@@ -1,31 +1,47 @@
 package ru.miacomsoft.sonar_gui.common.services;
 
 import org.json.JSONObject;
-import ru.miacomsoft.sonar_gui.client.SonarApiClient;
+import ru.miacomsoft.sonar_gui.backend.Issue;
+import ru.miacomsoft.sonar_gui.backend.SonarBulkApi;
+import ru.miacomsoft.sonar_gui.common.GuiContext;
+
+import java.util.ArrayList;
+import java.util.List;
 
 /**
- * Обёртка над POST /api/set_tags.
- *
- * Сервер принимает массив ключей и строку тегов через запятую.
- * Пустая строка означает «снять все теги».
+ * Установка тегов issue напрямую через SonarBulkApi.setTags.
  */
 public class SetTagsService {
 
-    private final SonarApiClient api;
+    private final GuiContext ctx;
 
-    public SetTagsService(SonarApiClient api) {
-        this.api = api;
+    public SetTagsService(GuiContext ctx) {
+        this.ctx = ctx;
     }
 
     public JSONObject setTags(String projectKey, String keysCsv, String tagsCsv) throws Exception {
-        StringBuilder url = new StringBuilder("/api/set_tags?");
-        if (projectKey != null && !projectKey.isBlank()) {
-            url.append("project=").append(SonarApiClient.enc(projectKey)).append('&');
+        if (!ctx.isSessionReady()) throw new IllegalStateException("Сессия не готова");
+
+        List<Issue> stubs = new ArrayList<>();
+        if (keysCsv != null && !keysCsv.isBlank()) {
+            for (String k : keysCsv.split(",")) {
+                String key = k.trim();
+                if (key.isEmpty()) continue;
+                Issue stub = new Issue();
+                stub.key = key;
+                stubs.add(stub);
+            }
         }
-        url.append("keys=").append(SonarApiClient.enc(keysCsv));
-        url.append("&issue=").append(SonarApiClient.enc(keysCsv));
-        url.append("&tags=").append(SonarApiClient.enc(tagsCsv == null ? "" : tagsCsv));
-        return api.postJson(url.toString());
+
+        SonarBulkApi bulk = ctx.state().newBulk();
+        bulk.setSilent(true);
+        bulk.setTags(stubs, tagsCsv == null ? "" : tagsCsv);
+
+        JSONObject o = new JSONObject();
+        o.put("success", true);
+        o.put("count", stubs.size());
+        o.put("tags", tagsCsv == null ? "" : tagsCsv);
+        return o;
     }
 
     public JSONObject setTags(String projectKey, String singleKey, String[] tags) throws Exception {

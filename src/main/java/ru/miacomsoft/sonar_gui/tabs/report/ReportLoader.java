@@ -8,28 +8,30 @@ import java.util.List;
 import java.util.function.Consumer;
 
 /**
- * Загружает ВСЕ issues проекта одним запросом (ps=10000),
- * как это делает web/tabs/report/index.js.
+ * Загрузчик всех issues для вкладки Report — напрямую через IssueService.
+ * Больше не делает HTTP к /api/issues.
  */
 public class ReportLoader extends SwingWorker<List<IssueService.IssueDto>, Void> {
 
     private final IssueService issueService;
-    private final String query;
+    private final GuiContext ctx;
     private final Consumer<List<IssueService.IssueDto>> onSuccess;
     private final Consumer<Throwable> onError;
 
     public ReportLoader(GuiContext ctx,
                         Consumer<List<IssueService.IssueDto>> onSuccess,
                         Consumer<Throwable> onError) {
-        this.issueService = new IssueService(ctx.api());
-        this.query = ctx.commonQuery() + "&p=1&ps=10000";
+        this.ctx = ctx;
+        this.issueService = new IssueService(ctx);
         this.onSuccess = onSuccess;
         this.onError = onError;
     }
 
     @Override
     protected List<IssueService.IssueDto> doInBackground() throws Exception {
-        return issueService.fetchAllIssues(query);
+        return issueService.fetchAllIssues(
+                ctx.getProject(), ctx.getSeverity(), ctx.getQuality(),
+                ctx.isHideProcessed());
     }
 
     @Override

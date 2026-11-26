@@ -2,17 +2,17 @@ package ru.miacomsoft.sonar_gui.common.services;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
-import ru.miacomsoft.sonar_gui.client.SonarApiClient;
+import ru.miacomsoft.sonar_gui.backend.Issue;
+import ru.miacomsoft.sonar_gui.backend.SonarIssuesApi;
+import ru.miacomsoft.sonar_gui.common.GuiContext;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
- * Обёртка над GET /api/perfile и /api/issues.
- *
- * Используется вкладками Per-File и Report для получения списка issue.
- * Внутренний DTO {@link IssueDto} изолирует GUI от "сырого" JSON
- * сервера и упрощает работу таблиц.
+ * Загрузка issue напрямую через SonarIssuesApi (без /api/perfile и /api/issues).
  */
 public class IssueService {
 
@@ -36,80 +36,82 @@ public class IssueService {
     }
 
     public record PerFilePage(int total, List<FileGroup> files) {}
-
     public record FileGroup(String file, List<IssueDto> issues) {}
 
-    private final SonarApiClient api;
+    private final GuiContext ctx;
 
-    public IssueService(SonarApiClient api) {
-        this.api = api;
+    public IssueService(GuiContext ctx) {
+        this.ctx = ctx;
     }
 
-    /** GET /api/perfile — постранично, группировка по файлам. */
-    public PerFilePage fetchPerFilePage(String query, int page, int pageSize) throws Exception {
-        String url = "/api/perfile?" + query
-                + "&p=" + page
-                + "&ps=" + pageSize;
-        JSONObject root = api.getJson(url);
-        int total = root.optInt("total", 0);
+    // ============ PER-FILE ============
+
+    public PerFilePage fetchPerFilePage(String project, String sev, String qual,
+                                        boolean hideProcessed,
+                                        int page, int pageSize) throws Exception {
+        if (!ctx.isSessionReady()) throw new IllegalStateException("Сессия не готова");
+
+        SonarIssuesApi api = ctx.state().newApi(project);
+        String statuses = hideProcessed
+                ? SonarIssuesApi.ACTIVE_STATUSES
+                : SonarIssuesApi.ALL_STATUSES;
+
+        JSONObject raw = api.fetchPageRaw(statuses, sev, qual, null, page, pageSize);
+        int total = raw.optInt("total", 0);
+
+        JSONArray arr = raw.optJSONArray("issues");
+        Map<String, List<IssueDto>> byFile = new LinkedHashMap<>();
+
+        if (arr != null) {
+            for (int i = 0; i < arr.length(); i++) {
+                Issue issue = Issue.from(arr.getJSONObject(i), project);
+                IssueDto dto = toDto(issue);
+                byFile.computeIfAbsent(dto.component(), k -> new ArrayList<>()).add(dto);
+            }
+        }
 
         List<FileGroup> groups = new ArrayList<>();
-        JSONArray filesArr = root.optJSONArray("files");
-        if (filesArr != null) {
-            for (int i = 0; i < filesArr.length(); i++) {
-                JSONObject f = filesArr.getJSONObject(i);
-                String file = f.optString("file", "(unknown)");
-                List<IssueDto> issues = new ArrayList<>();
-                JSONArray iss = f.optJSONArray("issues");
-                if (iss != null) {
-                    for (int j = 0; j < iss.length(); j++) {
-                        issues.add(parseIssue(iss.getJSONObject(j)));
-                    }
-                }
-                groups.add(new FileGroup(file, issues));
-            }
+        for (Map.Entry<String, List<IssueDto>> e : byFile.entrySet()) {
+            groups.add(new FileGroup(e.getKey(), e.getValue()));
         }
         return new PerFilePage(total, groups);
     }
 
-    /** GET /api/issues — плоский список, обычно ps >= 10000 на одну страницу. */
-    public List<IssueDto> fetchAllIssues(String query) throws Exception {
-        String url = "/api/issues?" + query;
-        JSONObject root = api.getJson(url);
-        JSONArray arr = root.optJSONArray("issues");
-        List<IssueDto> out = new ArrayList<>();
-        if (arr != null) {
-            for (int i = 0; i < arr.length(); i++) {
-                out.add(parseIssue(arr.getJSONObject(i)));
-            }
-        }
+    // ============ REPORT (все issues) ============
+
+    public List<IssueDto> fetchAllIssues(String project, String sev, String qual,
+                                         boolean hideProcessed) throws Exception {
+        if (!ctx.isSessionReady()) throw new IllegalStateException("Сессия не готова");
+
+        SonarIssuesApi api = ctx.state().newApi(project);
+        String statuses = hideProcessed
+                ? SonarIssuesApi.ACTIVE_STATUSES
+                : SonarIssuesApi.ALL_STATUSES;
+
+        List<Issue> all = api.fetchAllByStatuses(statuses, sev, qual);
+        List<IssueDto> out = new ArrayList<>(all.size());
+        for (Issue it : all) out.add(toDto(it));
         return out;
     }
 
     // ============ INTERNAL ============
 
-    private static IssueDto parseIssue(JSONObject o) {
-        List<String> tags = new ArrayList<>();
-        JSONArray tagsArr = o.optJSONArray("tags");
-        if (tagsArr != null) {
-            for (int i = 0; i < tagsArr.length(); i++) {
-                tags.add(tagsArr.optString(i, ""));
-            }
-        }
-        String sev = o.optString("impactSeverity", "");
-        if (sev.isBlank()) sev = o.optString("severity", "");
+    private IssueDto toDto(Issue issue) {
+        String sev = (issue.impactSeverity != null && !issue.impactSeverity.isEmpty())
+                ? issue.impactSeverity
+                : (issue.severity != null ? issue.severity : "");
 
         return new IssueDto(
-                o.optString("key", ""),
-                o.optString("rule", ""),
-                o.optString("ruleName", ""),
+                issue.key != null ? issue.key : "",
+                issue.rule != null ? issue.rule : "",
+                issue.ruleName != null ? issue.ruleName : "",
                 sev,
-                o.optString("status", ""),
-                o.optString("component", "(unknown)"),
-                o.optInt("line", 0),
-                o.optString("message", ""),
-                o.optString("type", ""),
-                tags
+                issue.status != null ? issue.status : "",
+                issue.component != null ? issue.component : "(unknown)",
+                issue.line,
+                issue.message != null ? issue.message : "",
+                issue.type != null ? issue.type : "",
+                issue.tags != null ? issue.tags : new ArrayList<>()
         );
     }
 }

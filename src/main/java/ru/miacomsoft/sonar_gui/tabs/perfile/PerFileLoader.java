@@ -6,11 +6,14 @@ import ru.miacomsoft.sonar_gui.common.services.IssueService;
 import javax.swing.*;
 import java.util.function.Consumer;
 
-/** SwingWorker для постраничной загрузки /api/perfile. */
+/**
+ * Загрузчик /perfile-страницы — напрямую через IssueService (SonarIssuesApi).
+ * Больше не делает HTTP к /api/perfile.
+ */
 public class PerFileLoader extends SwingWorker<IssueService.PerFilePage, Void> {
 
     private final IssueService issueService;
-    private final String query;
+    private final GuiContext ctx;
     private final int page;
     private final int pageSize;
     private final Consumer<IssueService.PerFilePage> onSuccess;
@@ -19,8 +22,8 @@ public class PerFileLoader extends SwingWorker<IssueService.PerFilePage, Void> {
     public PerFileLoader(GuiContext ctx, int page, int pageSize,
                          Consumer<IssueService.PerFilePage> onSuccess,
                          Consumer<Throwable> onError) {
-        this.issueService = new IssueService(ctx.api());
-        this.query = ctx.commonQuery();
+        this.ctx = ctx;
+        this.issueService = new IssueService(ctx);
         this.page = page;
         this.pageSize = pageSize;
         this.onSuccess = onSuccess;
@@ -29,7 +32,9 @@ public class PerFileLoader extends SwingWorker<IssueService.PerFilePage, Void> {
 
     @Override
     protected IssueService.PerFilePage doInBackground() throws Exception {
-        return issueService.fetchPerFilePage(query, page, pageSize);
+        return issueService.fetchPerFilePage(
+                ctx.getProject(), ctx.getSeverity(), ctx.getQuality(),
+                ctx.isHideProcessed(), page, pageSize);
     }
 
     @Override

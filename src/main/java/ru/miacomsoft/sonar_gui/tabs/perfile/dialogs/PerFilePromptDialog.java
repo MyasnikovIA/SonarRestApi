@@ -10,10 +10,6 @@ import javax.swing.*;
 import java.awt.*;
 import java.awt.datatransfer.StringSelection;
 
-/**
- * Диалог: сгенерировать промпт для LLM (status-comment) по одному issue,
- * показать в textarea и скопировать в буфер.
- */
 public class PerFilePromptDialog extends JDialog {
 
     private final JTextArea promptArea = new JTextArea(20, 80);
@@ -75,8 +71,7 @@ public class PerFilePromptDialog extends JDialog {
     private void loadPrompt(GuiContext ctx, IssueService.IssueDto issue) {
         new SwingWorker<String, Void>() {
             @Override protected String doInBackground() throws Exception {
-                PromptService promptService = new PromptService(ctx.api());
-                return promptService.buildForIssue(
+                return new PromptService(ctx).buildForIssue(
                         ctx.getProject(), "status-comment",
                         issue.key(), "accept", null);
             }

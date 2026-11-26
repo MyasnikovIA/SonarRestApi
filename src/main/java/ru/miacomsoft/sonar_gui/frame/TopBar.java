@@ -1,6 +1,5 @@
 package ru.miacomsoft.sonar_gui.frame;
 
-import org.json.JSONObject;
 import ru.miacomsoft.sonar_gui.common.GuiContext;
 import ru.miacomsoft.sonar_gui.common.GuiStyle;
 import ru.miacomsoft.sonar_gui.common.UiHelpers;
@@ -13,11 +12,11 @@ import java.util.List;
 import java.util.function.Consumer;
 
 /**
- * Верхняя панель GUI-клиента (аналог topbar из web/index.html):
- *   - поле project (с автодополнением из /api/projects);
- *   - выпадающие списки sev / qual;
- *   - индикатор состояния (health-polling каждые 5 сек);
- *   - кнопка "Обновить", эмитящая событие onRefresh.
+ * Верхняя панель GUI-клиента.
+ *
+ * Работает напрямую с ServerState:
+ *   - health проверяется через HealthService → SonarClient /api/system/ping;
+ *   - список проектов грузится через ProjectsService → SonarClient /api/components/search.
  */
 public class TopBar extends JPanel {
 
@@ -37,43 +36,38 @@ public class TopBar extends JPanel {
 
     public TopBar(GuiContext ctx) {
         this.ctx = ctx;
-        this.healthService = new HealthService(ctx.api());
-        this.projectsService = new ProjectsService(ctx.api());
+        this.healthService = new HealthService(ctx);
+        this.projectsService = new ProjectsService(ctx);
 
         setLayout(new BorderLayout(12, 0));
         setBackground(GuiStyle.BG2);
         setBorder(BorderFactory.createEmptyBorder(8, 16, 8, 16));
 
-        // ---------- Brand + project ----------
         JPanel left = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 0));
         left.setOpaque(false);
 
-        JLabel brand = new JLabel("◈ Sonar Rest API GUI");
+        JLabel brand = new JLabel("◈ Sonar GUI");
         brand.setForeground(GuiStyle.ACCENT);
         brand.setFont(GuiStyle.FONT_TITLE);
         left.add(brand);
-
         left.add(Box.createHorizontalStrut(20));
 
-        JLabel projectLbl = UiHelpers.dimLabel("project:");
-        left.add(projectLbl);
-
+        left.add(UiHelpers.dimLabel("project:"));
         projectCombo = new JComboBox<>();
         projectCombo.setEditable(true);
-        projectCombo.setPreferredSize(new Dimension(320, 26));
+        projectCombo.setPreferredSize(new Dimension(340, 26));
         projectCombo.setBackground(GuiStyle.BG);
         projectCombo.setForeground(GuiStyle.TEXT);
         projectCombo.setFont(GuiStyle.FONT_MONO);
         left.add(projectCombo);
 
         JButton loadProjects = UiHelpers.secondaryButton("↻");
-        loadProjects.setToolTipText("Загрузить список проектов");
+        loadProjects.setToolTipText("Загрузить список проектов из SonarQube");
         loadProjects.addActionListener(e -> loadProjectsAsync());
         left.add(loadProjects);
 
         add(left, BorderLayout.WEST);
 
-        // ---------- sev / qual ----------
         JPanel center = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
         center.setOpaque(false);
 
@@ -94,7 +88,6 @@ public class TopBar extends JPanel {
 
         add(center, BorderLayout.CENTER);
 
-        // ---------- status + refresh ----------
         JPanel right = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 0));
         right.setOpaque(false);
 
@@ -103,7 +96,7 @@ public class TopBar extends JPanel {
         statusDot.setFont(GuiStyle.FONT_BOLD);
         right.add(statusDot);
 
-        statusText = new JLabel("Подключение…");
+        statusText = new JLabel("Инициализация…");
         statusText.setForeground(GuiStyle.TEXT_DIM);
         statusText.setFont(GuiStyle.FONT_BASE);
         right.add(statusText);
@@ -116,34 +109,31 @@ public class TopBar extends JPanel {
 
         add(right, BorderLayout.EAST);
 
-        // ---------- события ----------
+        // события
         projectCombo.addActionListener(e -> {
             Object v = projectCombo.getEditor().getItem();
             String s = v == null ? "" : v.toString().trim();
             ctx.setProject(s);
-            loadProjectsAsyncIfNeeded();
         });
-
         sevCombo.addActionListener(e -> {
             Object v = sevCombo.getSelectedItem();
             ctx.setSeverity(v == null ? "MEDIUM" : v.toString());
         });
-
         qualCombo.addActionListener(e -> {
             Object v = qualCombo.getSelectedItem();
             ctx.setQuality(v == null ? "MAINTAINABILITY" : v.toString());
         });
 
-        // ---------- health polling ----------
+        // health
         healthTimer = new Timer(5000, e -> checkHealthAsync());
         healthTimer.start();
         checkHealthAsync();
 
-        // ---------- project listener ----------
+        // при смене проекта — синхронизируем поле
         ctx.onProjectChanged(c -> SwingUtilities.invokeLater(() -> {
-            Object v = projectCombo.getEditor().getItem();
-            String current = v == null ? "" : v.toString().trim();
-            if (!current.equals(c.getProject())) {
+            Object cur = projectCombo.getEditor().getItem();
+            String s = cur == null ? "" : cur.toString().trim();
+            if (!s.equals(c.getProject())) {
                 projectCombo.getEditor().setItem(c.getProject());
             }
         }));
@@ -156,27 +146,27 @@ public class TopBar extends JPanel {
     // ============ HEALTH ============
 
     private void checkHealthAsync() {
-        new SwingWorker<JSONObject, Void>() {
-            @Override
-            protected JSONObject doInBackground() throws Exception {
-                return healthService.fetchHealth();
+        new SwingWorker<Boolean, Void>() {
+            @Override protected Boolean doInBackground() {
+                try { return healthService.isReady(); }
+                catch (Exception e) { return false; }
             }
-
-            @Override
-            protected void done() {
+            @Override protected void done() {
                 try {
-                    JSONObject h = get();
-                    boolean ready = h.optBoolean("sessionReady", false);
+                    boolean ready = get();
                     if (ready) {
                         statusDot.setForeground(GuiStyle.OK);
                         statusText.setText("Готов к работе");
+                    } else if (!ctx.isSessionReady()) {
+                        statusDot.setForeground(GuiStyle.ERR);
+                        statusText.setText("session.properties не заполнен");
                     } else {
                         statusDot.setForeground(GuiStyle.ERR);
-                        statusText.setText("session not ready");
+                        statusText.setText("SonarQube недоступен");
                     }
                 } catch (Exception ex) {
                     statusDot.setForeground(GuiStyle.ERR);
-                    statusText.setText("API unreachable");
+                    statusText.setText("Ошибка проверки");
                 }
             }
         }.execute();
@@ -186,22 +176,15 @@ public class TopBar extends JPanel {
 
     private void loadProjectsAsync() {
         new SwingWorker<List<ProjectsService.ProjectItem>, Void>() {
-            @Override
-            protected List<ProjectsService.ProjectItem> doInBackground() throws Exception {
+            @Override protected List<ProjectsService.ProjectItem> doInBackground() throws Exception {
                 return projectsService.fetchProjects();
             }
-
-            @Override
-            protected void done() {
+            @Override protected void done() {
                 try {
                     List<ProjectsService.ProjectItem> list = get();
                     String current = ctx.getProject();
-
                     projectCombo.removeAllItems();
-                    for (ProjectsService.ProjectItem p : list) {
-                        projectCombo.addItem(p.key());
-                    }
-                    // восстановить текущий выбор, если он есть в списке
+                    for (ProjectsService.ProjectItem p : list) projectCombo.addItem(p.key());
                     if (current != null && !current.isBlank()) {
                         projectCombo.getEditor().setItem(current);
                     } else if (projectCombo.getItemCount() > 0) {
@@ -215,12 +198,5 @@ public class TopBar extends JPanel {
                 }
             }
         }.execute();
-    }
-
-    /** Ленивая подгрузка проектов — только если список ещё пуст. */
-    private void loadProjectsAsyncIfNeeded() {
-        if (projectCombo.getItemCount() == 0) {
-            loadProjectsAsync();
-        }
     }
 }

@@ -15,9 +15,6 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 
-/**
- * Массовое применение статуса и комментария к группе issues.
- */
 public class PerFileBulkDialog extends JDialog {
 
     private final GuiContext ctx;
@@ -37,7 +34,6 @@ public class PerFileBulkDialog extends JDialog {
         this.issues = issues;
         this.onDone = onDone;
 
-        // начальные теги — с первого issue
         if (!issues.isEmpty()) selectedTags.addAll(issues.get(0).tags());
 
         setDefaultCloseOperation(DISPOSE_ON_CLOSE);
@@ -73,7 +69,6 @@ public class PerFileBulkDialog extends JDialog {
         commentArea.setFont(GuiStyle.FONT_MONO);
         commentArea.setBackground(GuiStyle.BG2);
         commentArea.setForeground(GuiStyle.TEXT);
-        commentArea.setCaretColor(GuiStyle.TEXT);
         commentArea.setLineWrap(true);
         commentArea.setWrapStyleWord(true);
         JScrollPane commentScroll = new JScrollPane(commentArea);
@@ -94,15 +89,12 @@ public class PerFileBulkDialog extends JDialog {
 
         JPanel footer = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
         footer.setOpaque(false);
-
         JButton cancelBtn = UiHelpers.secondaryButton("Отмена");
         cancelBtn.addActionListener(e -> dispose());
         footer.add(cancelBtn);
-
         applyBtn = UiHelpers.primaryButton("Применить ко всем");
         applyBtn.addActionListener(e -> doApply());
         footer.add(applyBtn);
-
         root.add(footer, BorderLayout.SOUTH);
 
         loadAvailableTags();
@@ -111,7 +103,7 @@ public class PerFileBulkDialog extends JDialog {
     private void loadAvailableTags() {
         new SwingWorker<List<String>, Void>() {
             @Override protected List<String> doInBackground() throws Exception {
-                return new TagsService(ctx.api()).fetchTags(ctx.getProject());
+                return new TagsService(ctx).fetchTags(ctx.getProject());
             }
             @Override protected void done() {
                 try {
@@ -156,9 +148,8 @@ public class PerFileBulkDialog extends JDialog {
         new SwingWorker<int[], Void>() {
             @Override protected int[] doInBackground() {
                 int ok = 0, fail = 0;
-                MarkService markService = new MarkService(ctx.api());
-                SetTagsService setTags = new SetTagsService(ctx.api());
-
+                MarkService markService = new MarkService(ctx);
+                SetTagsService setTags = new SetTagsService(ctx);
                 for (IssueService.IssueDto it : issues) {
                     try {
                         markService.markOne(ctx.getProject(), it.key(), status, comment);
@@ -166,7 +157,7 @@ public class PerFileBulkDialog extends JDialog {
                             setTags.setTags(ctx.getProject(), it.key(), tags);
                         }
                         ok++;
-                    } catch (Exception ex) {
+                    } catch (Exception e) {
                         fail++;
                     }
                 }

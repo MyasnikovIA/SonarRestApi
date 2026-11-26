@@ -2,39 +2,52 @@ package ru.miacomsoft.sonar_gui.common.services;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
-import ru.miacomsoft.sonar_gui.client.SonarApiClient;
+import ru.miacomsoft.sonar_gui.common.GuiContext;
 
 import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Обёртка над GET /api/projects.
- * Возвращает список доступных проектов SonarQube.
+ * Список доступных проектов SonarQube — напрямую через /api/components/search.
  */
 public class ProjectsService {
 
-    /** Простой DTO для выпадающего списка. */
     public record ProjectItem(String key, String name) {
         @Override public String toString() { return key; }
     }
 
-    private final SonarApiClient api;
+    private final GuiContext ctx;
 
-    public ProjectsService(SonarApiClient api) {
-        this.api = api;
+    public ProjectsService(GuiContext ctx) {
+        this.ctx = ctx;
     }
 
     public List<ProjectItem> fetchProjects() throws Exception {
-        JSONObject root = api.getJson("/api/projects");
-        JSONArray arr = root.optJSONArray("projects");
+        if (!ctx.isSessionReady()) return new ArrayList<>();
+
         List<ProjectItem> out = new ArrayList<>();
-        if (arr != null) {
-            for (int i = 0; i < arr.length(); i++) {
-                JSONObject o = arr.getJSONObject(i);
+        int page = 1;
+        int pageSize = 500;
+        int total = -1;
+
+        while (total < 0 || out.size() < total) {
+            String url = "/api/components/search?qualifiers=TRK&p=" + page + "&ps=" + pageSize;
+            JSONObject root = new JSONObject(ctx.state().getClient().get(url));
+
+            JSONObject paging = root.optJSONObject("paging");
+            if (paging != null) total = paging.optInt("total", 0);
+
+            JSONArray components = root.optJSONArray("components");
+            if (components == null || components.length() == 0) break;
+
+            for (int i = 0; i < components.length(); i++) {
+                JSONObject c = components.getJSONObject(i);
                 out.add(new ProjectItem(
-                        o.optString("key", ""),
-                        o.optString("name", "")));
+                        c.optString("key", ""),
+                        c.optString("name", "")));
             }
+            page++;
+            if (page > 50) break;
         }
         return out;
     }

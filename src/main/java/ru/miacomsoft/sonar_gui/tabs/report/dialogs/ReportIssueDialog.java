@@ -1,8 +1,10 @@
 package ru.miacomsoft.sonar_gui.tabs.report.dialogs;
 
+import ru.miacomsoft.sonar_gui.backend.ollama.OllamaResponse;
 import ru.miacomsoft.sonar_gui.common.GuiContext;
 import ru.miacomsoft.sonar_gui.common.GuiStyle;
 import ru.miacomsoft.sonar_gui.common.UiHelpers;
+import ru.miacomsoft.sonar_gui.common.services.AiResolveService;
 import ru.miacomsoft.sonar_gui.common.services.IssueService;
 import ru.miacomsoft.sonar_gui.common.services.MarkService;
 import ru.miacomsoft.sonar_gui.common.services.SetTagsService;
@@ -16,12 +18,12 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 
-/** Диалог одного issue для вкладки Report (имя уникально). */
 public class ReportIssueDialog extends JDialog {
 
     private final GuiContext ctx;
     private final IssueService.IssueDto issue;
     private final Runnable onDone;
+    private final AiResolveService aiService;
 
     private final JTextArea snippetArea = new JTextArea();
     private final JComboBox<String> statusCombo;
@@ -30,17 +32,19 @@ public class ReportIssueDialog extends JDialog {
     private final Set<String> selectedTags = new LinkedHashSet<>();
     private final List<String> availableTags = new ArrayList<>();
     private final JButton applyBtn;
+    private final JButton aiBtn;
 
     public ReportIssueDialog(GuiContext ctx, IssueService.IssueDto issue, Runnable onDone) {
         super((Frame) null, "Детали ошибки (Report)", true);
         this.ctx = ctx;
         this.issue = issue;
         this.onDone = onDone;
+        this.aiService = new AiResolveService(ctx);
 
         selectedTags.addAll(issue.tags());
 
         setDefaultCloseOperation(DISPOSE_ON_CLOSE);
-        setSize(900, 720);
+        setSize(920, 740);
         setLocationRelativeTo(getOwner());
 
         JPanel root = new JPanel(new BorderLayout(10, 10));
@@ -93,6 +97,10 @@ public class ReportIssueDialog extends JDialog {
         }, mapStatus(issue.status()));
         statusCombo.setPreferredSize(new Dimension(200, 26));
         statusRow.add(statusCombo);
+
+        aiBtn = UiHelpers.secondaryButton("🤖 Получить резолюцию ИИ");
+        aiBtn.addActionListener(e -> runAiResolve());
+        statusRow.add(aiBtn);
         fields.add(statusRow);
 
         fields.add(Box.createVerticalStrut(8));
@@ -138,10 +146,10 @@ public class ReportIssueDialog extends JDialog {
     private void loadSnippetAndTags() {
         new SwingWorker<Object[], Void>() {
             @Override protected Object[] doInBackground() throws Exception {
-                SnippetService ss = new SnippetService(ctx.api());
+                SnippetService ss = new SnippetService(ctx);
                 SnippetService.SnippetResult sr = ss.fetchSnippet(
                         ctx.getProject(), issue.key());
-                List<String> tags = new TagsService(ctx.api()).fetchTags(ctx.getProject());
+                List<String> tags = new TagsService(ctx).fetchTags(ctx.getProject());
                 return new Object[]{sr, tags};
             }
             @Override protected void done() {
@@ -187,6 +195,55 @@ public class ReportIssueDialog extends JDialog {
         tagsPanel.repaint();
     }
 
+    private void runAiResolve() {
+        if (!ctx.ollamaConfig().isConfigured()) {
+            UiHelpers.showError(this,
+                    "Ollama не настроена. Меню «Файл → Настройки Ollama».");
+            return;
+        }
+
+        String status = (String) statusCombo.getSelectedItem();
+        String statusLabel = status == null ? "" : status;
+
+        aiBtn.setEnabled(false);
+        aiBtn.setText("⏳ ИИ работает…");
+
+        new SwingWorker<AiResolveService.ResolveResult, Void>() {
+            @Override protected AiResolveService.ResolveResult doInBackground() throws Exception {
+                return aiService.ask("status-comment", issue.key(), status, statusLabel);
+            }
+            @Override protected void done() {
+                aiBtn.setEnabled(true);
+                aiBtn.setText("🤖 Получить резолюцию ИИ");
+                try {
+                    AiResolveService.ResolveResult r = get();
+                    OllamaResponse p = r.parsed();
+                    if (p.status != null && !p.status.isBlank())
+                        statusCombo.setSelectedItem(p.status);
+                    if (p.comment != null) commentArea.setText(p.comment);
+
+                    if (p.tags != null && !p.tags.isEmpty()) {
+                        for (String t : p.tags) {
+                            if (!availableTags.contains(t)) availableTags.add(t);
+                            selectedTags.add(t);
+                        }
+                        if (p.tags.contains("require-fix"))
+                            selectedTags.remove("not-require-fix");
+                        if (p.tags.contains("not-require-fix"))
+                            selectedTags.remove("require-fix");
+                        rebuildTagCheckboxes();
+                    }
+                    UiHelpers.showToast(ReportIssueDialog.this,
+                            "Резолюция ИИ получена", false);
+                } catch (Exception e) {
+                    Throwable cause = e.getCause() != null ? e.getCause() : e;
+                    UiHelpers.showError(ReportIssueDialog.this,
+                            "Ошибка ИИ: " + cause.getMessage());
+                }
+            }
+        }.execute();
+    }
+
     private void doApply() {
         String status = (String) statusCombo.getSelectedItem();
         String comment = commentArea.getText();
@@ -198,12 +255,9 @@ public class ReportIssueDialog extends JDialog {
 
         new SwingWorker<Void, Void>() {
             @Override protected Void doInBackground() throws Exception {
-                new MarkService(ctx.api())
-                        .markOne(ctx.getProject(), issue.key(), status, comment);
-                if (tagsChanged) {
-                    new SetTagsService(ctx.api())
-                            .setTags(ctx.getProject(), issue.key(), tags);
-                }
+                new MarkService(ctx).markOne(ctx.getProject(), issue.key(), status, comment);
+                if (tagsChanged)
+                    new SetTagsService(ctx).setTags(ctx.getProject(), issue.key(), tags);
                 return null;
             }
             @Override protected void done() {

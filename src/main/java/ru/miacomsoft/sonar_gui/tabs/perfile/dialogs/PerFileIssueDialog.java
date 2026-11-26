@@ -1,8 +1,10 @@
 package ru.miacomsoft.sonar_gui.tabs.perfile.dialogs;
 
+import ru.miacomsoft.sonar_gui.backend.ollama.OllamaResponse;
 import ru.miacomsoft.sonar_gui.common.GuiContext;
 import ru.miacomsoft.sonar_gui.common.GuiStyle;
 import ru.miacomsoft.sonar_gui.common.UiHelpers;
+import ru.miacomsoft.sonar_gui.common.services.AiResolveService;
 import ru.miacomsoft.sonar_gui.common.services.IssueService;
 import ru.miacomsoft.sonar_gui.common.services.MarkService;
 import ru.miacomsoft.sonar_gui.common.services.SetTagsService;
@@ -16,13 +18,6 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 
-/**
- * Модальный диалог одного issue (двойной клик по строке):
- *   - данные issue, snippet;
- *   - смена статуса + комментарий;
- *   - чекбоксы тегов;
- *   - Применить / Reopen (если обработан) / Сгенерировать промпт.
- */
 public class PerFileIssueDialog extends JDialog {
 
     private final GuiContext ctx;
@@ -36,21 +31,21 @@ public class PerFileIssueDialog extends JDialog {
     private final Set<String> selectedTags = new LinkedHashSet<>();
     private final List<String> availableTags = new ArrayList<>();
     private final JButton applyBtn;
-    private final JButton reopenBtn;
-    private final JButton promptBtn;
+    private final JButton aiBtn;
+
+    private final AiResolveService aiService;
 
     public PerFileIssueDialog(GuiContext ctx, IssueService.IssueDto issue, Runnable onDone) {
-        super(SwingUtilities.getWindowAncestor(new JLabel()) instanceof Frame f
-                ? f : (Frame) null, "Детали ошибки", true);
+        super((Frame) null, "Детали ошибки", true);
         this.ctx = ctx;
         this.issue = issue;
         this.onDone = onDone;
+        this.aiService = new AiResolveService(ctx);
 
-        // предзаполним тегами текущего issue
         selectedTags.addAll(issue.tags());
 
         setDefaultCloseOperation(DISPOSE_ON_CLOSE);
-        setSize(900, 720);
+        setSize(920, 740);
         setLocationRelativeTo(getOwner());
 
         JPanel root = new JPanel(new BorderLayout(10, 10));
@@ -58,7 +53,6 @@ public class PerFileIssueDialog extends JDialog {
         root.setBorder(BorderFactory.createEmptyBorder(12, 12, 12, 12));
         setContentPane(root);
 
-        // ---------- HEADER ----------
         JPanel header = new JPanel();
         header.setLayout(new BoxLayout(header, BoxLayout.Y_AXIS));
         header.setOpaque(false);
@@ -78,29 +72,24 @@ public class PerFileIssueDialog extends JDialog {
 
         root.add(header, BorderLayout.NORTH);
 
-        // ---------- CENTER ----------
         JPanel center = new JPanel(new BorderLayout(10, 10));
         center.setOpaque(false);
 
-        // snippet
         snippetArea.setEditable(false);
         snippetArea.setFont(GuiStyle.FONT_MONO);
         snippetArea.setBackground(GuiStyle.BG2);
         snippetArea.setForeground(GuiStyle.TEXT);
-        snippetArea.setCaretColor(GuiStyle.TEXT);
         JScrollPane snippetScroll = new JScrollPane(snippetArea);
         snippetScroll.setBorder(BorderFactory.createTitledBorder(
                 BorderFactory.createLineBorder(GuiStyle.BORDER),
                 "Код", 0, 0, GuiStyle.FONT_BOLD, GuiStyle.TEXT_DIM));
-        snippetScroll.setPreferredSize(new Dimension(0, 260));
+        snippetScroll.setPreferredSize(new Dimension(0, 240));
         center.add(snippetScroll, BorderLayout.NORTH);
 
-        // fields
         JPanel fields = new JPanel();
         fields.setLayout(new BoxLayout(fields, BoxLayout.Y_AXIS));
         fields.setOpaque(false);
 
-        // status
         JPanel statusRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
         statusRow.setOpaque(false);
         statusRow.add(UiHelpers.dimLabel("Статус перехода:"));
@@ -109,15 +98,17 @@ public class PerFileIssueDialog extends JDialog {
         }, mapStatus(issue.status()));
         statusCombo.setPreferredSize(new Dimension(200, 26));
         statusRow.add(statusCombo);
+
+        aiBtn = UiHelpers.secondaryButton("🤖 Получить резолюцию ИИ");
+        aiBtn.addActionListener(e -> runAiResolve());
+        statusRow.add(aiBtn);
         fields.add(statusRow);
 
-        // comment
         fields.add(Box.createVerticalStrut(8));
         fields.add(UiHelpers.dimLabel("Комментарий:"));
         commentArea.setFont(GuiStyle.FONT_MONO);
         commentArea.setBackground(GuiStyle.BG2);
         commentArea.setForeground(GuiStyle.TEXT);
-        commentArea.setCaretColor(GuiStyle.TEXT);
         commentArea.setLineWrap(true);
         commentArea.setWrapStyleWord(true);
         JScrollPane commentScroll = new JScrollPane(commentArea);
@@ -125,7 +116,6 @@ public class PerFileIssueDialog extends JDialog {
         commentScroll.setPreferredSize(new Dimension(0, 80));
         fields.add(commentScroll);
 
-        // tags
         fields.add(Box.createVerticalStrut(8));
         fields.add(UiHelpers.dimLabel("Теги:"));
         tagsPanel.setOpaque(false);
@@ -138,23 +128,13 @@ public class PerFileIssueDialog extends JDialog {
         center.add(fields, BorderLayout.CENTER);
         root.add(center, BorderLayout.CENTER);
 
-        // ---------- FOOTER ----------
         JPanel footer = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
         footer.setOpaque(false);
 
-        promptBtn = UiHelpers.secondaryButton("📝 Промпт");
-        promptBtn.addActionListener(e -> {
-            dispose();
-            new PerFilePromptDialog(ctx, issue).setVisible(true);
-        });
-        footer.add(promptBtn);
-
         if (issue.isProcessed()) {
-            reopenBtn = UiHelpers.dangerButton("Reopen");
+            JButton reopenBtn = UiHelpers.dangerButton("Reopen");
             reopenBtn.addActionListener(e -> doReopen());
             footer.add(reopenBtn);
-        } else {
-            reopenBtn = null;
         }
 
         JButton cancelBtn = UiHelpers.secondaryButton("Отмена");
@@ -167,18 +147,17 @@ public class PerFileIssueDialog extends JDialog {
 
         root.add(footer, BorderLayout.SOUTH);
 
-        // ---------- ASYNC LOAD ----------
         loadSnippetAndTags();
     }
 
     private void loadSnippetAndTags() {
         new SwingWorker<Object[], Void>() {
             @Override protected Object[] doInBackground() throws Exception {
-                SnippetService snippetService = new SnippetService(ctx.api());
-                SnippetService.SnippetResult sr = snippetService.fetchSnippet(
+                SnippetService ss = new SnippetService(ctx);
+                SnippetService.SnippetResult sr = ss.fetchSnippet(
                         ctx.getProject(), issue.key());
-                TagsService tagsService = new TagsService(ctx.api());
-                List<String> tags = tagsService.fetchTags(ctx.getProject());
+                TagsService ts = new TagsService(ctx);
+                List<String> tags = ts.fetchTags(ctx.getProject());
                 return new Object[]{sr, tags};
             }
             @Override protected void done() {
@@ -224,6 +203,56 @@ public class PerFileIssueDialog extends JDialog {
         tagsPanel.repaint();
     }
 
+    private void runAiResolve() {
+        if (!ctx.ollamaConfig().isConfigured()) {
+            UiHelpers.showError(this,
+                    "Ollama не настроена. Меню «Файл → Настройки Ollama».");
+            return;
+        }
+
+        String status = (String) statusCombo.getSelectedItem();
+        String statusLabel = status == null ? "" : status;
+
+        aiBtn.setEnabled(false);
+        aiBtn.setText("⏳ ИИ работает…");
+
+        new SwingWorker<AiResolveService.ResolveResult, Void>() {
+            @Override protected AiResolveService.ResolveResult doInBackground() throws Exception {
+                return aiService.ask("status-comment", issue.key(), status, statusLabel);
+            }
+            @Override protected void done() {
+                aiBtn.setEnabled(true);
+                aiBtn.setText("🤖 Получить резолюцию ИИ");
+                try {
+                    AiResolveService.ResolveResult r = get();
+                    OllamaResponse p = r.parsed();
+
+                    if (p.status != null && !p.status.isBlank())
+                        statusCombo.setSelectedItem(p.status);
+                    if (p.comment != null) commentArea.setText(p.comment);
+
+                    if (p.tags != null && !p.tags.isEmpty()) {
+                        for (String t : p.tags) {
+                            if (!availableTags.contains(t)) availableTags.add(t);
+                            selectedTags.add(t);
+                        }
+                        if (p.tags.contains("require-fix"))
+                            selectedTags.remove("not-require-fix");
+                        if (p.tags.contains("not-require-fix"))
+                            selectedTags.remove("require-fix");
+                        rebuildTagCheckboxes();
+                    }
+                    UiHelpers.showToast(PerFileIssueDialog.this,
+                            "Резолюция ИИ получена", false);
+                } catch (Exception e) {
+                    Throwable cause = e.getCause() != null ? e.getCause() : e;
+                    UiHelpers.showError(PerFileIssueDialog.this,
+                            "Ошибка ИИ: " + cause.getMessage());
+                }
+            }
+        }.execute();
+    }
+
     private void doApply() {
         String status = (String) statusCombo.getSelectedItem();
         String comment = commentArea.getText();
@@ -235,12 +264,9 @@ public class PerFileIssueDialog extends JDialog {
 
         new SwingWorker<Void, Void>() {
             @Override protected Void doInBackground() throws Exception {
-                MarkService markService = new MarkService(ctx.api());
-                markService.markOne(ctx.getProject(), issue.key(), status, comment);
-                if (tagsChanged) {
-                    SetTagsService setTags = new SetTagsService(ctx.api());
-                    setTags.setTags(ctx.getProject(), issue.key(), tags);
-                }
+                new MarkService(ctx).markOne(ctx.getProject(), issue.key(), status, comment);
+                if (tagsChanged)
+                    new SetTagsService(ctx).setTags(ctx.getProject(), issue.key(), tags);
                 return null;
             }
             @Override protected void done() {
@@ -252,8 +278,7 @@ public class PerFileIssueDialog extends JDialog {
                     dispose();
                     if (onDone != null) onDone.run();
                 } catch (Exception e) {
-                    UiHelpers.showError(PerFileIssueDialog.this,
-                            "Ошибка: " + e.getMessage());
+                    UiHelpers.showError(PerFileIssueDialog.this, "Ошибка: " + e.getMessage());
                 }
             }
         }.execute();
@@ -263,9 +288,9 @@ public class PerFileIssueDialog extends JDialog {
         if (!UiHelpers.confirm(this, "Reopen этот issue?")) return;
         new SwingWorker<Void, Void>() {
             @Override protected Void doInBackground() throws Exception {
-                MarkService markService = new MarkService(ctx.api());
-                String transition = "CONFIRMED".equals(issue.status()) ? "unconfirm" : "reopen";
-                markService.markOne(ctx.getProject(), issue.key(), transition, "");
+                String transition = "CONFIRMED".equals(issue.status())
+                        ? "unconfirm" : "reopen";
+                new MarkService(ctx).markOne(ctx.getProject(), issue.key(), transition, "");
                 return null;
             }
             @Override protected void done() {
@@ -281,8 +306,6 @@ public class PerFileIssueDialog extends JDialog {
             }
         }.execute();
     }
-
-    // ============ helpers ============
 
     private static String mapStatus(String sonar) {
         if (sonar == null) return "accept";

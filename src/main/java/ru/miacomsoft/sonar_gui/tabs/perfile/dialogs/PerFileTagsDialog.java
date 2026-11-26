@@ -14,11 +14,6 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 
-/**
- * Редактор тегов для выбранных issue:
- *   - список чекбоксов по доступным тегам + фильтр;
- *   - сохранить — применяет теги ко всем issue.
- */
 public class PerFileTagsDialog extends JDialog {
 
     private final GuiContext ctx;
@@ -59,7 +54,6 @@ public class PerFileTagsDialog extends JDialog {
 
         filterField.setPreferredSize(new Dimension(0, 28));
         filterField.setToolTipText("Фильтр по тегам");
-        filterField.addActionListener(e -> rebuildList());
         filterField.getDocument().addDocumentListener(new javax.swing.event.DocumentListener() {
             public void insertUpdate(javax.swing.event.DocumentEvent e)  { rebuildList(); }
             public void removeUpdate(javax.swing.event.DocumentEvent e)  { rebuildList(); }
@@ -69,7 +63,6 @@ public class PerFileTagsDialog extends JDialog {
 
         listPanel.setLayout(new BoxLayout(listPanel, BoxLayout.Y_AXIS));
         listPanel.setBackground(GuiStyle.BG2);
-
         JScrollPane scroll = new JScrollPane(listPanel);
         scroll.setBorder(BorderFactory.createLineBorder(GuiStyle.BORDER));
         scroll.getViewport().setBackground(GuiStyle.BG2);
@@ -79,19 +72,15 @@ public class PerFileTagsDialog extends JDialog {
 
         JPanel footer = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
         footer.setOpaque(false);
-
         statusLbl = UiHelpers.dimLabel("Загрузка тегов…");
         footer.add(statusLbl);
-
         JButton cancelBtn = UiHelpers.secondaryButton("Отмена");
         cancelBtn.addActionListener(e -> dispose());
         footer.add(cancelBtn);
-
         saveBtn = UiHelpers.primaryButton("Сохранить");
-        saveBtn.addActionListener(e -> doSave());
         saveBtn.setEnabled(false);
+        saveBtn.addActionListener(e -> doSave());
         footer.add(saveBtn);
-
         root.add(footer, BorderLayout.SOUTH);
 
         loadTags();
@@ -100,7 +89,7 @@ public class PerFileTagsDialog extends JDialog {
     private void loadTags() {
         new SwingWorker<List<String>, Void>() {
             @Override protected List<String> doInBackground() throws Exception {
-                return new TagsService(ctx.api()).fetchTags(ctx.getProject());
+                return new TagsService(ctx).fetchTags(ctx.getProject());
             }
             @Override protected void done() {
                 try {
@@ -149,7 +138,7 @@ public class PerFileTagsDialog extends JDialog {
         new SwingWorker<int[], Void>() {
             @Override protected int[] doInBackground() {
                 int ok = 0, fail = 0;
-                SetTagsService setTags = new SetTagsService(ctx.api());
+                SetTagsService setTags = new SetTagsService(ctx);
                 for (IssueService.IssueDto it : issues) {
                     try {
                         setTags.setTags(ctx.getProject(), it.key(), tags);

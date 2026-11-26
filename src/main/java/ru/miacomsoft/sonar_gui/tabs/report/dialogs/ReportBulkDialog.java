@@ -15,7 +15,6 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 
-/** Массовое применение статуса в Report. */
 public class ReportBulkDialog extends JDialog {
 
     private final GuiContext ctx;
@@ -104,7 +103,7 @@ public class ReportBulkDialog extends JDialog {
     private void loadAvailableTags() {
         new SwingWorker<List<String>, Void>() {
             @Override protected List<String> doInBackground() throws Exception {
-                return new TagsService(ctx.api()).fetchTags(ctx.getProject());
+                return new TagsService(ctx).fetchTags(ctx.getProject());
             }
             @Override protected void done() {
                 try {
@@ -149,8 +148,8 @@ public class ReportBulkDialog extends JDialog {
         new SwingWorker<int[], Void>() {
             @Override protected int[] doInBackground() {
                 int ok = 0, fail = 0;
-                MarkService markService = new MarkService(ctx.api());
-                SetTagsService setTags = new SetTagsService(ctx.api());
+                MarkService markService = new MarkService(ctx);
+                SetTagsService setTags = new SetTagsService(ctx);
                 for (IssueService.IssueDto it : issues) {
                     try {
                         markService.markOne(ctx.getProject(), it.key(), status, comment);
@@ -174,7 +173,8 @@ public class ReportBulkDialog extends JDialog {
                     dispose();
                     if (onDone != null) onDone.run();
                 } catch (Exception e) {
-                    UiHelpers.showError(ReportBulkDialog.this, "Ошибка: " + e.getMessage());
+                    UiHelpers.showError(ReportBulkDialog.this,
+                            "Ошибка: " + e.getMessage());
                 }
             }
         }.execute();

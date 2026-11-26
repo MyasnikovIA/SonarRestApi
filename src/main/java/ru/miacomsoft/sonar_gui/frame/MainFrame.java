@@ -3,16 +3,13 @@ package ru.miacomsoft.sonar_gui.frame;
 import ru.miacomsoft.sonar_gui.common.GuiContext;
 import ru.miacomsoft.sonar_gui.common.GuiStyle;
 import ru.miacomsoft.sonar_gui.common.Reloadable;
+import ru.miacomsoft.sonar_gui.common.UiHelpers;
 import ru.miacomsoft.sonar_gui.tabs.perfile.PerFilePanel;
 import ru.miacomsoft.sonar_gui.tabs.report.ReportPanel;
 
 import javax.swing.*;
 import java.awt.*;
 
-/**
- * Главное окно GUI-клиента.
- * Подключает обе вкладки: Per-File и Report.
- */
 public class MainFrame extends JFrame {
 
     private final GuiContext ctx;
@@ -34,6 +31,8 @@ public class MainFrame extends JFrame {
 
         getContentPane().setBackground(GuiStyle.BG);
         setLayout(new BorderLayout());
+
+        setJMenuBar(buildMenuBar());
 
         topBar = new TopBar(ctx);
         topBar.setOnRefresh(c -> reloadActiveTab());
@@ -69,12 +68,69 @@ public class MainFrame extends JFrame {
                         + " · hideProcessed=" + c.isHideProcessed()));
     }
 
+    private JMenuBar buildMenuBar() {
+        JMenuBar bar = new JMenuBar();
+
+        JMenu file = new JMenu("Файл");
+        file.add(menuItem("Настройки SonarQube…", this::openSessionDialog));
+        file.add(menuItem("Настройки Ollama…",    this::openOllamaDialog));
+        file.addSeparator();
+        file.add(menuItem("Перезагрузить сессию", this::reloadSession));
+        file.addSeparator();
+        file.add(menuItem("Выход", () -> System.exit(0)));
+        bar.add(file);
+
+        JMenu view = new JMenu("Вид");
+        view.add(menuItem("Обновить активную вкладку", this::reloadActiveTab));
+        bar.add(view);
+
+        JMenu help = new JMenu("Справка");
+        help.add(menuItem("О программе", this::showAbout));
+        bar.add(help);
+
+        return bar;
+    }
+
+    private JMenuItem menuItem(String text, Runnable action) {
+        JMenuItem item = new JMenuItem(text);
+        item.addActionListener(e -> action.run());
+        return item;
+    }
+
+    private void openSessionDialog() {
+        new SessionDialog(ctx, () -> {
+            setStatusText("session.properties обновлён");
+            reloadActiveTab();
+        }).setVisible(true);
+    }
+
+    private void openOllamaDialog() {
+        new OllamaSettingsDialog(ctx, () ->
+                setStatusText("настройки Ollama обновлены")).setVisible(true);
+    }
+
+    private void reloadSession() {
+        try {
+            ctx.state().reload();
+            UiHelpers.showToast(this, "Сессия перезагружена", false);
+            reloadActiveTab();
+        } catch (Exception e) {
+            UiHelpers.showError(this, "Ошибка перезагрузки сессии: " + e.getMessage());
+        }
+    }
+
     private void reloadActiveTab() {
         setStatusText("Обновление…");
         Component c = tabs.getSelectedComponent();
-        if (c instanceof Reloadable r) {
-            r.reload();
-        }
+        if (c instanceof Reloadable r) r.reload();
+    }
+
+    private void showAbout() {
+        JOptionPane.showMessageDialog(this,
+                "Sonar GUI 1.0\nАвтономный клиент SonarQube.\n"
+                        + "session: " + ctx.sessionFile() + "\n"
+                        + "prompts: " + ctx.promptsDir(),
+                "О программе", JOptionPane.INFORMATION_MESSAGE);
     }
 
     public void setStatusText(String text) {

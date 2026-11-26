@@ -1,50 +1,75 @@
 package ru.miacomsoft.sonar_gui.common.services;
 
 import org.json.JSONObject;
-import ru.miacomsoft.sonar_gui.client.SonarApiClient;
+import ru.miacomsoft.sonar_gui.backend.Issue;
+import ru.miacomsoft.sonar_gui.backend.SonarBulkApi;
+import ru.miacomsoft.sonar_gui.backend.SonarIssuesApi;
+import ru.miacomsoft.sonar_gui.common.GuiContext;
+
+import java.util.ArrayList;
+import java.util.List;
 
 /**
- * Обёртка над POST /api/mark — один issue или массовая пометка.
- * И соответствует REST-контракту сервера (dryRun по умолчанию true).
+ * Пометки issue (accept / confirm / reopen …) напрямую через SonarBulkApi.
+ *
+ * ВАЖНО: SonarBulkApi.change() работает батчами, но для одного issue
+ * тоже сгодится — передаём список из одного Issue.
  */
 public class MarkService {
 
-    private final SonarApiClient api;
+    private final GuiContext ctx;
 
-    public MarkService(SonarApiClient api) {
-        this.api = api;
+    public MarkService(GuiContext ctx) {
+        this.ctx = ctx;
     }
 
-    /** Один issue. dryRun = false — реально применяет переход. */
     public JSONObject markOne(String projectKey, String issueKey,
                               String transition, String comment) throws Exception {
-        StringBuilder url = new StringBuilder("/api/mark?");
-        if (projectKey != null && !projectKey.isBlank()) {
-            url.append("project=").append(SonarApiClient.enc(projectKey)).append('&');
+        if (!ctx.isSessionReady()) throw new IllegalStateException("Сессия не готова");
+
+        SonarBulkApi bulk = ctx.state().newBulk();
+        bulk.setSilent(true);
+
+        Issue stub = new Issue();
+        stub.key = issueKey;
+
+        if ("reopen".equalsIgnoreCase(transition)) {
+            bulk.reopenIssues(List.of(stub));
+        } else {
+            bulk.change(List.of(stub), transition, comment);
         }
-        url.append("key=").append(SonarApiClient.enc(issueKey));
-        url.append("&transition=").append(SonarApiClient.enc(transition));
-        if (comment != null && !comment.isEmpty()) {
-            url.append("&comment=").append(SonarApiClient.enc(comment));
-        }
-        url.append("&dryRun=false");
-        return api.postJson(url.toString());
+        JSONObject o = new JSONObject();
+        o.put("success", true);
+        o.put("applied", true);
+        return o;
     }
 
-    /** Массовая пометка по фильтру. */
     public JSONObject markBulk(String projectKey, String severity, String quality,
                                String transition, String comment) throws Exception {
-        StringBuilder url = new StringBuilder("/api/mark?");
-        if (projectKey != null && !projectKey.isBlank()) {
-            url.append("project=").append(SonarApiClient.enc(projectKey)).append('&');
+        if (!ctx.isSessionReady()) throw new IllegalStateException("Сессия не готова");
+
+        SonarIssuesApi api = ctx.state().newApi(projectKey);
+        SonarBulkApi bulk = ctx.state().newBulk();
+        bulk.setSilent(true);
+
+        List<Issue> issues = api.fetchOpen(severity, quality);
+        int ok = 0;
+        int fail = 0;
+
+        if ("reopen".equalsIgnoreCase(transition)) {
+            java.util.Set<String> failed = bulk.reopenIssues(issues);
+            ok = issues.size() - failed.size();
+            fail = failed.size();
+        } else {
+            List<Issue> batch = new ArrayList<>(issues);
+            List<String> responses = bulk.change(batch, transition, comment);
+            ok = issues.size();
         }
-        url.append("sev=").append(SonarApiClient.enc(severity));
-        url.append("&qual=").append(SonarApiClient.enc(quality));
-        url.append("&transition=").append(SonarApiClient.enc(transition));
-        if (comment != null && !comment.isEmpty()) {
-            url.append("&comment=").append(SonarApiClient.enc(comment));
-        }
-        url.append("&dryRun=false");
-        return api.postJson(url.toString());
+        JSONObject o = new JSONObject();
+        o.put("success", true);
+        o.put("applied", true);
+        o.put("succeeded", ok);
+        o.put("failed", fail);
+        return o;
     }
 }

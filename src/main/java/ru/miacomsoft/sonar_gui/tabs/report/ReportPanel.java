@@ -41,6 +41,9 @@ public class ReportPanel extends JPanel implements Reloadable {
     private String filterText = "";
     private boolean isAllSelected = false;
 
+    // Ссылка на текущий активный загрузчик для возможности отмены
+    private ReportLoader currentLoader;
+
     public ReportPanel(GuiContext ctx) {
         this.ctx = ctx;
         setLayout(new BorderLayout());
@@ -60,7 +63,7 @@ public class ReportPanel extends JPanel implements Reloadable {
 
         masterCheckbox = new JCheckBox();
         masterCheckbox.setOpaque(false);
-        masterCheckbox.setToolTipText("Выделить всё");
+        masterCheckbox.setToolTipText("Выделить всё (или экспортировать по фильтрам без загрузки)");
         masterCheckbox.addActionListener(e -> {
             isAllSelected = masterCheckbox.isSelected();
             for (ReportFileCard c : cards) c.setGlobalSelectAll(isAllSelected);
@@ -191,6 +194,12 @@ public class ReportPanel extends JPanel implements Reloadable {
             return;
         }
 
+        // Отменяем предыдущую загрузку, если она еще работает
+        if (currentLoader != null && !currentLoader.isDone()) {
+            System.out.println("[ReportPanel] Отмена предыдущей загрузки...");
+            currentLoader.cancel(true);
+        }
+
         cardsContainer.removeAll();
         cardsContainer.add(emptyLabel("Загрузка данных..."));
         cardsContainer.revalidate();
@@ -198,17 +207,17 @@ public class ReportPanel extends JPanel implements Reloadable {
 
         progressBar.setVisible(true);
         progressBar.setIndeterminate(true);
-        applyFilterBtn.setEnabled(false);
         exportBtn.setEnabled(false);
 
         String sevCsv = sevDropdown.getSelectedCsv();
         String qualCsv = qualDropdown.getSelectedCsv();
         String statCsv = statusDropdown.getSelectedCsv();
 
-        new ReportLoader(ctx, sevCsv, qualCsv, statCsv,
+        currentLoader = new ReportLoader(ctx, sevCsv, qualCsv, statCsv,
                 this::onLoaded,
                 this::onError,
-                this::onProgress).execute();
+                this::onProgress);
+        currentLoader.execute();
     }
 
     private void onProgress(Object[] p) {
@@ -229,8 +238,11 @@ public class ReportPanel extends JPanel implements Reloadable {
     private void onLoaded(List<IssueService.IssueDto> issues) {
         this.allIssues = new ArrayList<>(issues);
         progressBar.setVisible(false);
-        applyFilterBtn.setEnabled(true);
         exportBtn.setEnabled(true);
+
+        // Сбрасываем глобальное выделение при перезагрузке
+        isAllSelected = false;
+        masterCheckbox.setSelected(false);
 
         rebuildCards();
         loadRulesFacet();
@@ -239,7 +251,6 @@ public class ReportPanel extends JPanel implements Reloadable {
 
     private void onError(Throwable t) {
         progressBar.setVisible(false);
-        applyFilterBtn.setEnabled(true);
         cardsContainer.removeAll();
         cardsContainer.add(emptyLabel("Ошибка: " + t.getMessage()));
         cardsContainer.revalidate();
@@ -255,14 +266,12 @@ public class ReportPanel extends JPanel implements Reloadable {
     }
 
     private void rebuildCards() {
-        // 1. Сортировка: сначала по правилу, затем по файлу, затем по строке
         List<IssueService.IssueDto> sorted = new ArrayList<>(allIssues);
         sorted.sort(Comparator
                 .comparing(IssueService.IssueDto::rule)
                 .thenComparing(IssueService.IssueDto::component)
                 .thenComparingInt(IssueService.IssueDto::line));
 
-        // 2. Группировка: если выбраны правила — группируем по правилам, иначе по файлам
         Map<String, List<IssueService.IssueDto>> grouped = new TreeMap<>();
         boolean groupByRule = !rulesDropdown.getSelected().isEmpty();
 
@@ -275,7 +284,6 @@ public class ReportPanel extends JPanel implements Reloadable {
         cards.clear();
 
         for (Map.Entry<String, List<IssueService.IssueDto>> e : grouped.entrySet()) {
-            // Меняем иконку и текст заголовка в зависимости от режима
             String title = groupByRule ? "📏 " + e.getKey() : "📁 " + e.getKey();
 
             ReportFileCard card = new ReportFileCard(title, e.getValue(),
@@ -330,15 +338,19 @@ public class ReportPanel extends JPanel implements Reloadable {
 
     private List<IssueService.IssueDto> collectSelected() {
         List<IssueService.IssueDto> out = new ArrayList<>();
-        for (ReportFileCard c : cards) out.addAll(c.getSelectedIssues());
+        for (ReportFileCard c : cards) {
+            if (isAllSelected && !c.isVisible()) continue;
+            out.addAll(c.getSelectedIssues());
+        }
         return out;
     }
 
     private void updateExportBtn() {
-        int n = collectSelected().size();
+        int n = isAllSelected ? visibleCount() : collectSelected().size();
+        // Кнопка видна, если что-то выбрано ИЛИ если активен режим "Выбрать всё"
         exportBtn.setVisible(n > 0 || isAllSelected);
         exportBtn.setText(isAllSelected
-                ? "Действия со всеми (" + visibleCount() + ")"
+                ? "Действия со всеми (" + n + ")"
                 : "Действия с выбранными (" + n + ")");
     }
 
@@ -394,6 +406,7 @@ public class ReportPanel extends JPanel implements Reloadable {
         int expectedTotal;
 
         if (!isAllSelected) {
+            // Ручной выбор
             List<IssueService.IssueDto> sel = collectSelected();
             if (sel.isEmpty()) {
                 UiHelpers.showToast(this, "Ничего не выбрано", true);
@@ -403,7 +416,10 @@ public class ReportPanel extends JPanel implements Reloadable {
             for (IssueService.IssueDto it : sel) keysCsv.add(it.key());
             expectedTotal = keysCsv.size();
         } else {
+            // Режим "Выбрать всё" (может быть вызван даже при 0 загруженных строк)
             expectedTotal = visibleCount();
+            // ОШИБКА БЫЛА ЗДЕСЬ: мы блокировали экспорт при 0 issues. Теперь мы этого не делаем.
+            // ReportExportService сам подсчитает точное количество и выгрузит данные.
         }
 
         ReportExportService.BaseFilter filter = new ReportExportService.BaseFilter();
@@ -417,6 +433,10 @@ public class ReportPanel extends JPanel implements Reloadable {
         filter.filterText     = filterText;
         filter.statusFilter   = statusDropdown.getSelectedCsv();
         filter.expectedTotal  = expectedTotal;
+
+        System.out.println("[ReportPanel] Экспорт " + type
+                + " · режим=" + (isAllSelected ? "ALL (по фильтрам)" : "SELECTED")
+                + " · expectedTotal=" + expectedTotal);
 
         new ReportExportDialog(ctx, type, keysCsv, filter).setVisible(true);
     }

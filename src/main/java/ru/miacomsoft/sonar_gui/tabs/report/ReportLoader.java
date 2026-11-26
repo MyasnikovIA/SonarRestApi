@@ -40,8 +40,18 @@ public class ReportLoader extends SwingWorker<List<IssueService.IssueDto>, Objec
             return issueService.fetchAllIssues(
                     ctx.getProject(), customSev, customQual,
                     ctx.isHideProcessed(), customStatuses,
-                    (current, total, message) -> publish(new Object[]{current, total, message}));
+                    (current, total, message) -> {
+                        if (isCancelled()) {
+                            // Если загрузчик отменён, прерываем выполнение (по возможности)
+                            throw new RuntimeException("Отменено пользователем");
+                        }
+                        publish(new Object[]{current, total, message});
+                    });
         } catch (Exception e) {
+            if (isCancelled() || "Отменено пользователем".equals(e.getMessage())) {
+                System.out.println("[ReportLoader] Загрузка отменена.");
+                return null;
+            }
             System.err.println("[ReportLoader] Ошибка в doInBackground: " + e.getMessage());
             throw e;
         }
@@ -49,6 +59,7 @@ public class ReportLoader extends SwingWorker<List<IssueService.IssueDto>, Objec
 
     @Override
     protected void process(List<Object[]> chunks) {
+        if (isCancelled()) return;
         if (onProgress != null && !chunks.isEmpty()) {
             onProgress.accept(chunks.get(chunks.size() - 1));
         }
@@ -56,8 +67,15 @@ public class ReportLoader extends SwingWorker<List<IssueService.IssueDto>, Objec
 
     @Override
     protected void done() {
+        if (isCancelled()) {
+            System.out.println("[ReportLoader] Загрузка была отменена, обновление UI пропущено.");
+            return;
+        }
         try {
-            if (onSuccess != null) onSuccess.accept(get());
+            List<IssueService.IssueDto> result = get();
+            if (result != null && onSuccess != null) {
+                onSuccess.accept(result);
+            }
             System.out.println("[ReportLoader] Фоновая загрузка успешно завершена.");
         } catch (Exception e) {
             Throwable cause = e.getCause() != null ? e.getCause() : e;

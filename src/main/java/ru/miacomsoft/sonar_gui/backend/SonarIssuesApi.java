@@ -22,7 +22,6 @@ public class SonarIssuesApi {
 
     public static final String ACTIVE_STATUSES = "OPEN,CONFIRMED,REOPENED";
     public static final int    FETCH_PAGE_SIZE = 3000;
-
     public static final String ALL_STATUSES = "";
 
     private static final int BATCH_SIZE = 3000;
@@ -81,6 +80,10 @@ public class SonarIssuesApi {
     @FunctionalInterface
     public interface FetchProgressListener {
         void onProgress(int fetched, int total, String message);
+    }
+
+    public static class BatchLimitExceededException extends RuntimeException {
+        public BatchLimitExceededException(String msg) { super(msg); }
     }
 
     private static void emitBatch(FetchProgressListener listener,
@@ -289,10 +292,13 @@ public class SonarIssuesApi {
         System.out.println("[SonarIssuesApi] Начало загрузки issues (sev=" + impactSeverity + ", qual=" + quality + ")");
         try {
             return fetchAllByStatusesDirect(statuses, impactSeverity, quality, listener);
+        } catch (BatchLimitExceededException e) {
+            System.out.println("[SonarIssuesApi] Достигнут лимит SonarQube в 10 000 записей. Запуск разбиения по частям...");
+            return fetchAllByParts(statuses, impactSeverity, quality, listener);
         } catch (RuntimeException e) {
             String msg = e.getMessage();
             if (msg != null && msg.contains("Can return only the first 10000 results")) {
-                System.out.println("[SonarIssuesApi] Внимание: достигнут лимит SonarQube в 10 000 записей. Запуск разбиения по частям...");
+                System.out.println("[SonarIssuesApi] Ошибка лимита 10000. Запуск разбиения по частям...");
                 return fetchAllByParts(statuses, impactSeverity, quality, listener);
             }
             if (msg != null && (msg.contains("REOPENED") || msg.contains("issueStatuses"))) {
@@ -305,16 +311,15 @@ public class SonarIssuesApi {
     }
 
     private List<Issue> fetchAllByStatusesDirect(String statuses, String impactSeverity,
-                                                 String quality) throws Exception {
-        return fetchAllByStatusesDirect(statuses, impactSeverity, quality, null);
-    }
-
-    private List<Issue> fetchAllByStatusesDirect(String statuses, String impactSeverity,
                                                  String quality, FetchProgressListener listener) throws Exception {
         List<Issue> out = new ArrayList<>();
         int page = 1;
         int total = -1;
         while (total < 0 || out.size() < total) {
+            // СТРОГАЯ ЗАЩИТА: Если следующая страница превысит 10000, принудительно вызываем исключение ДО запроса
+            if (out.size() >= HARD_LIMIT_10000 || (page - 1) * effectivePsLimit >= HARD_LIMIT_10000) {
+                throw new BatchLimitExceededException("Can return only the first 10000 results.");
+            }
             String template = "/api/issues/search?"
                     + buildQueryWithStatuses(statuses, impactSeverity, quality, null, null, null)
                     + "&ps={PS}&p=" + page;
@@ -335,13 +340,13 @@ public class SonarIssuesApi {
         return out;
     }
 
-    private List<Issue> fetchAllByParts(String statuses, String impactSeverity,
-                                        String quality) throws Exception {
+    public List<Issue> fetchAllByParts(String statuses, String impactSeverity,
+                                       String quality) throws Exception {
         return fetchAllByParts(statuses, impactSeverity, quality, null);
     }
 
-    private List<Issue> fetchAllByParts(String statuses, String impactSeverity,
-                                        String quality, FetchProgressListener listener) throws Exception {
+    public List<Issue> fetchAllByParts(String statuses, String impactSeverity,
+                                       String quality, FetchProgressListener listener) throws Exception {
         List<Issue> out = new ArrayList<>();
         String[] sevs  = {"BLOCKER", "HIGH", "MEDIUM", "LOW", "INFO"};
         String[] quals = {"MAINTAINABILITY", "RELIABILITY", "SECURITY"};
@@ -362,7 +367,7 @@ public class SonarIssuesApi {
                     out.addAll(fetchAllByStatusesDirect(statuses, s, q, listener));
                 } catch (RuntimeException e) {
                     String msg = e.getMessage();
-                    if (msg != null && msg.contains("Can return only the first 10000 results")) {
+                    if (e instanceof BatchLimitExceededException || (msg != null && msg.contains("Can return only the first 10000 results"))) {
                         System.out.println("[SonarIssuesApi] Лимит 10000 для " + s + "/" + q + ". Переход на файлы...");
                         out.addAll(fetchAllByFiles(statuses, s, q, out.size(), -1, listener));
                     } else if (msg != null && (msg.contains("REOPENED") || msg.contains("issueStatuses"))) {
@@ -374,10 +379,6 @@ public class SonarIssuesApi {
             }
         }
         return out;
-    }
-
-    public static class BatchLimitExceededException extends RuntimeException {
-        public BatchLimitExceededException(String msg) { super(msg); }
     }
 
     private List<Issue> fetchAllByFiles(String statuses, String impactSeverity, String quality,
@@ -443,6 +444,10 @@ public class SonarIssuesApi {
                 ? components.substring(0, 40) + "…" : components);
 
         while (total < 0 || out.size() < total) {
+            // СТРОГАЯ ЗАЩИТА: Если следующая страница превысит 10000, принудительно вызываем исключение ДО запроса
+            if (out.size() >= HARD_LIMIT_10000 || (page - 1) * effectivePsLimit >= HARD_LIMIT_10000) {
+                throw new BatchLimitExceededException("Can return only the first 10000 results.");
+            }
             StringBuilder urlSb = new StringBuilder("/api/issues/search?");
             urlSb.append("components=").append(enc(components));
             urlSb.append("&s=").append(enc("FILE_LINE"));
@@ -471,6 +476,12 @@ public class SonarIssuesApi {
                         grandTotal > 0 ? grandTotal : total, context);
                 page++;
                 if (page > SAFETY_MAX_PAGES) break;
+            } catch (BatchLimitExceededException e) {
+                if (components.contains(",") || (rulesCsv != null && rulesCsv.contains(","))) {
+                    throw e;
+                }
+                System.out.println("[SonarIssuesApi] Лимит 10000 для одного файла/правила. Загрузка прервана для " + context);
+                break;
             } catch (RuntimeException e) {
                 if (e.getMessage() != null
                         && e.getMessage().contains("Can return only the first 10000 results")) {

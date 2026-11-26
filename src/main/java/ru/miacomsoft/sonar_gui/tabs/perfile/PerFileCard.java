@@ -7,6 +7,7 @@ import ru.miacomsoft.sonar_gui.common.services.IssueService;
 import javax.swing.*;
 import javax.swing.table.AbstractTableModel;
 import javax.swing.table.DefaultTableCellRenderer;
+import javax.swing.table.TableColumn;
 import java.awt.*;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
@@ -22,6 +23,10 @@ public class PerFileCard extends JPanel {
                                 List<IssueService.IssueDto> selected);
     }
 
+    private static final int ROW_HEIGHT = 24;
+    private static final int CARD_HEADER_HEIGHT = 30;
+    private static final int CARD_BORDERS = 4;
+
     private final String fileName;
     private final List<PerFileRowModel> rows = new ArrayList<>();
     private final Delegate delegate;
@@ -29,6 +34,7 @@ public class PerFileCard extends JPanel {
     private final JCheckBox fileCheckbox;
     private final JTable table;
     private final PerFileTableModel tableModel;
+    private boolean globalAll = false;
 
     public PerFileCard(IssueService.FileGroup group, Delegate delegate) {
         this.fileName = group.file();
@@ -47,6 +53,7 @@ public class PerFileCard extends JPanel {
         fileCheckbox = new JCheckBox();
         fileCheckbox.setOpaque(false);
         fileCheckbox.addActionListener(e -> {
+            if (globalAll) return; // В глобальном режиме файловый чекбокс скрыт
             setAllSelected(fileCheckbox.isSelected());
             if (delegate != null) delegate.onSelectionChanged();
         });
@@ -65,7 +72,7 @@ public class PerFileCard extends JPanel {
         table.setForeground(GuiStyle.TEXT);
         table.setFont(GuiStyle.FONT_MONO);
         table.setGridColor(GuiStyle.BORDER);
-        table.setRowHeight(24);
+        table.setRowHeight(ROW_HEIGHT);
         table.getTableHeader().setBackground(GuiStyle.BG3);
         table.getTableHeader().setForeground(GuiStyle.TEXT_DIM);
         table.getTableHeader().setFont(GuiStyle.FONT_BOLD);
@@ -149,7 +156,7 @@ public class PerFileCard extends JPanel {
                 int col = table.columnAtPoint(e.getPoint());
                 if (row < 0) return;
 
-                if (e.getClickCount() == 1 && col == 0) {
+                if (e.getClickCount() == 1 && col == 0 && !globalAll) {
                     PerFileRowModel r = rows.get(row);
                     r.selected = !r.selected;
                     tableModel.fireTableCellUpdated(row, 0);
@@ -168,8 +175,56 @@ public class PerFileCard extends JPanel {
         JScrollPane scroll = new JScrollPane(table);
         scroll.setBorder(BorderFactory.createEmptyBorder());
         scroll.getViewport().setBackground(GuiStyle.BG2);
+        scroll.setVerticalScrollBarPolicy(ScrollPaneConstants.VERTICAL_SCROLLBAR_NEVER);
+        scroll.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
+        scroll.getVerticalScrollBar().setUnitIncrement(16);
+
+        // Задача 2: карточка по размеру содержимого
+        int tableHeaderH = table.getTableHeader().getPreferredSize().height;
+        if (tableHeaderH <= 0) tableHeaderH = 25;
+        int contentH = rows.size() * ROW_HEIGHT + 2;
+        int scrollH = tableHeaderH + contentH;
+        int cardH = CARD_HEADER_HEIGHT + scrollH + CARD_BORDERS;
+
+        scroll.setPreferredSize(new Dimension(0, scrollH));
+        scroll.setMaximumSize(new Dimension(Integer.MAX_VALUE, scrollH));
+        scroll.setMinimumSize(new Dimension(0, scrollH));
+
         add(scroll, BorderLayout.CENTER);
+
+        setPreferredSize(new Dimension(0, cardH));
+        setMaximumSize(new Dimension(Integer.MAX_VALUE, cardH));
     }
+
+    /**
+     * Задача 1: глобальный режим "Выбрать всё".
+     * При включении: скрываем файловый чекбокс и колонку чекбоксов,
+     * снимаем старые пометки. getSelectedIssues() начинает возвращать
+     * ВСЕ issues карточки (полный список будет дополнительно отфильтрован
+     * по видимости карточки на уровне панели).
+     */
+    public void setGlobalSelectAll(boolean global) {
+        this.globalAll = global;
+
+        // Снимаем старые отметки
+        for (PerFileRowModel r : rows) r.selected = false;
+        fileCheckbox.setSelected(false);
+        fileCheckbox.setVisible(!global);
+
+        TableColumn col = table.getColumnModel().getColumn(0);
+        if (global) {
+            col.setMinWidth(0);
+            col.setMaxWidth(0);
+            col.setPreferredWidth(0);
+        } else {
+            col.setMinWidth(30);
+            col.setMaxWidth(30);
+            col.setPreferredWidth(30);
+        }
+        tableModel.fireTableDataChanged();
+    }
+
+    public boolean isGlobalSelectAll() { return globalAll; }
 
     private void handlePopup(MouseEvent e) {
         if (!e.isPopupTrigger()) return;
@@ -182,6 +237,11 @@ public class PerFileCard extends JPanel {
     }
 
     public List<IssueService.IssueDto> getSelectedIssues() {
+        if (globalAll) {
+            // В глобальном режиме карточка отдаёт все свои issues;
+            // видимость карточки проверяется на уровне PerFilePanel.
+            return getAllIssues();
+        }
         List<IssueService.IssueDto> out = new ArrayList<>();
         for (PerFileRowModel r : rows) if (r.selected) out.add(r.issue);
         return out;

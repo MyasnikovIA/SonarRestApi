@@ -19,7 +19,6 @@ import java.util.List;
 
 public class PerFilePanel extends JPanel implements Reloadable {
 
-    // Согласно требованию: загрузка партиями по 3000 записей
     private static final int PAGE_SIZE = 3000;
 
     private final GuiContext ctx;
@@ -39,6 +38,11 @@ public class PerFilePanel extends JPanel implements Reloadable {
     private int totalPages = 1;
     private List<PerFileCard> cards = new ArrayList<>();
     private String filterText = "";
+    private boolean isAllSelected = false;
+
+    // Данные для режима "Выбрать всё"
+    private List<IssueService.IssueDto> allSelectedIssues = null;
+    private SwingWorker<List<IssueService.IssueDto>, Void> allSelectWorker = null;
 
     public PerFilePanel(GuiContext ctx) {
         this.ctx = ctx;
@@ -55,11 +59,18 @@ public class PerFilePanel extends JPanel implements Reloadable {
 
         masterCheckbox = new JCheckBox();
         masterCheckbox.setOpaque(false);
-        masterCheckbox.setToolTipText("Выделить всё");
+        masterCheckbox.setToolTipText("Выделить всё (все записи по текущим фильтрам)");
         masterCheckbox.addActionListener(e -> {
-            boolean sel = masterCheckbox.isSelected();
-            for (PerFileCard c : cards) c.setAllSelected(sel);
-            updateBulkButton();
+            isAllSelected = masterCheckbox.isSelected();
+            for (PerFileCard c : cards) c.setGlobalSelectAll(isAllSelected);
+
+            if (isAllSelected) {
+                triggerAllSelectFetch();
+            } else {
+                cancelAllSelectFetch();
+                allSelectedIssues = null;
+                updateBulkButton();
+            }
         });
         topLeft.add(masterCheckbox);
 
@@ -91,6 +102,7 @@ public class PerFilePanel extends JPanel implements Reloadable {
         applyFilterBtn.addActionListener(e -> applyTextFilter());
         topRight.add(applyFilterBtn);
 
+        // Кнопка массовых действий (изначально скрыта, появляется при выборе)
         bulkButton = UiHelpers.primaryButton("Действия с выбранными (0)");
         bulkButton.setVisible(false);
         bulkButton.addActionListener(e -> openBulkDialog());
@@ -137,11 +149,18 @@ public class PerFilePanel extends JPanel implements Reloadable {
 
     @Override
     public void reload() {
+        // Сбрасываем состояние выбора при любой перезагрузке
+        masterCheckbox.setSelected(false);
+        isAllSelected = false;
+        cancelAllSelectFetch();
+        allSelectedIssues = null;
+
         if (!ctx.hasProject()) {
             cardsContainer.removeAll();
             cardsContainer.add(emptyLabel("Выберите проект в верхней панели"));
             cardsContainer.revalidate();
             cardsContainer.repaint();
+            updateBulkButton();
             return;
         }
 
@@ -192,9 +211,8 @@ public class PerFilePanel extends JPanel implements Reloadable {
         prevBtn.setEnabled(page > 1);
         nextBtn.setEnabled(page < totalPages);
 
-        updateBulkButton();
-        masterCheckbox.setSelected(false);
         applyTextFilter();
+        updateBulkButton();
     }
 
     private void onError(Throwable t) {
@@ -202,18 +220,92 @@ public class PerFilePanel extends JPanel implements Reloadable {
         cardsContainer.add(emptyLabel("Ошибка: " + t.getMessage()));
         cardsContainer.revalidate();
         cardsContainer.repaint();
+        updateBulkButton();
+    }
+
+    /**
+     * Запуск асинхронной загрузки всех issues по текущим фильтрам для подсчёта.
+     */
+    private void triggerAllSelectFetch() {
+        if (allSelectWorker != null && !allSelectWorker.isDone()) {
+            allSelectWorker.cancel(true);
+        }
+        allSelectedIssues = null;
+        updateBulkButton(); // Переводит кнопку в режим "Подсчёт..."
+
+        allSelectWorker = new SwingWorker<>() {
+            @Override protected List<IssueService.IssueDto> doInBackground() throws Exception {
+                IssueService service = new IssueService(ctx);
+                // Загружаем всё, что подходит под глобальные фильтры
+                List<IssueService.IssueDto> all = service.fetchAllIssues(
+                        ctx.getProject(), ctx.getSeverity(), ctx.getQuality(),
+                        ctx.isHideProcessed(), "ALL", null);
+
+                // Применяем локальный текстовый фильтр, если он есть
+                if (!filterText.isEmpty()) {
+                    List<IssueService.IssueDto> filtered = new ArrayList<>();
+                    for (IssueService.IssueDto it : all) {
+                        if (isCancelled()) break;
+                        boolean m = (it.key() != null && it.key().toLowerCase().contains(filterText))
+                                || (it.message() != null && it.message().toLowerCase().contains(filterText))
+                                || (it.component() != null && it.component().toLowerCase().contains(filterText));
+                        if (m) filtered.add(it);
+                    }
+                    return filtered;
+                }
+                return all;
+            }
+
+            @Override protected void done() {
+                if (isCancelled() || !isAllSelected) return;
+                try {
+                    allSelectedIssues = get();
+                    updateBulkButton();
+                } catch (Exception e) {
+                    UiHelpers.showToast(PerFilePanel.this, "Ошибка подсчёта: " + e.getMessage(), true);
+                    bulkButton.setText("Ошибка подсчёта");
+                    bulkButton.setEnabled(false);
+                }
+            }
+        };
+        allSelectWorker.execute();
+    }
+
+    private void cancelAllSelectFetch() {
+        if (allSelectWorker != null) {
+            allSelectWorker.cancel(true);
+            allSelectWorker = null;
+        }
     }
 
     private List<IssueService.IssueDto> collectSelected() {
+        if (isAllSelected) {
+            return allSelectedIssues != null ? allSelectedIssues : new ArrayList<>();
+        }
         List<IssueService.IssueDto> out = new ArrayList<>();
         for (PerFileCard c : cards) out.addAll(c.getSelectedIssues());
         return out;
     }
 
     private void updateBulkButton() {
-        int n = collectSelected().size();
-        bulkButton.setVisible(n > 0);
-        bulkButton.setText("Действия с выбранными (" + n + ")");
+        if (isAllSelected) {
+            bulkButton.setVisible(true);
+            if (allSelectWorker != null && !allSelectWorker.isDone()) {
+                bulkButton.setText("Подсчёт всех записей...");
+                bulkButton.setEnabled(false);
+            } else if (allSelectedIssues != null) {
+                bulkButton.setText("Действия со всеми (" + allSelectedIssues.size() + ")");
+                bulkButton.setEnabled(true);
+            } else {
+                bulkButton.setText("Подсчёт всех записей...");
+                bulkButton.setEnabled(false);
+            }
+        } else {
+            int n = collectSelected().size();
+            bulkButton.setVisible(n > 0);
+            bulkButton.setEnabled(true);
+            bulkButton.setText("Действия с выбранными (" + n + ")");
+        }
     }
 
     private void openIssueDialog(IssueService.IssueDto issue) {
@@ -223,7 +315,7 @@ public class PerFilePanel extends JPanel implements Reloadable {
     private void openBulkDialog() {
         List<IssueService.IssueDto> sel = collectSelected();
         if (sel.isEmpty()) {
-            UiHelpers.showToast(this, "Ничего не выбрано", true);
+            UiHelpers.showToast(this, "Нет данных для обработки", true);
             return;
         }
         new PerFileBulkDialog(ctx, sel, this::reload).setVisible(true);
@@ -245,12 +337,16 @@ public class PerFilePanel extends JPanel implements Reloadable {
 
         menu.add(menuItem("Выделить всё", () -> {
             masterCheckbox.setSelected(true);
-            for (PerFileCard c : cards) c.setAllSelected(true);
-            updateBulkButton();
+            isAllSelected = true;
+            for (PerFileCard c : cards) c.setGlobalSelectAll(true);
+            triggerAllSelectFetch();
         }));
         menu.add(menuItem("Снять выделение", () -> {
             masterCheckbox.setSelected(false);
-            for (PerFileCard c : cards) c.setAllSelected(false);
+            isAllSelected = false;
+            for (PerFileCard c : cards) c.setGlobalSelectAll(false);
+            cancelAllSelectFetch();
+            allSelectedIssues = null;
             updateBulkButton();
         }));
 
@@ -323,6 +419,13 @@ public class PerFilePanel extends JPanel implements Reloadable {
         }
         cardsContainer.revalidate();
         cardsContainer.repaint();
+
+        // Если включен глобальный выбор, пересчитываем данные с учётом текста
+        if (isAllSelected) {
+            triggerAllSelectFetch();
+        } else {
+            updateBulkButton();
+        }
     }
 
     private JLabel emptyLabel(String text) {

@@ -40,6 +40,8 @@ public class ReportExportService {
     }
 
     private static final String NO_TAGS_MARKER = "__NO_TAGS__";
+    private static final int PAGE_SIZE = 3000;
+    private static final int SONAR_HARD_LIMIT = 10000;
 
     private final GuiContext ctx;
     private final ProgressListener listener;
@@ -79,7 +81,7 @@ public class ReportExportService {
                 System.err.println("[ReportExportService] Нет ни ключей, ни фильтров для экспорта.");
                 throw new IllegalArgumentException("Нет ни keys, ни фильтров");
             }
-            System.out.println("[ReportExportService] Экспорт по фильтрам...");
+            System.out.println("[ReportExportService] Экспорт по фильтрам (постранично)…");
             issues = collectByFilters(filter);
         }
 
@@ -143,7 +145,8 @@ public class ReportExportService {
                 }
             }
             if (listener != null) {
-                listener.onProgress(out.size(), total, "fetching", String.format("Загрузка issues: %d/%d", out.size(), total));
+                listener.onProgress(out.size(), total, "fetching",
+                        String.format("Загрузка issues: %d/%d", out.size(), total));
             }
         }
         return out;
@@ -152,74 +155,124 @@ public class ReportExportService {
     private List<Issue> collectByFilters(BaseFilter f) throws Exception {
         SonarIssuesApi api = ctx.state().newApi(f.project);
 
-        String statuses = f.statusFilter;
-        if (statuses == null || statuses.isEmpty() || "ALL".equalsIgnoreCase(statuses)) {
-            statuses = f.hideProcessed ? SonarIssuesApi.ACTIVE_STATUSES : SonarIssuesApi.ALL_STATUSES;
+        String statuses = resolveStatuses(f);
+        String rulesCsv = f.rules.isEmpty() ? null : String.join(",", f.rules);
+
+        boolean hasNoTagsMarker   = f.tags.contains(NO_TAGS_MARKER);
+        boolean hasNoTagsExcluded = f.excludedTags.contains(NO_TAGS_MARKER);
+
+        String tagsCsv    = (hasNoTagsMarker   || f.tags.isEmpty()) ? null : String.join(",", f.tags);
+        String notTagsCsv = (hasNoTagsExcluded || f.excludedTags.isEmpty()) ? null : String.join(",", f.excludedTags);
+
+        // 1. Предварительный подсчёт
+        if (listener != null) listener.onProgress(0, 0, "fetching", "Подсчёт количества issues по фильтрам…");
+
+        int serverTotal = -1;
+        try {
+            org.json.JSONObject count = api.fetchPageRaw(
+                    statuses, f.severity, f.quality, rulesCsv, tagsCsv, notTagsCsv, 1, 1);
+            serverTotal = count.optInt("total", -1);
+        } catch (Exception e) {
+            System.err.println("[ReportExportService] Не удалось подсчитать total: " + e.getMessage());
         }
 
-        if (listener != null) listener.onProgress(0, 0, "fetching", "Загрузка issues из SonarQube…");
+        List<Issue> result = new ArrayList<>();
 
-        SonarIssuesApi.FetchProgressListener apiProgress = (current, total, message) -> {
-            if (listener != null) listener.onProgress(current, total, "fetching", message);
-        };
+        // 2. Стратегия загрузки
+        if (serverTotal > SONAR_HARD_LIMIT) {
+            // Sonar API не отдаст больше 10000 через /api/issues/search.
+            // Используем безопасное разбиение по файлам.
+            System.out.println("[ReportExportService] total=" + serverTotal
+                    + " > " + SONAR_HARD_LIMIT + " — запуск разбиения по файлам...");
+            SonarIssuesApi.FetchProgressListener apiProgress = null;
+            if (listener != null) {
+                apiProgress = (cur, tot, msg) -> listener.onProgress(cur, tot, "fetching", msg);
+            }
+            List<Issue> all = api.fetchAllByParts(statuses, f.severity, f.quality, apiProgress);
+            for (Issue it : all) {
+                if (cancelled) break;
+                if (passesClientFilters(it, f)) result.add(it);
+            }
+        } else {
+            // Постраничная загрузка по 3000 (безопасно, так как total <= 10000)
+            System.out.println("[ReportExportService] Постраничная загрузка по "
+                    + PAGE_SIZE + " (total=" + serverTotal + ")…");
+            int page = 1;
+            while (true) {
+                if (cancelled) return result;
 
-        System.out.println("[ReportExportService] Запуск загрузки по фильтрам...");
-        List<Issue> all = api.fetchAllByStatuses(statuses, f.severity, f.quality, apiProgress);
+                org.json.JSONObject raw = api.fetchPageRaw(
+                        statuses, f.severity, f.quality, rulesCsv, tagsCsv, notTagsCsv,
+                        page, PAGE_SIZE);
+                org.json.JSONArray arr = raw.optJSONArray("issues");
+                if (arr == null || arr.isEmpty()) break;
 
-        if (cancelled) return List.of();
-
-        System.out.println("[ReportExportService] Загружено " + all.size() + " issues. Применение фильтров...");
-        List<Issue> filtered = new ArrayList<>();
-        String q = f.filterText == null ? "" : f.filterText.trim().toLowerCase();
-
-        for (Issue it : all) {
-            if (cancelled) return filtered;
-
-            // Теги
-            if (!f.tags.isEmpty()) {
-                List<String> itTags = it.tags != null ? it.tags : List.of();
-                boolean hasMatch = false;
-                for (String t : f.tags) {
-                    if (NO_TAGS_MARKER.equals(t)) { if (itTags.isEmpty()) hasMatch = true; }
-                    else if (itTags.contains(t)) hasMatch = true;
-                    if (hasMatch) break;
+                int batchSize = arr.length();
+                for (int i = 0; i < batchSize; i++) {
+                    Issue issue = Issue.from(arr.getJSONObject(i), f.project);
+                    if (passesClientFilters(issue, f)) result.add(issue);
                 }
-                if (!hasMatch) continue;
-            }
 
-            // Исключенные теги
-            if (!f.excludedTags.isEmpty()) {
-                List<String> itTags = it.tags != null ? it.tags : List.of();
-                boolean hasExcluded = false;
-                for (String t : f.excludedTags) {
-                    if (NO_TAGS_MARKER.equals(t)) { if (itTags.isEmpty()) hasExcluded = true; }
-                    else if (itTags.contains(t)) hasExcluded = true;
-                    if (hasExcluded) break;
+                if (listener != null) {
+                    int displayTotal = serverTotal >= 0 ? serverTotal : result.size();
+                    listener.onProgress(result.size(), displayTotal, "fetching",
+                            String.format("Загружено %d из %d (страница %d)", result.size(), displayTotal, page));
                 }
-                if (hasExcluded) continue;
+
+                if (batchSize < PAGE_SIZE) break;
+                page++;
             }
-
-            // Правила
-            if (!f.rules.isEmpty() && !f.rules.contains(it.rule)) continue;
-
-            // Текст
-            if (!q.isEmpty()) {
-                boolean m = (it.key != null && it.key.toLowerCase().contains(q))
-                        || (it.message != null && it.message.toLowerCase().contains(q))
-                        || (it.component != null && it.component.toLowerCase().contains(q));
-                if (!m) continue;
-            }
-
-            filtered.add(it);
         }
 
-        System.out.println("[ReportExportService] Отфильтровано: " + filtered.size() + " из " + all.size());
-        if (listener != null)
-            listener.onProgress(filtered.size(), filtered.size(), "filtered", String.format("Отобрано %d из %d", filtered.size(), all.size()));
-        return filtered;
+        if (listener != null) {
+            listener.onProgress(result.size(), result.size(), "filtered",
+                    String.format("Отобрано %d issues", result.size()));
+        }
+        return result;
     }
 
-    // --- Вспомогательные методы экспорта ---
+    private String resolveStatuses(BaseFilter f) {
+        String s = f.statusFilter;
+        if (s == null || s.isEmpty() || "ALL".equalsIgnoreCase(s)) {
+            return f.hideProcessed ? SonarIssuesApi.ACTIVE_STATUSES : SonarIssuesApi.ALL_STATUSES;
+        }
+        return s;
+    }
+
+    private boolean passesClientFilters(Issue issue, BaseFilter f) {
+        if (!f.tags.isEmpty()) {
+            List<String> itTags = issue.tags != null ? issue.tags : List.of();
+            boolean hasMatch = false;
+            for (String t : f.tags) {
+                if (NO_TAGS_MARKER.equals(t)) { if (itTags.isEmpty()) hasMatch = true; }
+                else if (itTags.contains(t))  hasMatch = true;
+                if (hasMatch) break;
+            }
+            if (!hasMatch) return false;
+        }
+
+        if (!f.excludedTags.isEmpty()) {
+            List<String> itTags = issue.tags != null ? issue.tags : List.of();
+            boolean hasExcluded = false;
+            for (String t : f.excludedTags) {
+                if (NO_TAGS_MARKER.equals(t)) { if (itTags.isEmpty()) hasExcluded = true; }
+                else if (itTags.contains(t))  hasExcluded = true;
+                if (hasExcluded) break;
+            }
+            if (hasExcluded) return false;
+        }
+
+        if (!f.rules.isEmpty() && !f.rules.contains(issue.rule)) return false;
+
+        if (f.filterText != null && !f.filterText.isBlank()) {
+            String q = f.filterText.trim().toLowerCase();
+            boolean m = (issue.key != null && issue.key.toLowerCase().contains(q))
+                    || (issue.message != null && issue.message.toLowerCase().contains(q))
+                    || (issue.component != null && issue.component.toLowerCase().contains(q));
+            if (!m) return false;
+        }
+        return true;
+    }
 
     private Path exportTextFormat(ReportExportType type, List<Issue> issues) throws Exception {
         int total = issues.size();

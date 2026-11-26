@@ -1,0 +1,606 @@
+package ru.miacomsoft.sonar_gui.frame;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+import ru.miacomsoft.sonar_gui.backend.SessionManager;
+import ru.miacomsoft.sonar_gui.backend.ollama.OllamaClient;
+import ru.miacomsoft.sonar_gui.backend.ollama.OllamaConfig;
+import ru.miacomsoft.sonar_gui.common.GuiContext;
+import ru.miacomsoft.sonar_gui.common.GuiStyle;
+import ru.miacomsoft.sonar_gui.common.UiHelpers;
+
+import javax.swing.*;
+import java.awt.*;
+import java.io.File;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.util.Properties;
+
+public class SettingsDialog extends JDialog {
+
+    private final GuiContext ctx;
+    private final Runnable onSaved;
+
+    // ========== SonarQube ==========
+    private final JTextField sqUrlField = UiHelpers.darkField("");
+    private final JTextField sqUserField = UiHelpers.darkField("");
+    private final JComboBox<String> sqAuthCombo = UiHelpers.darkCombo(
+            new String[]{"bearer", "basic", "cookie"}, "bearer");
+    private final JPasswordField sqTokenField = new JPasswordField();
+    private final JTextArea sqCookieArea = new JTextArea(3, 40);
+    private final JLabel sqTokenStatusLbl = UiHelpers.dimLabel("");
+    private final JLabel sqCookieStatusLbl = UiHelpers.dimLabel("");
+
+    // ========== Jira ==========
+    private final JLabel jiraStatusLbl = UiHelpers.dimLabel("Файл не загружен");
+
+    // ========== Team CSV ==========
+    private final JLabel csvStatusLbl = UiHelpers.dimLabel("Файл не загружен");
+
+    // ========== Ollama ==========
+    private final JTextField olUrlField = UiHelpers.darkField("");
+    private final JComboBox<String> olModelCombo = new JComboBox<>();
+    private final JSpinner olTimeoutSpinner = new JSpinner(new SpinnerNumberModel(300, 10, 3600, 10));
+    private final JSpinner olTempSpinner = new JSpinner(new SpinnerNumberModel(0.2, 0.0, 2.0, 0.05));
+    private final JLabel olStatusLbl = UiHelpers.dimLabel("");
+    private final JButton olTestBtn;
+
+    // ========== Prompts ==========
+    private final DefaultListModel<String> promptsListModel = new DefaultListModel<>();
+    private final JList<String> promptsList = new JList<>(promptsListModel);
+    private final JTextArea promptEditor = new JTextArea(20, 80);
+    private final JLabel promptStatusLbl = UiHelpers.dimLabel("");
+
+    public SettingsDialog(GuiContext ctx, Runnable onSaved) {
+        super((Frame) null, "Настройки", true);
+        this.ctx = ctx;
+        this.onSaved = onSaved;
+        this.olTestBtn = UiHelpers.secondaryButton("Проверить");
+
+        setDefaultCloseOperation(DISPOSE_ON_CLOSE);
+        setSize(950, 750);
+        setLocationRelativeTo(getOwner());
+
+        JPanel root = new JPanel(new BorderLayout());
+        root.setBackground(GuiStyle.BG);
+        setContentPane(root);
+
+        JTabbedPane tabs = new JTabbedPane();
+        tabs.setBackground(GuiStyle.BG2);
+        tabs.setForeground(GuiStyle.TEXT);
+        tabs.setFont(GuiStyle.FONT_BOLD);
+
+        tabs.addTab("  SonarQube  ", buildSonarQubePanel());
+        tabs.addTab("  Jira  ", buildJiraPanel());
+        tabs.addTab("  Команды (CSV)  ", buildCsvPanel());
+        tabs.addTab("  Ollama  ", buildOllamaPanel());
+        tabs.addTab("  Промпты  ", buildPromptsPanel());
+
+        root.add(tabs, BorderLayout.CENTER);
+
+        JPanel footer = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 8));
+        footer.setBackground(GuiStyle.BG2);
+
+        JButton saveBtn = UiHelpers.primaryButton("💾 Сохранить всё и применить");
+        saveBtn.addActionListener(e -> saveAll());
+        footer.add(saveBtn);
+
+        JButton cancelBtn = UiHelpers.secondaryButton("Отмена");
+        cancelBtn.addActionListener(e -> dispose());
+        footer.add(cancelBtn);
+
+        root.add(footer, BorderLayout.SOUTH);
+
+        loadAll();
+    }
+
+    // ================================================================
+    // 1. SonarQube
+    // ================================================================
+    private JPanel buildSonarQubePanel() {
+        JPanel p = new JPanel();
+        p.setLayout(new BoxLayout(p, BoxLayout.Y_AXIS));
+        p.setBackground(GuiStyle.BG);
+        p.setBorder(BorderFactory.createEmptyBorder(14, 14, 14, 14));
+
+        p.add(row("sonar.url", sqUrlField));
+        p.add(Box.createVerticalStrut(8));
+        p.add(row("sonar.user", sqUserField));
+        p.add(Box.createVerticalStrut(8));
+
+        JPanel authRow = new JPanel(new BorderLayout(8, 0));
+        authRow.setOpaque(false);
+        authRow.add(UiHelpers.dimLabel("sonar.auth"), BorderLayout.WEST);
+        sqAuthCombo.setPreferredSize(new Dimension(160, 26));
+        authRow.add(sqAuthCombo, BorderLayout.CENTER);
+        authRow.setMaximumSize(new Dimension(Integer.MAX_VALUE, 28));
+        p.add(authRow);
+        p.add(Box.createVerticalStrut(8));
+
+        JPanel tokenRow = new JPanel(new BorderLayout(8, 0));
+        tokenRow.setOpaque(false);
+        tokenRow.add(UiHelpers.dimLabel("sonar.token"), BorderLayout.WEST);
+        sqTokenField.setBackground(GuiStyle.BG);
+        sqTokenField.setForeground(GuiStyle.TEXT);
+        sqTokenField.setCaretColor(GuiStyle.TEXT);
+        sqTokenField.setFont(GuiStyle.FONT_MONO);
+        sqTokenField.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createLineBorder(GuiStyle.BORDER),
+                BorderFactory.createEmptyBorder(4, 8, 4, 8)));
+        tokenRow.add(sqTokenField, BorderLayout.CENTER);
+        tokenRow.add(sqTokenStatusLbl, BorderLayout.EAST);
+        tokenRow.setMaximumSize(new Dimension(Integer.MAX_VALUE, 28));
+        p.add(tokenRow);
+        p.add(Box.createVerticalStrut(8));
+
+        JPanel cookieRow = new JPanel(new BorderLayout(8, 0));
+        cookieRow.setOpaque(false);
+        cookieRow.add(UiHelpers.dimLabel("sonar.cookie"), BorderLayout.WEST);
+        sqCookieArea.setFont(GuiStyle.FONT_MONO);
+        sqCookieArea.setBackground(GuiStyle.BG2);
+        sqCookieArea.setForeground(GuiStyle.TEXT);
+        sqCookieArea.setLineWrap(true);
+        JScrollPane cookieScroll = new JScrollPane(sqCookieArea);
+        cookieScroll.setBorder(BorderFactory.createLineBorder(GuiStyle.BORDER));
+        cookieScroll.setPreferredSize(new Dimension(0, 70));
+        cookieRow.add(cookieScroll, BorderLayout.CENTER);
+        cookieRow.add(sqCookieStatusLbl, BorderLayout.EAST);
+        p.add(cookieRow);
+
+        sqAuthCombo.addActionListener(e -> {
+            String auth = (String) sqAuthCombo.getSelectedItem();
+            boolean isCookie = "cookie".equalsIgnoreCase(auth);
+            sqTokenField.setEnabled(!isCookie);
+            sqTokenField.setVisible(!isCookie);
+            sqCookieArea.setEnabled(isCookie);
+            sqCookieArea.setVisible(isCookie);
+        });
+
+        return p;
+    }
+
+    // ================================================================
+    // 2. Jira
+    // ================================================================
+    private JPanel buildJiraPanel() {
+        JPanel p = new JPanel();
+        p.setLayout(new BoxLayout(p, BoxLayout.Y_AXIS));
+        p.setBackground(GuiStyle.BG);
+        p.setBorder(BorderFactory.createEmptyBorder(14, 14, 14, 14));
+
+        JLabel desc = new JLabel(UiHelpers.wrapHtml(
+                "<html>Для работы с Jira требуется файл <b>session.txt</b>.<br>Загрузите его с локального диска. Файл будет сохранён в корне программы.</html>"));
+        desc.setForeground(GuiStyle.TEXT);
+        p.add(desc);
+        p.add(Box.createVerticalStrut(16));
+
+        JPanel row = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
+        row.setOpaque(false);
+        JButton loadBtn = UiHelpers.primaryButton("📂 Загрузить session.txt");
+        loadBtn.addActionListener(e -> loadJiraSession());
+        row.add(loadBtn);
+        row.add(jiraStatusLbl);
+        p.add(row);
+
+        return p;
+    }
+
+    // ================================================================
+    // 3. CSV (Team Mapping)
+    // ================================================================
+    private JPanel buildCsvPanel() {
+        JPanel p = new JPanel();
+        p.setLayout(new BoxLayout(p, BoxLayout.Y_AXIS));
+        p.setBackground(GuiStyle.BG);
+        p.setBorder(BorderFactory.createEmptyBorder(14, 14, 14, 14));
+
+        JLabel desc = new JLabel(UiHelpers.wrapHtml(
+                "<html>Файл <b>team_mapping.csv</b> используется для привязки файлов к командам и модулям.<br>Загрузите его с локального диска. Файл будет сохранён в корне программы.</html>"));
+        desc.setForeground(GuiStyle.TEXT);
+        p.add(desc);
+        p.add(Box.createVerticalStrut(16));
+
+        JPanel row = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
+        row.setOpaque(false);
+        JButton loadBtn = UiHelpers.primaryButton("📂 Загрузить team_mapping.csv");
+        loadBtn.addActionListener(e -> loadTeamMappingCsv());
+        row.add(loadBtn);
+        row.add(csvStatusLbl);
+        p.add(row);
+
+        return p;
+    }
+
+    // ================================================================
+    // Заглушки для вкладок Ollama и Промпты (будут реализованы в части 2)
+    // ================================================================
+    // ================================================================
+    // 4. Ollama
+    // ================================================================
+    private JPanel buildOllamaPanel() {
+        JPanel p = new JPanel();
+        p.setLayout(new BoxLayout(p, BoxLayout.Y_AXIS));
+        p.setBackground(GuiStyle.BG);
+        p.setBorder(BorderFactory.createEmptyBorder(14, 14, 14, 14));
+
+        p.add(row("url", olUrlField));
+        p.add(Box.createVerticalStrut(8));
+
+        JPanel modelRow = new JPanel(new BorderLayout(8, 0));
+        modelRow.setOpaque(false);
+        modelRow.add(UiHelpers.dimLabel("model"), BorderLayout.WEST);
+        olModelCombo.setEditable(true);
+        olModelCombo.setBackground(GuiStyle.BG);
+        olModelCombo.setForeground(GuiStyle.TEXT);
+        olModelCombo.setFont(GuiStyle.FONT_MONO);
+        modelRow.add(olModelCombo, BorderLayout.CENTER);
+
+        olTestBtn.addActionListener(e -> testAndLoadOllamaModels());
+        modelRow.add(olTestBtn, BorderLayout.EAST);
+        modelRow.setMaximumSize(new Dimension(Integer.MAX_VALUE, 28));
+        p.add(modelRow);
+
+        p.add(Box.createVerticalStrut(8));
+        p.add(row("timeout (сек)", olTimeoutSpinner));
+        p.add(Box.createVerticalStrut(8));
+        p.add(row("temperature", olTempSpinner));
+
+        p.add(Box.createVerticalStrut(16));
+        p.add(olStatusLbl);
+
+        return p;
+    }
+
+
+    private void testAndLoadOllamaModels() {
+        String url = olUrlField.getText().trim();
+        if (url.isEmpty()) {
+            olStatusLbl.setText("укажите url");
+            olStatusLbl.setForeground(GuiStyle.ERR);
+            return;
+        }
+        olStatusLbl.setText("проверка…");
+        olStatusLbl.setForeground(GuiStyle.TEXT_DIM);
+        olTestBtn.setEnabled(false);
+
+        new SwingWorker<JSONArray, Void>() {
+            @Override protected JSONArray doInBackground() throws Exception {
+                // Временный конфиг для проверки
+                OllamaConfig tmp = new OllamaConfig(ctx.ollamaConfig().getConfigFile());
+                tmp.setUrl(url);
+                OllamaClient client = new OllamaClient(tmp);
+                return client.listModels();
+            }
+            @Override protected void done() {
+                olTestBtn.setEnabled(true);
+                try {
+                    JSONArray models = get();
+                    String prev = (String) olModelCombo.getSelectedItem();
+                    olModelCombo.removeAllItems();
+                    for (int i = 0; i < models.length(); i++) {
+                        JSONObject m = models.getJSONObject(i);
+                        String name = m.optString("name", m.optString("model", ""));
+                        if (!name.isBlank()) olModelCombo.addItem(name);
+                    }
+                    if (prev != null && !prev.isBlank()) olModelCombo.setSelectedItem(prev);
+                    else if (olModelCombo.getItemCount() > 0) olModelCombo.setSelectedIndex(0);
+
+                    olStatusLbl.setText("моделей: " + models.length());
+                    olStatusLbl.setForeground(GuiStyle.OK);
+                } catch (Exception e) {
+                    Throwable cause = e.getCause() != null ? e.getCause() : e;
+                    olStatusLbl.setText("ошибка: " + cause.getMessage());
+                    olStatusLbl.setForeground(GuiStyle.ERR);
+                }
+            }
+        }.execute();
+    }
+
+
+    private JPanel buildPromptsPanel() {
+        JPanel p = new JPanel(new BorderLayout(10, 10));
+        p.setBackground(GuiStyle.BG);
+        p.setBorder(BorderFactory.createEmptyBorder(14, 14, 14, 14));
+
+        // Левая панель - список файлов
+        JPanel leftPanel = new JPanel(new BorderLayout(0, 8));
+        leftPanel.setOpaque(false);
+        leftPanel.setPreferredSize(new Dimension(200, 0));
+
+        JLabel listLabel = UiHelpers.dimLabel("Доступные промпты:");
+        leftPanel.add(listLabel, BorderLayout.NORTH);
+
+        promptsList.setBackground(GuiStyle.BG2);
+        promptsList.setForeground(GuiStyle.TEXT);
+        promptsList.setFont(GuiStyle.FONT_MONO);
+        JScrollPane listScroll = new JScrollPane(promptsList);
+        listScroll.setBorder(BorderFactory.createLineBorder(GuiStyle.BORDER));
+        leftPanel.add(listScroll, BorderLayout.CENTER);
+
+        JPanel btnPanel = new JPanel(new GridLayout(2, 1, 0, 4));
+        btnPanel.setOpaque(false);
+
+        JButton createBtn = UiHelpers.secondaryButton("➕ Создать");
+        createBtn.addActionListener(e -> createNewPrompt());
+        btnPanel.add(createBtn);
+
+        JButton deleteBtn = UiHelpers.dangerButton("🗑 Удалить");
+        deleteBtn.addActionListener(e -> deleteCurrentPrompt());
+        btnPanel.add(deleteBtn);
+
+        leftPanel.add(btnPanel, BorderLayout.SOUTH);
+
+        p.add(leftPanel, BorderLayout.WEST);
+
+        // Правая панель - редактор
+        JPanel rightPanel = new JPanel(new BorderLayout(0, 8));
+        rightPanel.setOpaque(false);
+
+        JPanel editorHeader = new JPanel(new BorderLayout());
+        editorHeader.setOpaque(false);
+        editorHeader.add(UiHelpers.dimLabel("Редактор шаблона:"), BorderLayout.WEST);
+        editorHeader.add(promptStatusLbl, BorderLayout.EAST);
+        rightPanel.add(editorHeader, BorderLayout.NORTH);
+
+        promptEditor.setFont(GuiStyle.FONT_MONO);
+        promptEditor.setBackground(GuiStyle.BG2);
+        promptEditor.setForeground(GuiStyle.TEXT);
+        promptEditor.setLineWrap(true);
+        promptEditor.setWrapStyleWord(true);
+        JScrollPane editorScroll = new JScrollPane(promptEditor);
+        editorScroll.setBorder(BorderFactory.createLineBorder(GuiStyle.BORDER));
+        rightPanel.add(editorScroll, BorderLayout.CENTER);
+
+        JButton savePromptBtn = UiHelpers.primaryButton("💾 Сохранить текущий промпт");
+        savePromptBtn.addActionListener(e -> {
+            saveCurrentPrompt();
+            UiHelpers.showToast(this, "Промпт сохранён", false);
+        });
+        JPanel bottomPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 0, 0));
+        bottomPanel.setOpaque(false);
+        bottomPanel.add(savePromptBtn);
+        rightPanel.add(bottomPanel, BorderLayout.SOUTH);
+
+        p.add(rightPanel, BorderLayout.CENTER);
+
+        // Обработчик выбора файла в списке
+        promptsList.addListSelectionListener(e -> {
+            if (!e.getValueIsAdjusting()) {
+                loadSelectedPrompt();
+            }
+        });
+
+        return p;
+    }
+
+    private void loadSelectedPrompt() {
+        String selected = promptsList.getSelectedValue();
+        if (selected == null) {
+            promptEditor.setText("");
+            promptStatusLbl.setText("");
+            return;
+        }
+        try {
+            Path file = ctx.promptsDir().resolve(selected);
+            if (Files.exists(file)) {
+                promptEditor.setText(Files.readString(file, StandardCharsets.UTF_8));
+                promptEditor.setCaretPosition(0);
+                promptStatusLbl.setText(selected);
+            }
+        } catch (Exception e) {
+            UiHelpers.showError(this, "Ошибка чтения: " + e.getMessage());
+        }
+    }
+
+    private void createNewPrompt() {
+        String name = JOptionPane.showInputDialog(this,
+                "Введите имя нового промпта (без .txt):",
+                "Создание промпта",
+                JOptionPane.PLAIN_MESSAGE);
+
+        if (name != null && !name.trim().isEmpty()) {
+            String fileName = name.trim() + ".txt";
+            Path file = ctx.promptsDir().resolve(fileName);
+            try {
+                if (!Files.exists(file)) {
+                    Files.writeString(file, "Текст промпта по умолчанию...", StandardCharsets.UTF_8);
+                    refreshPromptsList();
+                    promptsList.setSelectedValue(fileName, true);
+                } else {
+                    UiHelpers.showError(this, "Файл уже существует");
+                }
+            } catch (Exception e) {
+                UiHelpers.showError(this, "Ошибка создания: " + e.getMessage());
+            }
+        }
+    }
+
+    private void deleteCurrentPrompt() {
+        String selected = promptsList.getSelectedValue();
+        if (selected == null) return;
+
+        int confirm = JOptionPane.showConfirmDialog(this,
+                "Удалить промпт " + selected + "?",
+                "Подтверждение",
+                JOptionPane.YES_NO_OPTION);
+
+        if (confirm == JOptionPane.YES_OPTION) {
+            try {
+                Path file = ctx.promptsDir().resolve(selected);
+                Files.deleteIfExists(file);
+                refreshPromptsList();
+                promptEditor.setText("");
+                promptStatusLbl.setText("");
+            } catch (Exception e) {
+                UiHelpers.showError(this, "Ошибка удаления: " + e.getMessage());
+            }
+        }
+    }
+
+    // ================================================================
+    // Вспомогательные методы (загрузка / сохранение)
+    // ================================================================
+    private JPanel row(String label, JComponent field) {
+        JPanel p = new JPanel(new BorderLayout(8, 0));
+        p.setOpaque(false);
+        p.add(UiHelpers.dimLabel(label), BorderLayout.WEST);
+        field.setPreferredSize(new Dimension(0, 26));
+        p.add(field, BorderLayout.CENTER);
+        p.setMaximumSize(new Dimension(Integer.MAX_VALUE, 28));
+        return p;
+    }
+
+    private void loadJiraSession() {
+        JFileChooser chooser = new JFileChooser();
+        chooser.setDialogTitle("Выберите session.txt");
+        if (chooser.showOpenDialog(this) == JFileChooser.APPROVE_OPTION) {
+            try {
+                Path target = Path.of("session.txt").toAbsolutePath();
+                Files.copy(chooser.getSelectedFile().toPath(), target, StandardCopyOption.REPLACE_EXISTING);
+                jiraStatusLbl.setText("✓ Загружен");
+                jiraStatusLbl.setForeground(GuiStyle.OK);
+            } catch (Exception e) {
+                UiHelpers.showError(this, "Ошибка загрузки session.txt: " + e.getMessage());
+            }
+        }
+    }
+
+    private void loadTeamMappingCsv() {
+        JFileChooser chooser = new JFileChooser();
+        chooser.setDialogTitle("Выберите team_mapping.csv");
+        if (chooser.showOpenDialog(this) == JFileChooser.APPROVE_OPTION) {
+            try {
+                Path target = Path.of("team_mapping.csv").toAbsolutePath();
+                Files.copy(chooser.getSelectedFile().toPath(), target, StandardCopyOption.REPLACE_EXISTING);
+                csvStatusLbl.setText("✓ Загружен");
+                csvStatusLbl.setForeground(GuiStyle.OK);
+            } catch (Exception e) {
+                UiHelpers.showError(this, "Ошибка загрузки team_mapping.csv: " + e.getMessage());
+            }
+        }
+    }
+
+    private void loadAll() {
+        // SonarQube
+        Path file = ctx.sessionFile();
+        if (file != null && Files.exists(file)) {
+            try {
+                Properties p = new Properties();
+                try (var in = Files.newInputStream(file)) { p.load(in); }
+                sqUrlField.setText(p.getProperty("sonar.url", ""));
+                sqUserField.setText(p.getProperty("sonar.user", ""));
+                String auth = p.getProperty("sonar.auth", "bearer");
+                sqAuthCombo.setSelectedItem(auth);
+                sqTokenStatusLbl.setText(p.getProperty("sonar.token", "").isBlank() ? "— не задан" : "✓ установлен");
+                sqCookieStatusLbl.setText(p.getProperty("sonar.cookie", "").isBlank() ? "— не задан" : "✓ установлен");
+            } catch (Exception ignored) {}
+        }
+
+        // Jira
+        if (Files.exists(Path.of("session.txt"))) {
+            jiraStatusLbl.setText("✓ Файл найден");
+            jiraStatusLbl.setForeground(GuiStyle.OK);
+        }
+
+        // CSV
+        if (Files.exists(Path.of("team_mapping.csv"))) {
+            csvStatusLbl.setText("✓ Файл найден");
+            csvStatusLbl.setForeground(GuiStyle.OK);
+        }
+
+        // Ollama
+        OllamaConfig cfg = ctx.ollamaConfig();
+        olUrlField.setText(cfg.getUrl());
+        olTimeoutSpinner.setValue(cfg.getTimeoutSeconds());
+        olTempSpinner.setValue(cfg.getTemperature());
+        if (cfg.getModel() != null && !cfg.getModel().isBlank()) {
+            olModelCombo.addItem(cfg.getModel());
+            olModelCombo.setSelectedItem(cfg.getModel());
+        }
+
+        // Prompts
+        refreshPromptsList();
+    }
+
+    private void saveAll() {
+        // --- 1. SonarQube ---
+        String url = sqUrlField.getText().trim();
+        String user = sqUserField.getText().trim();
+        String auth = (String) sqAuthCombo.getSelectedItem();
+        String token = new String(sqTokenField.getPassword()).trim();
+        String cookie = sqCookieArea.getText().trim();
+
+        if (url.isEmpty()) {
+            UiHelpers.showError(this, "Укажите sonar.url");
+            return;
+        }
+        if (!url.matches("^https?://.*")) url = "https://" + url;
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("# SonarQube connection\n");
+        sb.append("sonar.url=").append(url).append('\n');
+        sb.append("sonar.user=").append(user).append('\n');
+        sb.append("sonar.auth=").append(auth).append('\n');
+        if ("cookie".equalsIgnoreCase(auth)) {
+            sb.append("sonar.cookie=").append(cookie.replace("\n", " ")).append('\n');
+        } else {
+            sb.append("sonar.token=").append(token).append('\n');
+        }
+
+        try {
+            Path file = ctx.sessionFile();
+            if (file != null) {
+                Files.createDirectories(file.toAbsolutePath().getParent());
+                Files.writeString(file, sb.toString(), StandardCharsets.UTF_8);
+                ctx.state().update(sb.toString());
+                ctx.state().reload();
+            }
+        } catch (Exception e) {
+            UiHelpers.showError(this, "Ошибка сохранения SonarQube: " + e.getMessage());
+            return;
+        }
+
+        // --- 2. Ollama ---
+        OllamaConfig cfg = ctx.ollamaConfig();
+        cfg.setUrl(olUrlField.getText().trim());
+        Object m = olModelCombo.getSelectedItem();
+        cfg.setModel(m == null ? "" : m.toString().trim());
+        cfg.setTimeoutSeconds((Integer) olTimeoutSpinner.getValue());
+        cfg.setTemperature(((Number) olTempSpinner.getValue()).doubleValue());
+        cfg.save();
+
+        // --- 3. Prompts (сохранение текущего открытого) ---
+        saveCurrentPrompt();
+
+        UiHelpers.showToast(this, "Настройки сохранены", false);
+        if (onSaved != null) onSaved.run();
+        dispose();
+    }
+
+    private void refreshPromptsList() {
+        promptsListModel.clear();
+        Path dir = ctx.promptsDir();
+        if (dir != null && Files.isDirectory(dir)) {
+            try (var stream = Files.list(dir)) {
+                stream.filter(Files::isRegularFile)
+                        .map(p -> p.getFileName().toString())
+                        .filter(n -> n.endsWith(".txt"))
+                        .sorted()
+                        .forEach(promptsListModel::addElement);
+            } catch (Exception ignored) {}
+        }
+    }
+
+    private void saveCurrentPrompt() {
+        String selected = promptsList.getSelectedValue();
+        if (selected == null || selected.isEmpty()) return;
+        try {
+            Path file = ctx.promptsDir().resolve(selected);
+            Files.writeString(file, promptEditor.getText(), StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            UiHelpers.showError(this, "Ошибка сохранения промпта: " + e.getMessage());
+        }
+    }
+}

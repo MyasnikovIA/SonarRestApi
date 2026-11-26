@@ -13,8 +13,12 @@ import java.util.Map;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
-/** Генерация ZIP с MD-промптами для LLM (аналог веб-экспорта llm-md-zip). */
 public class LlmMdExporter {
+
+    @FunctionalInterface
+    public interface ProgressCallback {
+        void onProgress(int current, int total, String message);
+    }
 
     public static int writeZip(Path zipPath, Map<String, List<Issue>> issuesByFile,
                                SonarIssuesApi api, String project, String host) throws Exception {
@@ -39,6 +43,37 @@ public class LlmMdExporter {
             }
         }
         return count;
+    }
+
+    public static int writeDirectory(Path targetDir, Map<String, List<Issue>> issuesByFile,
+                                     SonarIssuesApi api, String project, String host,
+                                     ProgressCallback progress) throws Exception {
+        Files.createDirectories(targetDir);
+        int total = issuesByFile.size();
+        int current = 0;
+
+        for (Map.Entry<String, List<Issue>> entry : issuesByFile.entrySet()) {
+            current++;
+            String file = entry.getKey();
+            List<Issue> issues = entry.getValue();
+
+            String fullSource = "";
+            try { fullSource = api.fetchFullSource(project + ":" + file); }
+            catch (Exception e) {
+                System.err.println("[LlmMdExporter] не удалось получить код для " + file);
+            }
+
+            String mdContent = buildMarkdownPrompt(file, issues, fullSource, project, host);
+            String safeName = makeFileName(file);
+            Path filePath = targetDir.resolve(safeName + ".md");
+
+            Files.writeString(filePath, mdContent, StandardCharsets.UTF_8);
+
+            if (progress != null) {
+                progress.onProgress(current, total, "Сохранение MD: " + current + "/" + total);
+            }
+        }
+        return current;
     }
 
     private static String buildMarkdownPrompt(String file, List<Issue> issues, String fullSource,

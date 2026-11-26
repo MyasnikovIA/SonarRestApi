@@ -55,10 +55,10 @@ public class ReportExportService {
     public void setCancelled(boolean c) { this.cancelled = c; }
     public boolean isCancelled() { return cancelled; }
 
-    public void export(ReportExportType type, List<String> keysCsv, BaseFilter filter) {
-        System.out.println("[ReportExportService] Запуск экспорта в формате: " + type);
+    public void export(ReportExportType type, List<String> keysCsv, BaseFilter filter, Path targetDir) {
+        System.out.println("[ReportExportService] Запуск экспорта в формате: " + type + (targetDir != null ? " в каталог " + targetDir : ""));
         try {
-            doExport(type, keysCsv, filter);
+            doExport(type, keysCsv, filter, targetDir);
         } catch (Throwable t) {
             System.err.println("[ReportExportService] Критическая ошибка экспорта: " + t.getMessage());
             t.printStackTrace();
@@ -66,9 +66,8 @@ public class ReportExportService {
         }
     }
 
-    private void doExport(ReportExportType type, List<String> keysCsv, BaseFilter filter) throws Exception {
+    private void doExport(ReportExportType type, List<String> keysCsv, BaseFilter filter, Path targetDir) throws Exception {
         if (!ctx.isSessionReady()) {
-            System.err.println("[ReportExportService] Сессия SonarQube не готова.");
             throw new IllegalStateException("Сессия SonarQube не готова");
         }
 
@@ -77,44 +76,40 @@ public class ReportExportService {
             System.out.println("[ReportExportService] Экспорт по списку ключей (" + keysCsv.size() + " шт)...");
             issues = loadByKeys(filter != null ? filter.project : ctx.getProject(), keysCsv);
         } else {
-            if (filter == null) {
-                System.err.println("[ReportExportService] Нет ни ключей, ни фильтров для экспорта.");
-                throw new IllegalArgumentException("Нет ни keys, ни фильтров");
-            }
+            if (filter == null) throw new IllegalArgumentException("Нет ни keys, ни фильтров");
             System.out.println("[ReportExportService] Экспорт по фильтрам (постранично)…");
             issues = collectByFilters(filter);
         }
 
-        if (cancelled) {
-            System.out.println("[ReportExportService] Экспорт отменен пользователем.");
-            return;
-        }
+        if (cancelled) return;
         if (issues.isEmpty()) {
-            System.out.println("[ReportExportService] Нет данных для экспорта.");
             if (listener != null) listener.onError(new IllegalStateException("Нет данных"));
             return;
         }
 
-        System.out.println("[ReportExportService] Собрано " + issues.size() + " issues. Генерация файла...");
-        Path outFile;
+        System.out.println("[ReportExportService] Собрано " + issues.size() + " issues. Генерация файла(ов)...");
+
+        Path outPath;
         switch (type) {
-            case JIRA, MARKDOWN, TXT, CONFLUENCE -> outFile = exportTextFormat(type, issues);
-            case HTML_FILES                       -> outFile = exportHtmlZip(issues, false);
-            case HTML_FILES_TEAMS                 -> outFile = exportHtmlZip(issues, true);
-            case LLM_MD_ZIP                       -> outFile = exportLlmMdZip(issues);
-            case TEAM_MODULE_ZIP                  -> outFile = exportTeamModuleZip(issues);
+            case JIRA, MARKDOWN, TXT, CONFLUENCE -> outPath = exportTextFormat(type, issues);
+            case HTML_FILES                       -> outPath = exportHtml(issues, false, targetDir);
+            case HTML_FILES_TEAMS                 -> outPath = exportHtml(issues, true, targetDir);
+            case LLM_MD_ZIP                       -> outPath = exportLlmMd(issues, targetDir);
+            case TEAM_MODULE_ZIP                  -> outPath = exportTeamModule(issues, targetDir);
             default -> throw new IllegalArgumentException("Неизвестный формат: " + type);
         }
 
         if (cancelled) {
-            System.out.println("[ReportExportService] Отмена после генерации. Удаление временного файла.");
-            try { Files.deleteIfExists(outFile); } catch (Exception ignored) {}
+            System.out.println("[ReportExportService] Отмена после генерации.");
+            if (targetDir == null) {
+                try { Files.deleteIfExists(outPath); } catch (Exception ignored) {}
+            }
             return;
         }
 
-        System.out.println("[ReportExportService] Экспорт успешно завершен. Файл: " + outFile);
+        System.out.println("[ReportExportService] Экспорт успешно завершен. Результат: " + outPath);
         if (listener != null) {
-            listener.onDone(outFile, suggestedName(type, filter != null ? filter.project : ctx.getProject()));
+            listener.onDone(outPath, suggestedName(type, filter != null ? filter.project : ctx.getProject()));
         }
     }
 
@@ -139,7 +134,6 @@ public class ReportExportService {
                     for (int j = 0; j < arr.length(); j++) out.add(Issue.from(arr.getJSONObject(j), project));
                 }
             } catch (Exception e) {
-                System.err.println("[ReportExportService] Пакетная загрузка не удалась, переход на одиночные запросы: " + e.getMessage());
                 for (String k : batch) {
                     try { Issue it = api.fetchIssue(k); if (it != null) out.add(it); } catch (Exception ignored) {}
                 }
@@ -164,7 +158,6 @@ public class ReportExportService {
         String tagsCsv    = (hasNoTagsMarker   || f.tags.isEmpty()) ? null : String.join(",", f.tags);
         String notTagsCsv = (hasNoTagsExcluded || f.excludedTags.isEmpty()) ? null : String.join(",", f.excludedTags);
 
-        // 1. Предварительный подсчёт
         if (listener != null) listener.onProgress(0, 0, "fetching", "Подсчёт количества issues по фильтрам…");
 
         int serverTotal = -1;
@@ -178,10 +171,7 @@ public class ReportExportService {
 
         List<Issue> result = new ArrayList<>();
 
-        // 2. Стратегия загрузки
         if (serverTotal > SONAR_HARD_LIMIT) {
-            // Sonar API не отдаст больше 10000 через /api/issues/search.
-            // Используем безопасное разбиение по файлам.
             System.out.println("[ReportExportService] total=" + serverTotal
                     + " > " + SONAR_HARD_LIMIT + " — запуск разбиения по файлам...");
             SonarIssuesApi.FetchProgressListener apiProgress = null;
@@ -194,7 +184,6 @@ public class ReportExportService {
                 if (passesClientFilters(it, f)) result.add(it);
             }
         } else {
-            // Постраничная загрузка по 3000 (безопасно, так как total <= 10000)
             System.out.println("[ReportExportService] Постраничная загрузка по "
                     + PAGE_SIZE + " (total=" + serverTotal + ")…");
             int page = 1;
@@ -322,46 +311,76 @@ public class ReportExportService {
         return out;
     }
 
-    private Path exportHtmlZip(List<Issue> issues, boolean withTeams) throws Exception {
+    private Path exportHtml(List<Issue> issues, boolean withTeams, Path targetDir) throws Exception {
         int total = issues.size();
         String project = ctx.getProject();
         String host = hostOf();
         Map<String, List<Issue>> byFile = groupByFile(issues);
         SonarIssuesApi api = ctx.state().newApi(project);
         Map<String, List<String>> snippets = new HashMap<>();
+
+        // 1. Загрузка фрагментов кода
         int loaded = 0;
-        System.out.println("[ReportExportService] Сборка HTML ZIP (withTeams=" + withTeams + "). Файлов: " + byFile.size());
         for (List<Issue> lst : byFile.values()) {
             for (Issue it : lst) {
                 if (cancelled) throw new InterruptedException("cancelled");
                 try { List<String> s = api.fetchSnippet(it.key); if (!s.isEmpty()) snippets.put(it.key, s); } catch (Exception ignored) {}
                 loaded++;
-                if (listener != null && (loaded % 10 == 0 || loaded == total)) listener.onProgress(loaded, total, "snippets", String.format("Фрагменты кода: %d/%d", loaded, total));
+                if (listener != null && (loaded % 10 == 0 || loaded == total))
+                    listener.onProgress(loaded, total, "snippets", String.format("Фрагменты кода: %d/%d", loaded, total));
             }
         }
-        Path zip = Files.createTempFile("sonar_report_", ".zip");
-        TeamMapping mapping = withTeams ? TeamMapping.load() : null;
-        if (listener != null) listener.onProgress(total, total, "generating", "Сборка ZIP…");
-        HtmlPerFileExporter.writeZip(zip, byFile, snippets, project, host, withTeams, mapping);
-        return zip;
+
+        // 2. Генерация и сохранение
+        if (listener != null) listener.onProgress(total, total, "generating", "Сохранение HTML файлов…");
+
+        if (targetDir != null) {
+            TeamMapping mapping = withTeams ? TeamMapping.load() : null;
+            HtmlPerFileExporter.writeDirectory(targetDir, byFile, snippets, project, host, withTeams, mapping,
+                    (cur, tot, msg) -> { if (listener != null) listener.onProgress(cur, tot, "writing", msg); });
+            return targetDir;
+        } else {
+            Path zip = Files.createTempFile("sonar_report_", ".zip");
+            TeamMapping mapping = withTeams ? TeamMapping.load() : null;
+            HtmlPerFileExporter.writeZip(zip, byFile, snippets, project, host, withTeams, mapping);
+            return zip;
+        }
     }
 
-    private Path exportLlmMdZip(List<Issue> issues) throws Exception {
-        String project = ctx.getProject(); String host = hostOf();
+    private Path exportLlmMd(List<Issue> issues, Path targetDir) throws Exception {
+        String project = ctx.getProject();
+        String host = hostOf();
         Map<String, List<Issue>> byFile = groupByFile(issues);
-        if (listener != null) listener.onProgress(issues.size(), issues.size(), "generating", "Сборка LLM MD ZIP…");
-        Path zip = Files.createTempFile("sonar_llm_", ".zip");
-        LlmMdExporter.writeZip(zip, byFile, ctx.state().newApi(project), project, host);
-        return zip;
+
+        if (listener != null) listener.onProgress(issues.size(), issues.size(), "generating", "Сохранение MD файлов…");
+
+        if (targetDir != null) {
+            LlmMdExporter.writeDirectory(targetDir, byFile, ctx.state().newApi(project), project, host,
+                    (cur, tot, msg) -> { if (listener != null) listener.onProgress(cur, tot, "writing", msg); });
+            return targetDir;
+        } else {
+            Path zip = Files.createTempFile("sonar_llm_", ".zip");
+            LlmMdExporter.writeZip(zip, byFile, ctx.state().newApi(project), project, host);
+            return zip;
+        }
     }
 
-    private Path exportTeamModuleZip(List<Issue> issues) throws Exception {
-        String project = ctx.getProject(); String host = hostOf();
+    private Path exportTeamModule(List<Issue> issues, Path targetDir) throws Exception {
+        String project = ctx.getProject();
+        String host = hostOf();
         Map<String, List<Issue>> byFile = groupByFile(issues);
-        if (listener != null) listener.onProgress(issues.size(), issues.size(), "generating", "Сборка Team/Module ZIP…");
-        Path zip = Files.createTempFile("sonar_team_", ".zip");
-        TeamModuleMdExporter.writeZip(zip, byFile, ctx.state().newApi(project), project, host, TeamMapping.load());
-        return zip;
+
+        if (listener != null) listener.onProgress(issues.size(), issues.size(), "generating", "Сохранение Team/Module файлов…");
+
+        if (targetDir != null) {
+            TeamModuleMdExporter.writeDirectory(targetDir, byFile, ctx.state().newApi(project), project, host, TeamMapping.load(),
+                    (cur, tot, msg) -> { if (listener != null) listener.onProgress(cur, tot, "writing", msg); });
+            return targetDir;
+        } else {
+            Path zip = Files.createTempFile("sonar_team_", ".zip");
+            TeamModuleMdExporter.writeZip(zip, byFile, ctx.state().newApi(project), project, host, TeamMapping.load());
+            return zip;
+        }
     }
 
     private Map<String, List<Issue>> groupByFile(List<Issue> issues) {

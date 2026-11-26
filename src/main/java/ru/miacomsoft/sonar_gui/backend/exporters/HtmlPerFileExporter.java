@@ -21,6 +21,11 @@ public final class HtmlPerFileExporter {
 
     public static final String MANIFEST_NAME = "!files.csv";
 
+    @FunctionalInterface
+    public interface ProgressCallback {
+        void onProgress(int current, int total, String message);
+    }
+
     private HtmlPerFileExporter() {}
 
     public static int writeZip(Path target,
@@ -32,7 +37,6 @@ public final class HtmlPerFileExporter {
              ZipOutputStream zos = new ZipOutputStream(fos, StandardCharsets.UTF_8)) {
             zos.setLevel(6);
             int written = 0;
-
             StringBuilder manifest = new StringBuilder(1024);
             manifest.append(projectName != null ? projectName : "").append('\n');
 
@@ -59,6 +63,43 @@ public final class HtmlPerFileExporter {
             zos.closeEntry();
             return written;
         }
+    }
+
+    public static int writeDirectory(Path targetDir,
+                                     Map<String, List<Issue>> issuesByFile,
+                                     Map<String, List<String>> issueSnippets,
+                                     String projectName, String host,
+                                     boolean useTeams, TeamMapping mapping,
+                                     ProgressCallback progress) throws IOException {
+        Files.createDirectories(targetDir);
+        int total = issuesByFile.size();
+        int current = 0;
+        StringBuilder manifest = new StringBuilder(1024);
+        manifest.append(projectName != null ? projectName : "").append('\n');
+
+        for (Map.Entry<String, List<Issue>> e : issuesByFile.entrySet()) {
+            current++;
+            String fileName = e.getKey();
+            List<Issue> issues = e.getValue();
+
+            String html = formatHtmlFile(issues, issueSnippets, projectName, host, fileName);
+            String entryName = makeEntryName(fileName, useTeams, mapping);
+            Path filePath = targetDir.resolve(entryName);
+
+            Files.writeString(filePath, html, StandardCharsets.UTF_8);
+
+            String sonarLink = buildSonarLink(projectName, host, fileName, issues);
+            manifest.append(fileName).append(';')
+                    .append(entryName).append(';')
+                    .append(sonarLink).append('\n');
+
+            if (progress != null) {
+                progress.onProgress(current, total, "Сохранение HTML: " + current + "/" + total);
+            }
+        }
+
+        Files.writeString(targetDir.resolve(MANIFEST_NAME), manifest.toString(), StandardCharsets.UTF_8);
+        return current;
     }
 
     private static String buildSonarLink(String projectName, String host,

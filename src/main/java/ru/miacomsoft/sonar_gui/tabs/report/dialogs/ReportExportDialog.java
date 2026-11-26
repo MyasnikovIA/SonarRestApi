@@ -29,6 +29,7 @@ public class ReportExportDialog extends JDialog {
 
     private volatile ReportExportService service;
     private volatile boolean cancelled = false;
+    private Path targetDirectory = null;
 
     public ReportExportDialog(GuiContext ctx, ReportExportType type,
                               List<String> keysCsv, ReportExportService.BaseFilter filter) {
@@ -84,7 +85,28 @@ public class ReportExportDialog extends JDialog {
         startExport();
     }
 
+    private boolean isMultiFile() {
+        return type == ReportExportType.HTML_FILES ||
+                type == ReportExportType.HTML_FILES_TEAMS ||
+                type == ReportExportType.LLM_MD_ZIP ||
+                type == ReportExportType.TEAM_MODULE_ZIP;
+    }
+
     private void startExport() {
+        if (isMultiFile()) {
+            JFileChooser chooser = new JFileChooser();
+            chooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
+            chooser.setDialogTitle("Выберите каталог для сохранения отчета");
+            if (chooser.showSaveDialog(this) != JFileChooser.APPROVE_OPTION) {
+                dispose();
+                return;
+            }
+            targetDirectory = chooser.getSelectedFile().toPath();
+            statusLbl.setText("Каталог: " + targetDirectory.getFileName());
+        }
+
+        final Path finalTargetDir = targetDirectory;
+
         new SwingWorker<Void, Void>() {
             @Override protected Void doInBackground() {
                 service = new ReportExportService(ctx, new ReportExportService.ProgressListener() {
@@ -92,13 +114,13 @@ public class ReportExportDialog extends JDialog {
                         SwingUtilities.invokeLater(() -> updateProgress(current, total, stage, message));
                     }
                     @Override public void onDone(Path file, String suggestedName) {
-                        SwingUtilities.invokeLater(() -> onExportComplete(file, suggestedName));
+                        SwingUtilities.invokeLater(() -> onExportComplete(file, suggestedName, finalTargetDir != null));
                     }
                     @Override public void onError(Throwable t) {
                         SwingUtilities.invokeLater(() -> onExportError(t));
                     }
                 });
-                service.export(type, keysCsv, filter);
+                service.export(type, keysCsv, filter, finalTargetDir);
                 return null;
             }
         }.execute();
@@ -118,14 +140,24 @@ public class ReportExportDialog extends JDialog {
         }
     }
 
-    private void onExportComplete(Path tempFile, String suggestedName) {
+    private void onExportComplete(Path tempFile, String suggestedName, boolean isDir) {
         if (cancelled) {
-            try { Files.deleteIfExists(tempFile); } catch (Exception ignored) {}
+            if (!isDir) {
+                try { Files.deleteIfExists(tempFile); } catch (Exception ignored) {}
+            }
             dispose();
             return;
         }
         progressBar.setIndeterminate(false);
         progressBar.setValue(100);
+
+        if (isDir) {
+            statusLbl.setText("Готово. Отчет сохранен в каталог.");
+            UiHelpers.showToast(this, "Сохранено в: " + tempFile.toAbsolutePath(), false);
+            dispose();
+            return;
+        }
+
         statusLbl.setText("Готово. Выбор места сохранения…");
 
         JFileChooser chooser = new JFileChooser();

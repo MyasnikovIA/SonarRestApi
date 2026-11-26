@@ -12,14 +12,12 @@ import java.util.Map;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
-/**
- * ZIP с MD-отчётами, разложенными по командам/модулям (из team_mapping.csv).
- *
- * Реализация минимальна: MD-файл по каждому SonarQube-файлу с префиксом
- * (команда)[модуль]_ в имени. Если team_mapping.csv нет или строки нет —
- * файл кладётся в корень ZIP.
- */
 public class TeamModuleMdExporter {
+
+    @FunctionalInterface
+    public interface ProgressCallback {
+        void onProgress(int current, int total, String message);
+    }
 
     public static int writeZip(Path zipPath, Map<String, List<Issue>> issuesByFile,
                                SonarIssuesApi api, String project, String host,
@@ -54,6 +52,46 @@ public class TeamModuleMdExporter {
             }
         }
         return count;
+    }
+
+    public static int writeDirectory(Path targetDir, Map<String, List<Issue>> issuesByFile,
+                                     SonarIssuesApi api, String project, String host,
+                                     TeamMapping mapping, ProgressCallback progress) throws Exception {
+        Files.createDirectories(targetDir);
+        int total = issuesByFile.size();
+        int current = 0;
+
+        for (Map.Entry<String, List<Issue>> entry : issuesByFile.entrySet()) {
+            current++;
+            String file = entry.getKey();
+            List<Issue> issues = entry.getValue();
+
+            String fullSource = "";
+            try { fullSource = api.fetchFullSource(project + ":" + file); }
+            catch (Exception ignored) {}
+
+            String md = buildMd(file, issues, fullSource, project, host);
+
+            String safeName = makeFileName(file);
+            String prefix = "";
+            if (mapping != null) {
+                TeamMapping.FileInfo info = mapping.findInfo(file);
+                if (info != null && !info.isEmpty()) {
+                    StringBuilder sb = new StringBuilder();
+                    if (info.hasTeam()) sb.append("(").append(info.team).append(")");
+                    if (info.hasComponent()) sb.append("[").append(info.component).append("]");
+                    if (sb.length() > 0) prefix = sb.append("_").toString();
+                }
+            }
+
+            Path filePath = targetDir.resolve(prefix + safeName + ".md");
+            Files.writeString(filePath, md, StandardCharsets.UTF_8);
+
+            if (progress != null) {
+                progress.onProgress(current, total, "Сохранение MD: " + current + "/" + total);
+            }
+        }
+        return current;
     }
 
     private static String buildMd(String file, List<Issue> issues, String fullSource,

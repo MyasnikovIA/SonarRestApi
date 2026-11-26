@@ -23,32 +23,53 @@ public class ProjectsService {
     }
 
     public List<ProjectItem> fetchProjects() throws Exception {
-        if (!ctx.isSessionReady()) return new ArrayList<>();
+        if (!ctx.isSessionReady()) {
+            System.err.println("[ProjectsService] Ошибка: сессия SonarQube не готова.");
+            return new ArrayList<>();
+        }
 
         List<ProjectItem> out = new ArrayList<>();
         int page = 1;
+        // Для /api/components/search максимальный ps = 500 (ограничение SonarQube)
         int pageSize = 500;
         int total = -1;
 
+        System.out.println("[ProjectsService] Начало загрузки списка проектов (pageSize=" + pageSize + ")...");
+
         while (total < 0 || out.size() < total) {
             String url = "/api/components/search?qualifiers=TRK&p=" + page + "&ps=" + pageSize;
-            JSONObject root = new JSONObject(ctx.state().getClient().get(url));
+            System.out.println("[ProjectsService] Запрос страницы " + page + "...");
 
-            JSONObject paging = root.optJSONObject("paging");
-            if (paging != null) total = paging.optInt("total", 0);
+            try {
+                JSONObject root = new JSONObject(ctx.state().getClient().get(url));
 
-            JSONArray components = root.optJSONArray("components");
-            if (components == null || components.length() == 0) break;
+                JSONObject paging = root.optJSONObject("paging");
+                if (paging != null) total = paging.optInt("total", 0);
 
-            for (int i = 0; i < components.length(); i++) {
-                JSONObject c = components.getJSONObject(i);
-                out.add(new ProjectItem(
-                        c.optString("key", ""),
-                        c.optString("name", "")));
+                JSONArray components = root.optJSONArray("components");
+                if (components == null || components.length() == 0) break;
+
+                for (int i = 0; i < components.length(); i++) {
+                    JSONObject c = components.getJSONObject(i);
+                    out.add(new ProjectItem(
+                            c.optString("key", ""),
+                            c.optString("name", "")));
+                }
+
+                System.out.println("[ProjectsService] Страница " + page + " обработана. Загружено: " + out.size() + " из " + total);
+                page++;
+
+                if (page > 100) { // safety limit
+                    System.out.println("[ProjectsService] Достигнут лимит страниц (100). Прерывание.");
+                    break;
+                }
+            } catch (Exception e) {
+                System.err.println("[ProjectsService] Ошибка при загрузке проектов (страница " + page + "): " + e.getMessage());
+                throw e;
             }
-            page++;
-            if (page > 50) break;
         }
+
+        System.out.println("[ProjectsService] Загрузка проектов успешно завершена. Всего: " + out.size());
         return out;
     }
 }

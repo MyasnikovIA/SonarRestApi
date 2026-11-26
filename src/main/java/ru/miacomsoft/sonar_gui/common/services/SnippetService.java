@@ -22,22 +22,38 @@ public class SnippetService {
     }
 
     public SnippetResult fetchSnippet(String projectKey, String issueKey) throws Exception {
-        if (!ctx.isSessionReady()) throw new IllegalStateException("Сессия SonarQube не готова");
-
-        SonarIssuesApi api = ctx.state().newApi(projectKey);
-        Issue issue = api.fetchIssue(issueKey);
-        if (issue == null) {
-            return new SnippetResult(new JSONObject(), "", List.of());
+        if (!ctx.isSessionReady()) {
+            System.err.println("[SnippetService] Сессия не готова.");
+            throw new IllegalStateException("Сессия SonarQube не готова");
         }
 
-        String ruleName = "";
-        try { ruleName = api.fetchRuleName(issue.rule); }
-        catch (Exception ignored) {}
+        System.out.println("[SnippetService] Загрузка фрагмента для issue: " + issueKey);
+        try {
+            SonarIssuesApi api = ctx.state().newApi(projectKey);
+            Issue issue = api.fetchIssue(issueKey);
+            if (issue == null) {
+                System.err.println("[SnippetService] Issue не найден: " + issueKey);
+                return new SnippetResult(new JSONObject(), "", List.of());
+            }
 
-        List<String> snippet;
-        try { snippet = api.fetchSnippet(issueKey); }
-        catch (Exception e) { snippet = new ArrayList<>(); }
+            String ruleName = "";
+            try { ruleName = api.fetchRuleName(issue.rule); }
+            catch (Exception e) {
+                System.err.println("[SnippetService] Не удалось загрузить имя правила для " + issue.rule + ": " + e.getMessage());
+            }
 
-        return new SnippetResult(issue.toJson(), ruleName, snippet);
+            List<String> snippet;
+            try { snippet = api.fetchSnippet(issueKey); }
+            catch (Exception e) {
+                System.err.println("[SnippetService] Не удалось загрузить сниппет для " + issueKey + ": " + e.getMessage());
+                snippet = new ArrayList<>();
+            }
+
+            System.out.println("[SnippetService] Сниппет для " + issueKey + " успешно загружен (строк: " + snippet.size() + ")");
+            return new SnippetResult(issue.toJson(), ruleName, snippet);
+        } catch (Exception e) {
+            System.err.println("[SnippetService] Критическая ошибка: " + e.getMessage());
+            throw e;
+        }
     }
 }

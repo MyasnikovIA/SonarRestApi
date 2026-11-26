@@ -23,15 +23,27 @@ public class TagsService {
     }
 
     public List<String> fetchTags(String projectKey) throws Exception {
-        if (!ctx.isSessionReady()) return new ArrayList<>(PRIORITY_TAGS);
-        List<String> raw = ctx.state().newApi(projectKey).fetchTags(null);
-        Set<String> tags = new LinkedHashSet<>();
-        if (raw != null) {
-            for (String t : raw) {
-                if (t != null && !t.isBlank()) tags.add(t);
-            }
+        if (!ctx.isSessionReady()) {
+            System.err.println("[TagsService] Сессия не готова. Возврат только приоритетных тегов.");
+            return new ArrayList<>(PRIORITY_TAGS);
         }
-        for (String p : PRIORITY_TAGS) tags.add(p);
-        return new ArrayList<>(tags);
+
+        System.out.println("[TagsService] Загрузка тегов для проекта: " + projectKey);
+        try {
+            List<String> raw = ctx.state().newApi(projectKey).fetchTags(null);
+            Set<String> tags = new LinkedHashSet<>();
+            if (raw != null) {
+                for (String t : raw) {
+                    if (t != null && !t.isBlank()) tags.add(t);
+                }
+            }
+            for (String p : PRIORITY_TAGS) tags.add(p);
+
+            System.out.println("[TagsService] Успешно загружено " + tags.size() + " тегов.");
+            return new ArrayList<>(tags);
+        } catch (Exception e) {
+            System.err.println("[TagsService] Ошибка при загрузке тегов: " + e.getMessage());
+            throw e;
+        }
     }
 }

@@ -19,7 +19,8 @@ import java.util.List;
 
 public class PerFilePanel extends JPanel implements Reloadable {
 
-    private static final int PAGE_SIZE = 100;
+    // Согласно требованию: загрузка партиями по 3000 записей
+    private static final int PAGE_SIZE = 3000;
 
     private final GuiContext ctx;
 
@@ -280,7 +281,7 @@ public class PerFilePanel extends JPanel implements Reloadable {
         new SwingWorker<int[], Void>() {
             @Override protected int[] doInBackground() {
                 int ok = 0, fail = 0;
-                MarkService markService = new MarkService(ctx); // ← БЫЛО: new MarkService(ctx.api())
+                MarkService markService = new MarkService(ctx);
                 for (IssueService.IssueDto it : reopenable) {
                     try {
                         String transition = "CONFIRMED".equals(it.status())

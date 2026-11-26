@@ -54,32 +54,46 @@ public class ReportExportService {
     public boolean isCancelled() { return cancelled; }
 
     public void export(ReportExportType type, List<String> keysCsv, BaseFilter filter) {
+        System.out.println("[ReportExportService] Запуск экспорта в формате: " + type);
         try {
             doExport(type, keysCsv, filter);
         } catch (Throwable t) {
+            System.err.println("[ReportExportService] Критическая ошибка экспорта: " + t.getMessage());
+            t.printStackTrace();
             if (listener != null) listener.onError(t);
         }
     }
 
     private void doExport(ReportExportType type, List<String> keysCsv, BaseFilter filter) throws Exception {
         if (!ctx.isSessionReady()) {
+            System.err.println("[ReportExportService] Сессия SonarQube не готова.");
             throw new IllegalStateException("Сессия SonarQube не готова");
         }
 
         List<Issue> issues;
         if (keysCsv != null && !keysCsv.isEmpty()) {
+            System.out.println("[ReportExportService] Экспорт по списку ключей (" + keysCsv.size() + " шт)...");
             issues = loadByKeys(filter != null ? filter.project : ctx.getProject(), keysCsv);
         } else {
-            if (filter == null) throw new IllegalArgumentException("Нет ни keys, ни фильтров");
+            if (filter == null) {
+                System.err.println("[ReportExportService] Нет ни ключей, ни фильтров для экспорта.");
+                throw new IllegalArgumentException("Нет ни keys, ни фильтров");
+            }
+            System.out.println("[ReportExportService] Экспорт по фильтрам...");
             issues = collectByFilters(filter);
         }
 
-        if (cancelled) return;
+        if (cancelled) {
+            System.out.println("[ReportExportService] Экспорт отменен пользователем.");
+            return;
+        }
         if (issues.isEmpty()) {
+            System.out.println("[ReportExportService] Нет данных для экспорта.");
             if (listener != null) listener.onError(new IllegalStateException("Нет данных"));
             return;
         }
 
+        System.out.println("[ReportExportService] Собрано " + issues.size() + " issues. Генерация файла...");
         Path outFile;
         switch (type) {
             case JIRA, MARKDOWN, TXT, CONFLUENCE -> outFile = exportTextFormat(type, issues);
@@ -91,10 +105,12 @@ public class ReportExportService {
         }
 
         if (cancelled) {
+            System.out.println("[ReportExportService] Отмена после генерации. Удаление временного файла.");
             try { Files.deleteIfExists(outFile); } catch (Exception ignored) {}
             return;
         }
 
+        System.out.println("[ReportExportService] Экспорт успешно завершен. Файл: " + outFile);
         if (listener != null) {
             listener.onDone(outFile, suggestedName(type, filter != null ? filter.project : ctx.getProject()));
         }
@@ -121,6 +137,7 @@ public class ReportExportService {
                     for (int j = 0; j < arr.length(); j++) out.add(Issue.from(arr.getJSONObject(j), project));
                 }
             } catch (Exception e) {
+                System.err.println("[ReportExportService] Пакетная загрузка не удалась, переход на одиночные запросы: " + e.getMessage());
                 for (String k : batch) {
                     try { Issue it = api.fetchIssue(k); if (it != null) out.add(it); } catch (Exception ignored) {}
                 }
@@ -142,9 +159,16 @@ public class ReportExportService {
 
         if (listener != null) listener.onProgress(0, 0, "fetching", "Загрузка issues из SonarQube…");
 
-        List<Issue> all = api.fetchAllByStatuses(statuses, f.severity, f.quality);
+        SonarIssuesApi.FetchProgressListener apiProgress = (current, total, message) -> {
+            if (listener != null) listener.onProgress(current, total, "fetching", message);
+        };
+
+        System.out.println("[ReportExportService] Запуск загрузки по фильтрам...");
+        List<Issue> all = api.fetchAllByStatuses(statuses, f.severity, f.quality, apiProgress);
+
         if (cancelled) return List.of();
 
+        System.out.println("[ReportExportService] Загружено " + all.size() + " issues. Применение фильтров...");
         List<Issue> filtered = new ArrayList<>();
         String q = f.filterText == null ? "" : f.filterText.trim().toLowerCase();
 
@@ -189,13 +213,13 @@ public class ReportExportService {
             filtered.add(it);
         }
 
+        System.out.println("[ReportExportService] Отфильтровано: " + filtered.size() + " из " + all.size());
         if (listener != null)
             listener.onProgress(filtered.size(), filtered.size(), "filtered", String.format("Отобрано %d из %d", filtered.size(), all.size()));
         return filtered;
     }
 
-    // --- Вспомогательные методы экспорта (text/zip) взяты из предыдущей версии ---
-    // (полный код exportTextFormat, exportHtmlZip, exportLlmMdZip, exportTeamModuleZip, groupByFile, hostOf, suggestedName, urlEnc, esc остаются без изменений)
+    // --- Вспомогательные методы экспорта ---
 
     private Path exportTextFormat(ReportExportType type, List<Issue> issues) throws Exception {
         int total = issues.size();
@@ -253,6 +277,7 @@ public class ReportExportService {
         SonarIssuesApi api = ctx.state().newApi(project);
         Map<String, List<String>> snippets = new HashMap<>();
         int loaded = 0;
+        System.out.println("[ReportExportService] Сборка HTML ZIP (withTeams=" + withTeams + "). Файлов: " + byFile.size());
         for (List<Issue> lst : byFile.values()) {
             for (Issue it : lst) {
                 if (cancelled) throw new InterruptedException("cancelled");

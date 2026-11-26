@@ -17,7 +17,7 @@ public class ReportLoader extends SwingWorker<List<IssueService.IssueDto>, Objec
 
     private final Consumer<List<IssueService.IssueDto>> onSuccess;
     private final Consumer<Throwable> onError;
-    private final Consumer<Object[]> onProgress; // [current, total, message]
+    private final Consumer<Object[]> onProgress;
 
     public ReportLoader(GuiContext ctx, String customSev, String customQual, String customStatuses,
                         Consumer<List<IssueService.IssueDto>> onSuccess,
@@ -35,16 +35,21 @@ public class ReportLoader extends SwingWorker<List<IssueService.IssueDto>, Objec
 
     @Override
     protected List<IssueService.IssueDto> doInBackground() throws Exception {
-        return issueService.fetchAllIssues(
-                ctx.getProject(), customSev, customQual,
-                ctx.isHideProcessed(), customStatuses,
-                (current, total, message) -> publish(new Object[]{current, total, message}));
+        System.out.println("[ReportLoader] Начало фоновой загрузки данных для отчета...");
+        try {
+            return issueService.fetchAllIssues(
+                    ctx.getProject(), customSev, customQual,
+                    ctx.isHideProcessed(), customStatuses,
+                    (current, total, message) -> publish(new Object[]{current, total, message}));
+        } catch (Exception e) {
+            System.err.println("[ReportLoader] Ошибка в doInBackground: " + e.getMessage());
+            throw e;
+        }
     }
 
     @Override
     protected void process(List<Object[]> chunks) {
         if (onProgress != null && !chunks.isEmpty()) {
-            // Берем последний чанк для обновления UI
             onProgress.accept(chunks.get(chunks.size() - 1));
         }
     }
@@ -53,8 +58,11 @@ public class ReportLoader extends SwingWorker<List<IssueService.IssueDto>, Objec
     protected void done() {
         try {
             if (onSuccess != null) onSuccess.accept(get());
+            System.out.println("[ReportLoader] Фоновая загрузка успешно завершена.");
         } catch (Exception e) {
             Throwable cause = e.getCause() != null ? e.getCause() : e;
+            System.err.println("[ReportLoader] Ошибка при завершении загрузки: " + cause.getMessage());
+            cause.printStackTrace();
             if (onError != null) onError.accept(cause);
         }
     }

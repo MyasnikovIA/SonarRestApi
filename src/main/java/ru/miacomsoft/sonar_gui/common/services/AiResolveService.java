@@ -6,9 +6,6 @@ import ru.miacomsoft.sonar_gui.common.GuiContext;
 
 /**
  * Общий хелпер для кнопки «Получить резолюцию ИИ».
- *
- *   buildPrompt(name, issueKey)  → PromptService.buildForIssue
- *   ask(name, issueKey)          → OllamaClient.chat(prompt) + OllamaResponse.parse
  */
 public class AiResolveService {
 
@@ -20,32 +17,44 @@ public class AiResolveService {
         this.ctx = ctx;
     }
 
-    /** Построить промпт для одного issue. */
     public String buildPrompt(String promptName, String issueKey,
                               String status, String statusLabel) throws Exception {
+        System.out.println("[AiResolveService] Подготовка промпта для ИИ (issue=" + issueKey + ")...");
         PromptService promptService = new PromptService(ctx);
         return promptService.buildForIssue(
                 ctx.getProject(), promptName, issueKey, status, statusLabel);
     }
 
-    /** Полный цикл: промпт → Ollama → разбор. */
     public ResolveResult ask(String promptName, String issueKey,
                              String status, String statusLabel) throws Exception {
         if (!ctx.ollamaConfig().isConfigured()) {
+            System.err.println("[AiResolveService] Ошибка: Ollama не настроена (url/model).");
             throw new IllegalStateException(
                     "Ollama не настроена. Укажите url/model в меню "
                             + "«Файл → Настройки Ollama».");
         }
 
+        System.out.println("[AiResolveService] Запрос к ИИ для issue: " + issueKey);
         String prompt = buildPrompt(promptName, issueKey, status, statusLabel);
         if (prompt == null || prompt.isBlank()) {
+            System.err.println("[AiResolveService] Ошибка: Промпт пуст.");
             throw new IllegalStateException(
                     "Промпт пуст. Проверьте prompts/" + promptName + ".txt");
         }
 
-        OllamaClient client = new OllamaClient(ctx.ollamaConfig());
-        String raw = client.chat(prompt);
-        OllamaResponse parsed = OllamaResponse.parse(raw);
-        return new ResolveResult(prompt, raw, parsed);
+        try {
+            OllamaClient client = new OllamaClient(ctx.ollamaConfig());
+            System.out.println("[AiResolveService] Отправка запроса в Ollama (модель: " + ctx.ollamaConfig().getModel() + ")...");
+            String raw = client.chat(prompt);
+
+            System.out.println("[AiResolveService] Ответ от Ollama получен. Парсинг...");
+            OllamaResponse parsed = OllamaResponse.parse(raw);
+
+            System.out.println("[AiResolveService] Резолюция ИИ успешно обработана (статус: " + parsed.status + ").");
+            return new ResolveResult(prompt, raw, parsed);
+        } catch (Exception e) {
+            System.err.println("[AiResolveService] Ошибка при обращении к ИИ: " + e.getMessage());
+            throw e;
+        }
     }
 }

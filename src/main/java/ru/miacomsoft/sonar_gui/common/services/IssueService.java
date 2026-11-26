@@ -50,8 +50,12 @@ public class IssueService {
     public PerFilePage fetchPerFilePage(String project, String sev, String qual,
                                         boolean hideProcessed,
                                         int page, int pageSize) throws Exception {
-        if (!ctx.isSessionReady()) throw new IllegalStateException("Сессия не готова");
+        if (!ctx.isSessionReady()) {
+            System.err.println("[IssueService] Ошибка: сессия не готова (Per-File).");
+            throw new IllegalStateException("Сессия не готова");
+        }
 
+        System.out.println("[IssueService] Загрузка страницы Per-File (page=" + page + ", ps=" + pageSize + ")...");
         SonarIssuesApi api = ctx.state().newApi(project);
         String statuses = hideProcessed
                 ? SonarIssuesApi.ACTIVE_STATUSES
@@ -75,6 +79,7 @@ public class IssueService {
         for (Map.Entry<String, List<IssueDto>> e : byFile.entrySet()) {
             groups.add(new FileGroup(e.getKey(), e.getValue()));
         }
+        System.out.println("[IssueService] Per-File загружено. Всего issues: " + total + ", файлов на странице: " + groups.size());
         return new PerFilePage(total, groups);
     }
 
@@ -83,49 +88,34 @@ public class IssueService {
     public List<IssueDto> fetchAllIssues(String project, String sev, String qual,
                                          boolean hideProcessed, String statusesStr,
                                          FetchProgress progress) throws Exception {
-        if (!ctx.isSessionReady()) throw new IllegalStateException("Сессия не готова");
+        if (!ctx.isSessionReady()) {
+            System.err.println("[IssueService] Ошибка: сессия не готова (Report).");
+            throw new IllegalStateException("Сессия не готова");
+        }
 
+        System.out.println("[IssueService] Запуск полной загрузки issues для Report...");
         SonarIssuesApi api = ctx.state().newApi(project);
 
-        // Если выбрано ALL или пусто — используем ACTIVE или ALL_STATUSES
         String actualStatuses = statusesStr;
         if (actualStatuses == null || actualStatuses.isEmpty() || "ALL".equalsIgnoreCase(actualStatuses)) {
             actualStatuses = hideProcessed ? SonarIssuesApi.ACTIVE_STATUSES : SonarIssuesApi.ALL_STATUSES;
         }
 
-        List<Issue> all = new ArrayList<>();
-        int page = 1;
-        int total = -1;
-        // SonarQube режет ps до 500 (максимум), но мы запрашиваем логические пачки по 3000
-        // через цикл страниц.
-        int pageSize = 500;
-
-        while (total < 0 || all.size() < total) {
-            JSONObject raw = api.fetchPageRaw(actualStatuses, sev, qual, null, page, pageSize);
-            total = raw.optInt("total", 0);
-            JSONArray arr = raw.optJSONArray("issues");
-            if (arr == null || arr.length() == 0) break;
-
-            for (int i = 0; i < arr.length(); i++) {
-                all.add(Issue.from(arr.getJSONObject(i), project));
-            }
-
-            if (progress != null) {
-                progress.onProgress(all.size(), total,
-                        String.format("Загрузка: %d из %d", all.size(), total));
-            }
-
-            page++;
-            if (page > 1000) break; // safety
+        SonarIssuesApi.FetchProgressListener listener = null;
+        if (progress != null) {
+            listener = (current, total, message) -> progress.onProgress(current, total, message);
         }
 
-        List<IssueDto> out = new ArrayList<>(all.size());
-        for (Issue it : all) out.add(toDto(it));
-
-        if (progress != null && total > 0) {
-            progress.onProgress(total, total, "Загрузка завершена");
+        try {
+            List<Issue> all = api.fetchAllByStatuses(actualStatuses, sev, qual, listener);
+            List<IssueDto> out = new ArrayList<>(all.size());
+            for (Issue it : all) out.add(toDto(it));
+            System.out.println("[IssueService] Report загрузка завершена. Извлечено: " + out.size());
+            return out;
+        } catch (Exception e) {
+            System.err.println("[IssueService] Ошибка при загрузке issues для Report: " + e.getMessage());
+            throw e;
         }
-        return out;
     }
 
     // ============ INTERNAL ============

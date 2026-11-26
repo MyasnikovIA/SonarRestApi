@@ -8,7 +8,6 @@ import java.util.function.Consumer;
 
 /**
  * Загрузчик /perfile-страницы — напрямую через IssueService (SonarIssuesApi).
- * Больше не делает HTTP к /api/perfile.
  */
 public class PerFileLoader extends SwingWorker<IssueService.PerFilePage, Void> {
 
@@ -32,17 +31,26 @@ public class PerFileLoader extends SwingWorker<IssueService.PerFilePage, Void> {
 
     @Override
     protected IssueService.PerFilePage doInBackground() throws Exception {
-        return issueService.fetchPerFilePage(
-                ctx.getProject(), ctx.getSeverity(), ctx.getQuality(),
-                ctx.isHideProcessed(), page, pageSize);
+        System.out.println("[PerFileLoader] Начало загрузки страницы " + page + " (ps=" + pageSize + ")...");
+        try {
+            return issueService.fetchPerFilePage(
+                    ctx.getProject(), ctx.getSeverity(), ctx.getQuality(),
+                    ctx.isHideProcessed(), page, pageSize);
+        } catch (Exception e) {
+            System.err.println("[PerFileLoader] Ошибка при загрузке страницы " + page + ": " + e.getMessage());
+            throw e;
+        }
     }
 
     @Override
     protected void done() {
         try {
             if (onSuccess != null) onSuccess.accept(get());
+            System.out.println("[PerFileLoader] Страница " + page + " успешно загружена.");
         } catch (Exception e) {
             Throwable cause = e.getCause() != null ? e.getCause() : e;
+            System.err.println("[PerFileLoader] Ошибка при завершении загрузки страницы: " + cause.getMessage());
+            cause.printStackTrace();
             if (onError != null) onError.accept(cause);
         }
     }

@@ -60,6 +60,11 @@ public class ReportExportService {
         try {
             doExport(type, keysCsv, filter, targetDir);
         } catch (Throwable t) {
+            // Игнорируем ошибку, если экспорт был отменен пользователем
+            if (cancelled || (t instanceof InterruptedException && "cancelled".equals(t.getMessage()))) {
+                System.out.println("[ReportExportService] Экспорт отменен пользователем.");
+                return;
+            }
             System.err.println("[ReportExportService] Критическая ошибка экспорта: " + t.getMessage());
             t.printStackTrace();
             if (listener != null) listener.onError(t);

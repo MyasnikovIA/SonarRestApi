@@ -86,7 +86,11 @@ public final class HtmlPerFileExporter {
             String entryName = makeEntryName(fileName, useTeams, mapping);
             Path filePath = targetDir.resolve(entryName);
 
-            Files.writeString(filePath, html, StandardCharsets.UTF_8);
+            try {
+                Files.writeString(filePath, html, StandardCharsets.UTF_8);
+            } catch (IOException ex) {
+                throw new IOException("Не удалось сохранить файл " + entryName + ": " + ex.getMessage(), ex);
+            }
 
             String sonarLink = buildSonarLink(projectName, host, fileName, issues);
             manifest.append(fileName).append(';')
@@ -120,6 +124,7 @@ public final class HtmlPerFileExporter {
         String safePath = cleanPath.replaceAll("[\\\\/]", "_")
                 .replaceAll("[^A-Za-z0-9._-]", "_");
         if (safePath.isEmpty()) safePath = "unknown";
+        if (safePath.length() > 100) safePath = safePath.substring(safePath.length() - 100);
 
         if (useTeams && mapping != null) {
             TeamMapping.FileInfo info = mapping.findInfo(component);
@@ -128,14 +133,18 @@ public final class HtmlPerFileExporter {
                 if (info.hasTeam()) prefix.append("(").append(sanitize(info.team)).append(")");
                 if (info.hasComponent()) prefix.append("[").append(sanitize(info.component)).append("]");
                 prefix.append("_");
-                return prefix + safePath + ".html";
+                String result = prefix + safePath + ".html";
+                if (result.length() > 150) {
+                    result = result.substring(0, 145) + ".html";
+                }
+                return result;
             }
         }
         return safePath + ".html";
     }
 
     private static String sanitize(String s) {
-        if (s == null || s.isEmpty()) return "";
+        if (s == null || s.isEmpty()) return "unknown";
         String out = s.replaceAll("[^A-Za-z0-9._-]", "_");
         return out.isEmpty() ? "unknown" : out;
     }

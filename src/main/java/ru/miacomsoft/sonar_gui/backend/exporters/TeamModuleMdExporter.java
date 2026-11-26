@@ -4,6 +4,7 @@ import ru.miacomsoft.sonar_gui.backend.Issue;
 import ru.miacomsoft.sonar_gui.backend.SonarIssuesApi;
 import ru.miacomsoft.sonar_gui.backend.TeamMapping;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -34,18 +35,8 @@ public class TeamModuleMdExporter {
 
                 String md = buildMd(file, issues, fullSource, project, host);
 
-                String safeName = makeFileName(file);
-                String prefix = "";
-                if (mapping != null) {
-                    TeamMapping.FileInfo info = mapping.findInfo(file);
-                    if (info != null && !info.isEmpty()) {
-                        StringBuilder sb = new StringBuilder();
-                        if (info.hasTeam()) sb.append("(").append(info.team).append(")");
-                        if (info.hasComponent()) sb.append("[").append(info.component).append("]");
-                        if (sb.length() > 0) prefix = sb.append("_").toString();
-                    }
-                }
-                zos.putNextEntry(new ZipEntry(prefix + safeName + ".md"));
+                String finalName = buildSafeFileName(file, mapping);
+                zos.putNextEntry(new ZipEntry(finalName));
                 zos.write(md.getBytes(StandardCharsets.UTF_8));
                 zos.closeEntry();
                 count++;
@@ -71,27 +62,41 @@ public class TeamModuleMdExporter {
             catch (Exception ignored) {}
 
             String md = buildMd(file, issues, fullSource, project, host);
+            String finalName = buildSafeFileName(file, mapping);
+            Path filePath = targetDir.resolve(finalName);
 
-            String safeName = makeFileName(file);
-            String prefix = "";
-            if (mapping != null) {
-                TeamMapping.FileInfo info = mapping.findInfo(file);
-                if (info != null && !info.isEmpty()) {
-                    StringBuilder sb = new StringBuilder();
-                    if (info.hasTeam()) sb.append("(").append(info.team).append(")");
-                    if (info.hasComponent()) sb.append("[").append(info.component).append("]");
-                    if (sb.length() > 0) prefix = sb.append("_").toString();
-                }
+            try {
+                Files.writeString(filePath, md, StandardCharsets.UTF_8);
+            } catch (IOException e) {
+                throw new IOException("Не удалось сохранить файл " + finalName + ": " + e.getMessage(), e);
             }
-
-            Path filePath = targetDir.resolve(prefix + safeName + ".md");
-            Files.writeString(filePath, md, StandardCharsets.UTF_8);
 
             if (progress != null) {
                 progress.onProgress(current, total, "Сохранение MD: " + current + "/" + total);
             }
         }
         return current;
+    }
+
+    private static String buildSafeFileName(String file, TeamMapping mapping) {
+        String safeName = makeFileName(file);
+        String prefix = "";
+        if (mapping != null) {
+            TeamMapping.FileInfo info = mapping.findInfo(file);
+            if (info != null && !info.isEmpty()) {
+                StringBuilder sb = new StringBuilder();
+                if (info.hasTeam()) sb.append("(").append(strictSanitize(info.team)).append(")");
+                if (info.hasComponent()) sb.append("[").append(strictSanitize(info.component)).append("]");
+                if (sb.length() > 0) prefix = sb.append("_").toString();
+            }
+        }
+
+        String finalName = prefix + safeName + ".md";
+        // Ограничиваем длину, чтобы избежать ошибок файловой системы
+        if (finalName.length() > 150) {
+            finalName = finalName.substring(0, 146) + ".md";
+        }
+        return finalName;
     }
 
     private static String buildMd(String file, List<Issue> issues, String fullSource,
@@ -144,6 +149,17 @@ public class TeamModuleMdExporter {
     private static String makeFileName(String path) {
         String clean = path;
         if (clean.contains(":")) clean = clean.substring(clean.indexOf(':') + 1);
-        return clean.replaceAll("[\\\\/]", "_").replaceAll("[^A-Za-z0-9._-]", "_");
+        String safe = clean.replaceAll("[\\\\/]", "_").replaceAll("[^A-Za-z0-9._-]", "_");
+        if (safe.length() > 100) {
+            safe = safe.substring(safe.length() - 100);
+        }
+        return safe.isEmpty() ? "unknown" : safe;
+    }
+
+    // Строгая очистка: только ASCII буквы, цифры, точка, дефис и подчеркивание
+    private static String strictSanitize(String s) {
+        if (s == null || s.isEmpty()) return "unknown";
+        String out = s.replaceAll("[^A-Za-z0-9._-]", "_");
+        return out.isEmpty() ? "unknown" : out;
     }
 }

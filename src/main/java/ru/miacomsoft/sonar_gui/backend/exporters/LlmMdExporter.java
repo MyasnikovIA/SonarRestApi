@@ -3,6 +3,7 @@ package ru.miacomsoft.sonar_gui.backend.exporters;
 import ru.miacomsoft.sonar_gui.backend.Issue;
 import ru.miacomsoft.sonar_gui.backend.SonarIssuesApi;
 
+import java.io.IOException;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -62,7 +63,11 @@ public class LlmMdExporter {
             String safeName = makeFileName(file);
             Path filePath = targetDir.resolve(safeName + ".md");
 
-            Files.writeString(filePath, mdContent, StandardCharsets.UTF_8);
+            try {
+                Files.writeString(filePath, mdContent, StandardCharsets.UTF_8);
+            } catch (IOException e) {
+                throw new IOException("Не удалось сохранить файл " + safeName + ".md: " + e.getMessage(), e);
+            }
 
             if (progress != null) {
                 progress.onProgress(current, total, "Сохранение MD: " + current + "/" + total);
@@ -123,7 +128,11 @@ public class LlmMdExporter {
     private static String makeFileName(String path) {
         String clean = path;
         if (clean.contains(":")) clean = clean.substring(clean.indexOf(':') + 1);
-        return clean.replaceAll("[\\\\/]", "_").replaceAll("[^A-Za-z0-9._-]", "_");
+        String safe = clean.replaceAll("[\\\\/]", "_").replaceAll("[^A-Za-z0-9._-]", "_");
+        if (safe.length() > 150) {
+            safe = safe.substring(safe.length() - 150);
+        }
+        return safe.isEmpty() ? "unknown" : safe;
     }
 
     private static String urlEnc(String s) {

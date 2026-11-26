@@ -94,6 +94,8 @@ public class ReportExportDialog extends JDialog {
     private boolean isMultiFile() {
         return type == ReportExportType.HTML_FILES ||
                 type == ReportExportType.HTML_FILES_TEAMS ||
+                type == ReportExportType.TEAM_HTML ||
+                type == ReportExportType.QUAL_TEAM_HTML ||
                 type == ReportExportType.LLM_MD_ZIP ||
                 type == ReportExportType.TEAM_MODULE_ZIP;
     }

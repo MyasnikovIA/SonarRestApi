@@ -5,9 +5,11 @@ import ru.miacomsoft.sonar_gui.backend.SonarIssuesApi;
 import ru.miacomsoft.sonar_gui.backend.TeamMapping;
 import ru.miacomsoft.sonar_gui.backend.exporters.ConfluenceExporter;
 import ru.miacomsoft.sonar_gui.backend.exporters.HtmlPerFileExporter;
+import ru.miacomsoft.sonar_gui.backend.exporters.HtmlTeamPerFileExporter;
 import ru.miacomsoft.sonar_gui.backend.exporters.JiraExporter;
 import ru.miacomsoft.sonar_gui.backend.exporters.LlmMdExporter;
 import ru.miacomsoft.sonar_gui.backend.exporters.MdExporter;
+import ru.miacomsoft.sonar_gui.backend.exporters.QualTeamHtmlExporter;
 import ru.miacomsoft.sonar_gui.backend.exporters.TeamModuleMdExporter;
 import ru.miacomsoft.sonar_gui.backend.exporters.TxtExporter;
 import ru.miacomsoft.sonar_gui.common.GuiContext;
@@ -60,7 +62,6 @@ public class ReportExportService {
         try {
             doExport(type, keysCsv, filter, targetDir);
         } catch (Throwable t) {
-            // Игнорируем ошибку, если экспорт был отменен пользователем
             if (cancelled || (t instanceof InterruptedException && "cancelled".equals(t.getMessage()))) {
                 System.out.println("[ReportExportService] Экспорт отменен пользователем.");
                 return;
@@ -99,6 +100,9 @@ public class ReportExportService {
             case JIRA, MARKDOWN, TXT, CONFLUENCE -> outPath = exportTextFormat(type, issues);
             case HTML_FILES                       -> outPath = exportHtml(issues, false, targetDir);
             case HTML_FILES_TEAMS                 -> outPath = exportHtml(issues, true, targetDir);
+            case TEAM_HTML                        -> outPath = exportTeamHtml(issues, targetDir);
+            case QUAL_TEAM_HTML                   -> outPath = exportQualTeamHtml(issues, targetDir);
+            case QUAL_SUMMARY                     -> outPath = exportQualSummary(issues);
             case LLM_MD_ZIP                       -> outPath = exportLlmMd(issues, targetDir);
             case TEAM_MODULE_ZIP                  -> outPath = exportTeamModule(issues, targetDir);
             default -> throw new IllegalArgumentException("Неизвестный формат: " + type);
@@ -324,7 +328,6 @@ public class ReportExportService {
         SonarIssuesApi api = ctx.state().newApi(project);
         Map<String, List<String>> snippets = new HashMap<>();
 
-        // 1. Загрузка фрагментов кода
         int loaded = 0;
         for (List<Issue> lst : byFile.values()) {
             for (Issue it : lst) {
@@ -336,7 +339,6 @@ public class ReportExportService {
             }
         }
 
-        // 2. Генерация и сохранение
         if (listener != null) listener.onProgress(total, total, "generating", "Сохранение HTML файлов…");
 
         if (targetDir != null) {
@@ -350,6 +352,182 @@ public class ReportExportService {
             HtmlPerFileExporter.writeZip(zip, byFile, snippets, project, host, withTeams, mapping);
             return zip;
         }
+    }
+
+    private Path exportTeamHtml(List<Issue> issues, Path targetDir) throws Exception {
+        if (targetDir == null) {
+            throw new IllegalArgumentException("Для отчета Team HTML необходимо указать каталог сохранения.");
+        }
+        String project = ctx.getProject();
+        String host = hostOf();
+        Map<String, List<Issue>> byFile = groupByFile(issues);
+        SonarIssuesApi api = ctx.state().newApi(project);
+        Map<String, List<String>> snippets = new HashMap<>();
+
+        int loaded = 0;
+        int total = issues.size();
+        Map<String, String> fullSources = new HashMap<>();
+
+        for (String file : byFile.keySet()) {
+            if (cancelled) throw new InterruptedException("cancelled");
+            try {
+                String fullSource = api.fetchFullSource(project + ":" + file);
+                fullSources.put(file, fullSource);
+            } catch (Exception e) {
+                System.err.println("[ReportExportService] Не удалось получить исходник для " + file);
+            }
+        }
+
+        for (List<Issue> lst : byFile.values()) {
+            for (Issue it : lst) {
+                if (cancelled) throw new InterruptedException("cancelled");
+                try { List<String> s = api.fetchSnippet(it.key); if (!s.isEmpty()) snippets.put(it.key, s); } catch (Exception ignored) {}
+                loaded++;
+                if (listener != null && (loaded % 10 == 0 || loaded == total))
+                    listener.onProgress(loaded, total, "snippets", String.format("Загрузка данных: %d/%d", loaded, total));
+            }
+        }
+
+        if (listener != null) listener.onProgress(total, total, "generating", "Сохранение Team HTML файлов…");
+        TeamMapping mapping = TeamMapping.load();
+        HtmlTeamPerFileExporter.writeDirectory(
+                targetDir, byFile, snippets, fullSources, project, host, mapping,
+                (cur, tot, msg) -> { if (listener != null) listener.onProgress(cur, tot, "writing", msg); }
+        );
+        return targetDir;
+    }
+
+    private Path exportQualTeamHtml(List<Issue> issues, Path targetDir) throws Exception {
+        if (targetDir == null) {
+            throw new IllegalArgumentException("Для отчета Qual+Team HTML необходимо указать каталог сохранения.");
+        }
+
+        String project = ctx.getProject();
+        String host = hostOf();
+        SonarIssuesApi api = ctx.state().newApi(project);
+
+        // 1. Загрузка полных исходников для каждого уникального файла
+        Set<String> uniqueFiles = new HashSet<>();
+        for (Issue it : issues) uniqueFiles.add(it.component);
+
+        Map<String, String> fullSources = new HashMap<>();
+        int loadedSrc = 0;
+        for (String file : uniqueFiles) {
+            if (cancelled) throw new InterruptedException("cancelled");
+            try {
+                fullSources.put(file, api.fetchFullSource(project + ":" + file));
+            } catch (Exception e) {
+                System.err.println("[ReportExportService] Не удалось получить исходник для " + file);
+            }
+            loadedSrc++;
+            if (listener != null && loadedSrc % 10 == 0) {
+                listener.onProgress(loadedSrc, uniqueFiles.size(), "sources", "Загрузка исходников: " + loadedSrc + "/" + uniqueFiles.size());
+            }
+        }
+
+        // 2. Загрузка фрагментов кода (сниппетов) для всех issues
+        Map<String, List<String>> snippets = new HashMap<>();
+        int loadedSnip = 0;
+        for (Issue it : issues) {
+            if (cancelled) throw new InterruptedException("cancelled");
+            try {
+                List<String> s = api.fetchSnippet(it.key);
+                if (!s.isEmpty()) snippets.put(it.key, s);
+            } catch (Exception ignored) {}
+            loadedSnip++;
+            if (listener != null && loadedSnip % 10 == 0) {
+                listener.onProgress(loadedSnip, issues.size(), "snippets", "Загрузка фрагментов: " + loadedSnip + "/" + issues.size());
+            }
+        }
+
+        // 3. Запуск многопоточной генерации
+        if (listener != null) listener.onProgress(issues.size(), issues.size(), "generating", "Сохранение файлов (4 потока)…");
+
+        TeamMapping mapping = TeamMapping.load();
+
+        QualTeamHtmlExporter.writeDirectory(
+                targetDir, issues, snippets, fullSources, project, host, mapping,
+                (cur, tot, msg) -> { if (listener != null) listener.onProgress(cur, tot, "writing", msg); },
+                () -> cancelled // Передаем BooleanSupplier для корректной отмены из потоков
+        );
+
+        return targetDir;
+    }
+
+    private Path exportQualSummary(List<Issue> issues) throws Exception {
+        System.out.println("[ReportExportService] Подсчет статистики для qual-summary...");
+
+        Map<String, Map<String, Integer>> stats = new TreeMap<>();
+        String[] qualities = {"SECURITY", "RELIABILITY", "MAINTAINABILITY", "SECURITY_HOTSPOT"};
+        String[] severities = {"BLOCKER", "HIGH", "MEDIUM", "LOW", "INFO"};
+
+        for (String q : qualities) {
+            Map<String, Integer> sevMap = new LinkedHashMap<>();
+            for (String s : severities) {
+                sevMap.put(s, 0);
+            }
+            stats.put(q, sevMap);
+        }
+
+        int totalKept = 0;
+        for (Issue it : issues) {
+            if (cancelled) break;
+            if (it.tags != null && it.tags.contains("not-require-fix")) continue;
+
+            boolean counted = false;
+            if (it.impacts != null && !it.impacts.isEmpty()) {
+                for (Issue.Impact im : it.impacts) {
+                    if (im.softwareQuality != null && stats.containsKey(im.softwareQuality.toUpperCase())) {
+                        Map<String, Integer> sevMap = stats.get(im.softwareQuality.toUpperCase());
+                        if (im.severity != null && sevMap.containsKey(im.severity.toUpperCase())) {
+                            sevMap.put(im.severity.toUpperCase(), sevMap.get(im.severity.toUpperCase()) + 1);
+                            counted = true;
+                        }
+                    }
+                }
+            } else if (it.severity != null) {
+                String sev = it.severity.toUpperCase();
+                if (Arrays.asList(severities).contains(sev)) {
+                    Map<String, Integer> sevMap = stats.get("MAINTAINABILITY");
+                    sevMap.put(sev, sevMap.get(sev) + 1);
+                    counted = true;
+                }
+            }
+            if (counted) totalKept++;
+            if (listener != null && totalKept % 1000 == 0) {
+                listener.onProgress(totalKept, issues.size(), "generating", "Подсчет статистики: " + totalKept);
+            }
+        }
+
+        StringBuilder sb = new StringBuilder();
+        String project = ctx.getProject();
+        String now = new SimpleDateFormat("dd.MM.yyyy HH:mm:ss").format(new Date());
+
+        sb.append("===================================================\n");
+        sb.append(" Сводный отчет по категориям (Quality) и уровням (Severity)\n");
+        sb.append("===================================================\n");
+        sb.append("Проект: ").append(project).append("\n");
+        sb.append("Сгенерировано: ").append(now).append("\n");
+        sb.append("Всего замечаний (без not-require-fix): ").append(totalKept).append("\n");
+        sb.append("===================================================\n\n");
+
+        for (Map.Entry<String, Map<String, Integer>> entry : stats.entrySet()) {
+            String qual = entry.getKey();
+            Map<String, Integer> sevMap = entry.getValue();
+            int totalForQual = sevMap.values().stream().mapToInt(Integer::intValue).sum();
+            if (totalForQual == 0) continue;
+
+            sb.append(qual).append(" (Всего: ").append(totalForQual).append(")\n");
+            for (Map.Entry<String, Integer> sevEntry : sevMap.entrySet()) {
+                sb.append(String.format("  %-15s : %d\n", sevEntry.getKey(), sevEntry.getValue()));
+            }
+            sb.append("\n");
+        }
+        sb.append("===================================================\n");
+
+        Path out = Files.createTempFile("sonar_qualsummary_", ".txt");
+        Files.writeString(out, sb.toString(), StandardCharsets.UTF_8);
+        return out;
     }
 
     private Path exportLlmMd(List<Issue> issues, Path targetDir) throws Exception {

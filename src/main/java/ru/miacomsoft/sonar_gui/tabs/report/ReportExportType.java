@@ -8,6 +8,9 @@ public enum ReportExportType {
     CONFLUENCE        ("confluence",        "Confluence (HTML)",  "html"),
     HTML_FILES        ("html-files",        "HTML по файлам (Папка)", "zip"),
     HTML_FILES_TEAMS  ("html-files-teams",  "HTML + команды (Папка)", "zip"),
+    TEAM_HTML         ("team-html",         "Team HTML (Папка Отдел/Модуль)", "html"),
+    QUAL_TEAM_HTML    ("qual-team-html",    "Qual+Team HTML (Папка)", "html"),
+    QUAL_SUMMARY      ("qual-summary",      "Сводка по Quality/Severity", "txt"),
     LLM_MD_ZIP        ("llm-md-zip",        "LLM MD (Папка)",     "zip"),
     TEAM_MODULE_ZIP   ("team-module-zip",   "Отчёт по командам (Папка)", "zip");
 

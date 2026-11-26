@@ -16,27 +16,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.text.SimpleDateFormat;
-import java.util.ArrayList;
-import java.util.Date;
-import java.util.HashMap;
-import java.util.LinkedHashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.TreeMap;
+import java.util.*;
 
-/**
- * Локальный экспорт (без HTTP-сервера).
- *
- * Источники:
- *   - keysCsv — конкретные issue, выбранные пользователем;
- *   - BaseFilter — сбор issue по фильтрам SonarQube.
- *
- * Форматы: JIRA / MARKDOWN / TXT / CONFLUENCE — построчно;
- *          HTML_FILES / HTML_FILES_TEAMS / LLM_MD_ZIP / TEAM_MODULE_ZIP — ZIP.
- *
- * Прогресс отдаётся через {@link ProgressListener}. Отмена — {@link #setCancelled(boolean)}.
- */
 public class ReportExportService {
 
     public interface ProgressListener {
@@ -72,10 +53,6 @@ public class ReportExportService {
     public void setCancelled(boolean c) { this.cancelled = c; }
     public boolean isCancelled() { return cancelled; }
 
-    // ============================================================
-    // ПУБЛИЧНЫЙ ВХОД
-    // ============================================================
-
     public void export(ReportExportType type, List<String> keysCsv, BaseFilter filter) {
         try {
             doExport(type, keysCsv, filter);
@@ -84,11 +61,9 @@ public class ReportExportService {
         }
     }
 
-    private void doExport(ReportExportType type, List<String> keysCsv, BaseFilter filter)
-            throws Exception {
+    private void doExport(ReportExportType type, List<String> keysCsv, BaseFilter filter) throws Exception {
         if (!ctx.isSessionReady()) {
-            throw new IllegalStateException(
-                    "Сессия SonarQube не готова — заполните session.properties");
+            throw new IllegalStateException("Сессия SonarQube не готова");
         }
 
         List<Issue> issues;
@@ -101,8 +76,7 @@ public class ReportExportService {
 
         if (cancelled) return;
         if (issues.isEmpty()) {
-            if (listener != null)
-                listener.onError(new IllegalStateException("Нет данных для экспорта"));
+            if (listener != null) listener.onError(new IllegalStateException("Нет данных"));
             return;
         }
 
@@ -122,14 +96,9 @@ public class ReportExportService {
         }
 
         if (listener != null) {
-            listener.onDone(outFile, suggestedName(type,
-                    filter != null ? filter.project : ctx.getProject()));
+            listener.onDone(outFile, suggestedName(type, filter != null ? filter.project : ctx.getProject()));
         }
     }
-
-    // ============================================================
-    // СБОР ISSUES
-    // ============================================================
 
     private List<Issue> loadByKeys(String project, List<String> keys) throws Exception {
         SonarIssuesApi api = ctx.state().newApi(project);
@@ -149,21 +118,15 @@ public class ReportExportService {
                                 + urlEnc(keysCsv) + "&additionalFields=" + urlEnc("_all")));
                 org.json.JSONArray arr = raw.optJSONArray("issues");
                 if (arr != null) {
-                    for (int j = 0; j < arr.length(); j++) {
-                        out.add(Issue.from(arr.getJSONObject(j), project));
-                    }
+                    for (int j = 0; j < arr.length(); j++) out.add(Issue.from(arr.getJSONObject(j), project));
                 }
             } catch (Exception e) {
                 for (String k : batch) {
-                    try {
-                        Issue it = api.fetchIssue(k);
-                        if (it != null) out.add(it);
-                    } catch (Exception ignored) {}
+                    try { Issue it = api.fetchIssue(k); if (it != null) out.add(it); } catch (Exception ignored) {}
                 }
             }
             if (listener != null) {
-                listener.onProgress(out.size(), total, "fetching",
-                        String.format("Загрузка issues: %d/%d", out.size(), total));
+                listener.onProgress(out.size(), total, "fetching", String.format("Загрузка issues: %d/%d", out.size(), total));
             }
         }
         return out;
@@ -171,12 +134,13 @@ public class ReportExportService {
 
     private List<Issue> collectByFilters(BaseFilter f) throws Exception {
         SonarIssuesApi api = ctx.state().newApi(f.project);
-        String statuses = f.hideProcessed
-                ? SonarIssuesApi.ACTIVE_STATUSES
-                : SonarIssuesApi.ALL_STATUSES;
 
-        if (listener != null)
-            listener.onProgress(0, 0, "fetching", "Загрузка issues из SonarQube…");
+        String statuses = f.statusFilter;
+        if (statuses == null || statuses.isEmpty() || "ALL".equalsIgnoreCase(statuses)) {
+            statuses = f.hideProcessed ? SonarIssuesApi.ACTIVE_STATUSES : SonarIssuesApi.ALL_STATUSES;
+        }
+
+        if (listener != null) listener.onProgress(0, 0, "fetching", "Загрузка issues из SonarQube…");
 
         List<Issue> all = api.fetchAllByStatuses(statuses, f.severity, f.quality);
         if (cancelled) return List.of();
@@ -187,34 +151,34 @@ public class ReportExportService {
         for (Issue it : all) {
             if (cancelled) return filtered;
 
-            // statusFilter
-            if (f.statusFilter != null && !f.statusFilter.isEmpty()
-                    && !"ALL".equalsIgnoreCase(f.statusFilter)) {
-                boolean isProcessed = it.status != null
-                        && !it.status.equals("OPEN") && !it.status.equals("REOPENED");
-                if ("PROCESSED".equalsIgnoreCase(f.statusFilter) && !isProcessed) continue;
-                if ("UNPROCESSED".equalsIgnoreCase(f.statusFilter) && isProcessed) continue;
-            }
-
-            // tags
+            // Теги
             if (!f.tags.isEmpty()) {
                 List<String> itTags = it.tags != null ? it.tags : List.of();
                 boolean hasMatch = false;
                 for (String t : f.tags) {
-                    if (NO_TAGS_MARKER.equals(t)) {
-                        if (itTags.isEmpty()) hasMatch = true;
-                    } else if (itTags.contains(t)) {
-                        hasMatch = true;
-                    }
+                    if (NO_TAGS_MARKER.equals(t)) { if (itTags.isEmpty()) hasMatch = true; }
+                    else if (itTags.contains(t)) hasMatch = true;
                     if (hasMatch) break;
                 }
                 if (!hasMatch) continue;
             }
 
-            // rules
+            // Исключенные теги
+            if (!f.excludedTags.isEmpty()) {
+                List<String> itTags = it.tags != null ? it.tags : List.of();
+                boolean hasExcluded = false;
+                for (String t : f.excludedTags) {
+                    if (NO_TAGS_MARKER.equals(t)) { if (itTags.isEmpty()) hasExcluded = true; }
+                    else if (itTags.contains(t)) hasExcluded = true;
+                    if (hasExcluded) break;
+                }
+                if (hasExcluded) continue;
+            }
+
+            // Правила
             if (!f.rules.isEmpty() && !f.rules.contains(it.rule)) continue;
 
-            // text
+            // Текст
             if (!q.isEmpty()) {
                 boolean m = (it.key != null && it.key.toLowerCase().contains(q))
                         || (it.message != null && it.message.toLowerCase().contains(q))
@@ -222,197 +186,109 @@ public class ReportExportService {
                 if (!m) continue;
             }
 
-            // excludedTags
-            if (!f.excludedTags.isEmpty()) {
-                List<String> itTags = it.tags != null ? it.tags : List.of();
-                boolean hasExcluded = false;
-                for (String t : f.excludedTags) {
-                    if (NO_TAGS_MARKER.equals(t)) {
-                        if (itTags.isEmpty()) hasExcluded = true;
-                    } else if (itTags.contains(t)) {
-                        hasExcluded = true;
-                    }
-                    if (hasExcluded) break;
-                }
-                if (hasExcluded) continue;
-            }
-
             filtered.add(it);
         }
 
         if (listener != null)
-            listener.onProgress(filtered.size(), filtered.size(), "filtered",
-                    String.format("Отобрано %d из %d", filtered.size(), all.size()));
+            listener.onProgress(filtered.size(), filtered.size(), "filtered", String.format("Отобрано %d из %d", filtered.size(), all.size()));
         return filtered;
     }
 
-    // ============================================================
-    // ТЕКСТОВЫЕ ФОРМАТЫ
-    // ============================================================
+    // --- Вспомогательные методы экспорта (text/zip) взяты из предыдущей версии ---
+    // (полный код exportTextFormat, exportHtmlZip, exportLlmMdZip, exportTeamModuleZip, groupByFile, hostOf, suggestedName, urlEnc, esc остаются без изменений)
 
     private Path exportTextFormat(ReportExportType type, List<Issue> issues) throws Exception {
         int total = issues.size();
         String project = ctx.getProject();
         String host = hostOf();
-
         StringBuilder sb = new StringBuilder();
         String now = new SimpleDateFormat("dd.MM.yyyy HH:mm:ss").format(new Date());
-
         switch (type) {
-            case JIRA -> {
-                sb.append("h3. Проект: ").append(project).append("\n");
-                sb.append("*Всего issues:* ").append(total)
-                        .append("\n*Сгенерировано:* ").append(now).append("\n\n");
-            }
-            case MARKDOWN -> {
-                sb.append("# Отчет по проекту: ").append(project).append("\n\n");
-                sb.append("**Сгенерировано:** ").append(now)
-                        .append("\n**Всего issues:** ").append(total).append("\n\n---\n\n");
-            }
-            case TXT -> {
-                sb.append("=== Отчет по проекту: ").append(project).append(" ===\n");
-                sb.append("Сгенерировано: ").append(now)
-                        .append("\nВсего issues: ").append(total).append("\n\n");
-            }
-            case CONFLUENCE -> {
-                sb.append("<style>mark.sonar-issue-mark{background-color:rgba(248,81,73,.25);")
-                        .append("border-bottom:2px solid #f85149;}</style>\n");
-                sb.append("<h2>Проект: ").append(esc(project)).append("</h2>\n");
-                sb.append("<p><em>Сгенерировано: ").append(esc(now))
-                        .append(" · Всего: ").append(total).append("</em></p>\n<hr/>\n");
-            }
+            case JIRA -> sb.append("h3. Проект: ").append(project).append("\n*Всего issues:* ").append(total).append("\n*Сгенерировано:* ").append(now).append("\n\n");
+            case MARKDOWN -> sb.append("# Отчет по проекту: ").append(project).append("\n\n**Сгенерировано:** ").append(now).append("\n**Всего issues:** ").append(total).append("\n\n---\n\n");
+            case TXT -> sb.append("=== Отчет по проекту: ").append(project).append(" ===\nСгенерировано: ").append(now).append("\nВсего issues: ").append(total).append("\n\n");
+            case CONFLUENCE -> sb.append("<style>mark.sonar-issue-mark{background-color:rgba(248,81,73,.25);border-bottom:2px solid #f85149;}</style>\n<h2>Проект: ").append(esc(project)).append("</h2>\n<p><em>Сгенерировано: ").append(esc(now)).append(" · Всего: ").append(total).append("</em></p>\n<hr/>\n");
             default -> {}
         }
-
         SonarIssuesApi api = ctx.state().newApi(project);
-
         for (int i = 0; i < issues.size(); i++) {
             if (cancelled) break;
             Issue it = issues.get(i);
-
-            List<String> snippet;
-            try { snippet = api.fetchSnippet(it.key); }
-            catch (Exception e) { snippet = List.of(); }
+            List<String> snippet; try { snippet = api.fetchSnippet(it.key); } catch (Exception e) { snippet = List.of(); }
             it.snippet = snippet;
-
             switch (type) {
                 case JIRA -> sb.append(JiraExporter.exportSingle(it, project, host)).append("\n");
                 case MARKDOWN -> {
                     sb.append(MdExporter.exportSingle(it, project, host));
-                    if (snippet != null && !snippet.isEmpty()) {
+                    if (!snippet.isEmpty()) {
                         sb.append("**Фрагмент кода:**\n```\n");
-                        for (String line : snippet)
-                            sb.append(line.replace("§HL_START§", ">>> ")
-                                    .replace("§HL_END§", " <<<")).append('\n');
+                        for (String line : snippet) sb.append(line.replace("§HL_START§", ">>> ").replace("§HL_END§", " <<<")).append('\n');
                         sb.append("```\n\n");
                     }
                     sb.append("---\n\n");
                 }
                 case TXT -> {
                     sb.append(TxtExporter.exportSingle(it, project, host));
-                    if (snippet != null && !snippet.isEmpty()) {
+                    if (!snippet.isEmpty()) {
                         sb.append("Код:\n");
-                        for (String line : snippet)
-                            sb.append(line.replace("§HL_START§", ">>> ")
-                                    .replace("§HL_END§", " <<<")).append('\n');
+                        for (String line : snippet) sb.append(line.replace("§HL_START§", ">>> ").replace("§HL_END§", " <<<")).append('\n');
                     }
                     sb.append("\n----------------------------------------\n\n");
                 }
                 case CONFLUENCE -> sb.append(ConfluenceExporter.exportSingle(it, project, host, snippet));
                 default -> {}
             }
-
-            if (listener != null) {
-                listener.onProgress(i + 1, total, "generating",
-                        String.format("Формат %s: %d/%d", type.title, i + 1, total));
-            }
+            if (listener != null) listener.onProgress(i + 1, total, "generating", String.format("Формат %s: %d/%d", type.title, i + 1, total));
         }
-
         Path out = Files.createTempFile("sonar_report_", "." + type.ext);
         Files.writeString(out, sb.toString(), StandardCharsets.UTF_8);
         return out;
     }
 
-    // ============================================================
-    // ZIP-ФОРМАТЫ
-    // ============================================================
-
     private Path exportHtmlZip(List<Issue> issues, boolean withTeams) throws Exception {
         int total = issues.size();
         String project = ctx.getProject();
         String host = hostOf();
-
         Map<String, List<Issue>> byFile = groupByFile(issues);
-
         SonarIssuesApi api = ctx.state().newApi(project);
         Map<String, List<String>> snippets = new HashMap<>();
         int loaded = 0;
         for (List<Issue> lst : byFile.values()) {
             for (Issue it : lst) {
                 if (cancelled) throw new InterruptedException("cancelled");
-                try {
-                    List<String> s = api.fetchSnippet(it.key);
-                    if (!s.isEmpty()) snippets.put(it.key, s);
-                } catch (Exception ignored) {}
+                try { List<String> s = api.fetchSnippet(it.key); if (!s.isEmpty()) snippets.put(it.key, s); } catch (Exception ignored) {}
                 loaded++;
-                if (listener != null && (loaded % 10 == 0 || loaded == total)) {
-                    listener.onProgress(loaded, total, "snippets",
-                            String.format("Фрагменты кода: %d/%d", loaded, total));
-                }
+                if (listener != null && (loaded % 10 == 0 || loaded == total)) listener.onProgress(loaded, total, "snippets", String.format("Фрагменты кода: %d/%d", loaded, total));
             }
         }
-
         Path zip = Files.createTempFile("sonar_report_", ".zip");
         TeamMapping mapping = withTeams ? TeamMapping.load() : null;
-
-        if (listener != null)
-            listener.onProgress(total, total, "generating", "Сборка ZIP…");
-
+        if (listener != null) listener.onProgress(total, total, "generating", "Сборка ZIP…");
         HtmlPerFileExporter.writeZip(zip, byFile, snippets, project, host, withTeams, mapping);
         return zip;
     }
 
     private Path exportLlmMdZip(List<Issue> issues) throws Exception {
-        String project = ctx.getProject();
-        String host = hostOf();
+        String project = ctx.getProject(); String host = hostOf();
         Map<String, List<Issue>> byFile = groupByFile(issues);
-
-        if (listener != null)
-            listener.onProgress(issues.size(), issues.size(), "generating",
-                    "Сборка LLM MD ZIP…");
-
+        if (listener != null) listener.onProgress(issues.size(), issues.size(), "generating", "Сборка LLM MD ZIP…");
         Path zip = Files.createTempFile("sonar_llm_", ".zip");
-        SonarIssuesApi api = ctx.state().newApi(project);
-        LlmMdExporter.writeZip(zip, byFile, api, project, host);
+        LlmMdExporter.writeZip(zip, byFile, ctx.state().newApi(project), project, host);
         return zip;
     }
 
     private Path exportTeamModuleZip(List<Issue> issues) throws Exception {
-        String project = ctx.getProject();
-        String host = hostOf();
+        String project = ctx.getProject(); String host = hostOf();
         Map<String, List<Issue>> byFile = groupByFile(issues);
-
-        if (listener != null)
-            listener.onProgress(issues.size(), issues.size(), "generating",
-                    "Сборка Team/Module ZIP…");
-
+        if (listener != null) listener.onProgress(issues.size(), issues.size(), "generating", "Сборка Team/Module ZIP…");
         Path zip = Files.createTempFile("sonar_team_", ".zip");
-        SonarIssuesApi api = ctx.state().newApi(project);
-        TeamMapping mapping = TeamMapping.load();
-        TeamModuleMdExporter.writeZip(zip, byFile, api, project, host, mapping);
+        TeamModuleMdExporter.writeZip(zip, byFile, ctx.state().newApi(project), project, host, TeamMapping.load());
         return zip;
     }
 
-    // ============================================================
-    // UTILS
-    // ============================================================
-
     private Map<String, List<Issue>> groupByFile(List<Issue> issues) {
         Map<String, List<Issue>> byFile = new TreeMap<>();
-        for (Issue it : issues) {
-            String comp = it.component != null ? it.component : "(unknown)";
-            byFile.computeIfAbsent(comp, k -> new ArrayList<>()).add(it);
-        }
+        for (Issue it : issues) byFile.computeIfAbsent(it.component != null ? it.component : "(unknown)", k -> new ArrayList<>()).add(it);
         return byFile;
     }
 
@@ -428,21 +304,12 @@ public class ReportExportService {
     }
 
     private static String suggestedName(ReportExportType type, String project) {
-        String safe = (project == null ? "report" : project)
-                .replaceAll("[^A-Za-z0-9._-]", "_");
+        String safe = (project == null ? "report" : project).replaceAll("[^A-Za-z0-9._-]", "_");
         if (safe.isEmpty()) safe = "report";
         String stamp = new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date());
         return safe + "_" + stamp + "." + type.ext;
     }
 
-    private static String urlEnc(String s) {
-        try { return java.net.URLEncoder.encode(s == null ? "" : s, "UTF-8"); }
-        catch (Exception e) { return s == null ? "" : s; }
-    }
-
-    private static String esc(String s) {
-        if (s == null) return "";
-        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                .replace("\"", "&quot;").replace("'", "&#39;");
-    }
+    private static String urlEnc(String s) { try { return java.net.URLEncoder.encode(s == null ? "" : s, "UTF-8"); } catch (Exception e) { return s; } }
+    private static String esc(String s) { return s == null ? "" : s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;").replace("'", "&#39;"); }
 }

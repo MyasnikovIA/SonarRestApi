@@ -1,11 +1,8 @@
 package ru.miacomsoft.sonar_gui.common;
 
-import java.awt.Color;
-import java.awt.Font;
+import javax.swing.*;
+import java.awt.*;
 
-/**
- * Палитра и шрифты — синхронизированы с web/style.css.
- */
 public final class GuiStyle {
 
     public static final Color BG        = new Color(0x0d1117);
@@ -36,5 +33,91 @@ public final class GuiStyle {
             case "MINOR", "LOW"      -> ACCENT;
             default                  -> TEXT_DIM;
         };
+    }
+
+    public static void applyGlobalTheme() {
+        UIManager.put("control", BG2);
+        UIManager.put("info", BG2);
+        UIManager.put("nimbusBase", BG3);
+        UIManager.put("nimbusAlertYellow", WARN);
+        UIManager.put("nimbusDisabledText", TEXT_DIM);
+        UIManager.put("nimbusFocus", ACCENT);
+        UIManager.put("nimbusGreen", OK);
+        UIManager.put("nimbusInfoBlue", ACCENT);
+        UIManager.put("nimbusLightBackground", BG);
+        UIManager.put("nimbusOrange", WARN);
+        UIManager.put("nimbusRed", ERR);
+        UIManager.put("nimbusSelectedText", Color.WHITE);
+        UIManager.put("nimbusSelectionBackground", ACCENT2);
+        UIManager.put("text", TEXT);
+
+        UIManager.put("Label.foreground", TEXT);
+        UIManager.put("Panel.background", BG);
+        UIManager.put("OptionPane.background", BG);
+        UIManager.put("OptionPane.messageForeground", TEXT);
+
+        // Таблицы
+        UIManager.put("Table.background", BG2);
+        UIManager.put("Table.foreground", TEXT);
+        UIManager.put("Table.selectionBackground", ACCENT2);
+        UIManager.put("Table.selectionForeground", Color.WHITE);
+        UIManager.put("Table.gridColor", BORDER);
+        UIManager.put("TableHeader.background", BG3);
+        UIManager.put("TableHeader.foreground", TEXT);
+        UIManager.put("TableHeader.cellForeground", TEXT);
+
+        // Выпадающие списки
+        UIManager.put("ComboBox.background", BG);
+        UIManager.put("ComboBox.foreground", TEXT);
+        UIManager.put("ComboBox.selectionBackground", ACCENT2);
+        UIManager.put("ComboBox.selectionForeground", Color.WHITE);
+        UIManager.put("ComboBox.buttonBackground", BG3);
+        UIManager.put("ComboBox.buttonShadow", BORDER);
+        UIManager.put("ComboBox.buttonDarkShadow", BORDER);
+        UIManager.put("ComboBox.buttonHighlight", BG3);
+        UIManager.put("ComboBox.popupBackground", BG); // <--- НОВОЕ
+
+        // Вкладки
+        UIManager.put("TabbedPane.background", BG2); // <--- НОВОЕ
+        UIManager.put("TabbedPane.foreground", TEXT); // <--- НОВОЕ
+        UIManager.put("TabbedPane.selected", BG); // <--- НОВОЕ
+        UIManager.put("TabbedPane.selectedForeground", ACCENT); // <--- НОВОЕ
+        UIManager.put("TabbedPane.contentAreaColor", BG); // <--- НОВОЕ
+        UIManager.put("TabbedPane.focus", ACCENT); // <--- НОВОЕ
+
+        // Текстовые поля
+        UIManager.put("TextField.background", BG);
+        UIManager.put("TextField.foreground", TEXT);
+        UIManager.put("TextField.caretForeground", TEXT);
+        UIManager.put("TextArea.background", BG2);
+        UIManager.put("TextArea.foreground", TEXT);
+        UIManager.put("TextArea.caretForeground", TEXT);
+        UIManager.put("PasswordField.background", BG);
+        UIManager.put("PasswordField.foreground", TEXT);
+
+        // Скроллы
+        UIManager.put("ScrollPane.background", BG);
+        UIManager.put("Viewport.background", BG);
+
+        // Меню
+        UIManager.put("MenuBar.background", BG2);
+        UIManager.put("MenuBar.foreground", TEXT);
+        UIManager.put("Menu.background", BG2);
+        UIManager.put("Menu.foreground", TEXT);
+        UIManager.put("Menu.selectionBackground", ACCENT2);
+        UIManager.put("Menu.selectionForeground", Color.WHITE);
+        UIManager.put("MenuItem.background", BG2);
+        UIManager.put("MenuItem.foreground", TEXT);
+        UIManager.put("MenuItem.selectionBackground", ACCENT2);
+        UIManager.put("MenuItem.selectionForeground", Color.WHITE);
+        UIManager.put("PopupMenu.background", BG2);
+        UIManager.put("PopupMenu.foreground", TEXT);
+
+        UIManager.put("CheckBox.background", BG);
+        UIManager.put("CheckBox.foreground", TEXT);
+
+        UIManager.put("ScrollBar.background", BG2);
+        UIManager.put("ScrollBar.thumb", BG3);
+        UIManager.put("ScrollBar.track", BG);
     }
 }

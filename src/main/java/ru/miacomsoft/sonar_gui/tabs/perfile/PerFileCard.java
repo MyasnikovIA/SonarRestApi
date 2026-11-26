@@ -13,17 +13,13 @@ import java.awt.event.MouseEvent;
 import java.util.ArrayList;
 import java.util.List;
 
-/**
- * Одна карточка — один файл: заголовок с чекбоксом и JTable issues.
- * Делегирует все действия родительской панели через {@link Delegate}.
- */
 public class PerFileCard extends JPanel {
 
     public interface Delegate {
         void onSelectionChanged();
         void onIssueDoubleClick(IssueService.IssueDto issue);
         void onIssueContextMenu(MouseEvent e, IssueService.IssueDto issue,
-                                List<IssueService.IssueDto> selectedIssues);
+                                List<IssueService.IssueDto> selected);
     }
 
     private final String fileName;
@@ -45,7 +41,6 @@ public class PerFileCard extends JPanel {
         setBackground(GuiStyle.BG2);
         setBorder(BorderFactory.createLineBorder(GuiStyle.BORDER, 1));
 
-        // ---------- header ----------
         JPanel header = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 4));
         header.setBackground(GuiStyle.BG3);
 
@@ -64,7 +59,6 @@ public class PerFileCard extends JPanel {
 
         add(header, BorderLayout.NORTH);
 
-        // ---------- table ----------
         tableModel = new PerFileTableModel(rows);
         table = new JTable(tableModel);
         table.setBackground(GuiStyle.BG2);
@@ -83,7 +77,7 @@ public class PerFileCard extends JPanel {
             table.getColumnModel().getColumn(i).setMaxWidth(widths[i]);
         }
 
-        // checkbox renderer
+        // 0: Checkbox
         table.getColumnModel().getColumn(0).setCellRenderer(new DefaultTableCellRenderer() {
             @Override public Component getTableCellRendererComponent(JTable t, Object v,
                                                                      boolean sel, boolean focus, int row, int col) {
@@ -95,18 +89,41 @@ public class PerFileCard extends JPanel {
             }
         });
 
-        // severity renderer
-        table.getColumnModel().getColumn(3).setCellRenderer(new DefaultTableCellRenderer() {
+        // 1: Line (L)
+        table.getColumnModel().getColumn(1).setCellRenderer(new DefaultTableCellRenderer() {
             @Override public Component getTableCellRendererComponent(JTable t, Object v,
                                                                      boolean sel, boolean focus, int row, int col) {
                 Component c = super.getTableCellRendererComponent(t, v, sel, focus, row, col);
-                if (v != null) c.setForeground(GuiStyle.severityColor(v.toString()));
-                setBackground(sel ? GuiStyle.ACCENT2 : GuiStyle.BG2);
+                c.setBackground(sel ? GuiStyle.ACCENT2 : GuiStyle.BG2);
+                c.setForeground(GuiStyle.TEXT);
                 return c;
             }
         });
 
-        // message renderer + status badge
+        // 2: Rule
+        table.getColumnModel().getColumn(2).setCellRenderer(new DefaultTableCellRenderer() {
+            @Override public Component getTableCellRendererComponent(JTable t, Object v,
+                                                                     boolean sel, boolean focus, int row, int col) {
+                Component c = super.getTableCellRendererComponent(t, v, sel, focus, row, col);
+                c.setBackground(sel ? GuiStyle.ACCENT2 : GuiStyle.BG2);
+                c.setForeground(GuiStyle.TEXT);
+                return c;
+            }
+        });
+
+        // 3: Severity
+        table.getColumnModel().getColumn(3).setCellRenderer(new DefaultTableCellRenderer() {
+            @Override public Component getTableCellRendererComponent(JTable t, Object v,
+                                                                     boolean sel, boolean focus, int row, int col) {
+                Component c = super.getTableCellRendererComponent(t, v, sel, focus, row, col);
+                c.setBackground(sel ? GuiStyle.ACCENT2 : GuiStyle.BG2);
+                if (v != null) c.setForeground(GuiStyle.severityColor(v.toString()));
+                else c.setForeground(GuiStyle.TEXT);
+                return c;
+            }
+        });
+
+        // 4: Message
         table.getColumnModel().getColumn(4).setCellRenderer(new DefaultTableCellRenderer() {
             @Override public Component getTableCellRendererComponent(JTable t, Object v,
                                                                      boolean sel, boolean focus, int row, int col) {
@@ -116,8 +133,8 @@ public class PerFileCard extends JPanel {
                 if (dto.status() != null && !dto.status().isEmpty()
                         && !dto.status().equals("OPEN")
                         && !dto.status().equals("REOPENED")) {
-                    prefix = "<span style='color:#3fb950;font-weight:bold;'>[" +
-                            UiHelpers.escHtml(dto.status()) + "]</span> ";
+                    prefix = "<span style='color:#3fb950;font-weight:bold;'>["
+                            + UiHelpers.escHtml(dto.status()) + "]</span> ";
                 }
                 setText("<html>" + prefix + UiHelpers.escHtml(msg) + "</html>");
                 setBackground(sel ? GuiStyle.ACCENT2 : GuiStyle.BG2);

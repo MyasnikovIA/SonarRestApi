@@ -7,13 +7,13 @@ import ru.miacomsoft.sonar_gui.common.services.IssueService;
 import javax.swing.*;
 import javax.swing.table.AbstractTableModel;
 import javax.swing.table.DefaultTableCellRenderer;
+import javax.swing.table.TableColumn;
 import java.awt.*;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.util.ArrayList;
 import java.util.List;
 
-/** Карточка файла во вкладке Report. */
 public class ReportFileCard extends JPanel {
 
     public interface Delegate {
@@ -23,16 +23,17 @@ public class ReportFileCard extends JPanel {
                                 List<IssueService.IssueDto> selected);
     }
 
-    private final String fileName;
+    private final String title;
     private final List<ReportRowModel> rows = new ArrayList<>();
     private final Delegate delegate;
 
     private final JCheckBox fileCheckbox;
     private final JTable table;
     private final ReportTableModel tableModel;
+    private boolean globalAll = false;
 
-    public ReportFileCard(String fileName, List<IssueService.IssueDto> issues, Delegate delegate) {
-        this.fileName = fileName;
+    public ReportFileCard(String title, List<IssueService.IssueDto> issues, Delegate delegate) {
+        this.title = title;
         this.delegate = delegate;
         for (IssueService.IssueDto dto : issues) rows.add(new ReportRowModel(dto));
 
@@ -51,7 +52,7 @@ public class ReportFileCard extends JPanel {
         });
         header.add(fileCheckbox);
 
-        JLabel lbl = new JLabel("📁 " + fileName + " — " + rows.size());
+        JLabel lbl = new JLabel(title + " — " + rows.size());
         lbl.setForeground(GuiStyle.TEXT);
         lbl.setFont(GuiStyle.FONT_BOLD);
         header.add(lbl);
@@ -76,27 +77,42 @@ public class ReportFileCard extends JPanel {
             table.getColumnModel().getColumn(i).setMaxWidth(widths[i]);
         }
 
+        // 0: Checkbox
         table.getColumnModel().getColumn(0).setCellRenderer(new DefaultTableCellRenderer() {
             @Override public Component getTableCellRendererComponent(JTable t, Object v,
                                                                      boolean sel, boolean focus, int row, int col) {
                 JCheckBox cb = new JCheckBox();
                 cb.setOpaque(true);
                 cb.setBackground(sel ? GuiStyle.ACCENT2 : GuiStyle.BG2);
-                cb.setSelected(v != null && (Boolean) v);
+                cb.setSelected(!globalAll && v != null && (Boolean) v);
                 return cb;
             }
         });
 
-        table.getColumnModel().getColumn(2).setCellRenderer(new DefaultTableCellRenderer() {
+        // 1: Rule
+        table.getColumnModel().getColumn(1).setCellRenderer(new DefaultTableCellRenderer() {
             @Override public Component getTableCellRendererComponent(JTable t, Object v,
                                                                      boolean sel, boolean focus, int row, int col) {
                 Component c = super.getTableCellRendererComponent(t, v, sel, focus, row, col);
-                if (v != null) c.setForeground(GuiStyle.severityColor(v.toString()));
-                setBackground(sel ? GuiStyle.ACCENT2 : GuiStyle.BG2);
+                c.setBackground(sel ? GuiStyle.ACCENT2 : GuiStyle.BG2);
+                c.setForeground(GuiStyle.TEXT);
                 return c;
             }
         });
 
+        // 2: Severity
+        table.getColumnModel().getColumn(2).setCellRenderer(new DefaultTableCellRenderer() {
+            @Override public Component getTableCellRendererComponent(JTable t, Object v,
+                                                                     boolean sel, boolean focus, int row, int col) {
+                Component c = super.getTableCellRendererComponent(t, v, sel, focus, row, col);
+                c.setBackground(sel ? GuiStyle.ACCENT2 : GuiStyle.BG2);
+                if (v != null) c.setForeground(GuiStyle.severityColor(v.toString()));
+                else c.setForeground(GuiStyle.TEXT);
+                return c;
+            }
+        });
+
+        // 3: Message
         table.getColumnModel().getColumn(3).setCellRenderer(new DefaultTableCellRenderer() {
             @Override public Component getTableCellRendererComponent(JTable t, Object v,
                                                                      boolean sel, boolean focus, int row, int col) {
@@ -121,7 +137,7 @@ public class ReportFileCard extends JPanel {
                 int row = table.rowAtPoint(e.getPoint());
                 int col = table.columnAtPoint(e.getPoint());
                 if (row < 0) return;
-                if (e.getClickCount() == 1 && col == 0) {
+                if (e.getClickCount() == 1 && col == 0 && !globalAll) {
                     ReportRowModel r = rows.get(row);
                     r.selected = !r.selected;
                     tableModel.fireTableCellUpdated(row, 0);
@@ -143,6 +159,23 @@ public class ReportFileCard extends JPanel {
         add(scroll, BorderLayout.CENTER);
     }
 
+    /** Скрывает/показывает колонку чекбоксов при "Выбрать всё". */
+    public void setGlobalSelectAll(boolean global) {
+        this.globalAll = global;
+        fileCheckbox.setVisible(!global);
+        TableColumn col = table.getColumnModel().getColumn(0);
+        if (global) {
+            col.setMinWidth(0);
+            col.setMaxWidth(0);
+            col.setPreferredWidth(0);
+        } else {
+            col.setMinWidth(30);
+            col.setMaxWidth(30);
+            col.setPreferredWidth(30);
+        }
+        tableModel.fireTableDataChanged();
+    }
+
     private void handlePopup(MouseEvent e) {
         if (!e.isPopupTrigger()) return;
         int row = table.rowAtPoint(e.getPoint());
@@ -154,6 +187,7 @@ public class ReportFileCard extends JPanel {
     }
 
     public List<IssueService.IssueDto> getSelectedIssues() {
+        if (globalAll) return getAllIssues();
         List<IssueService.IssueDto> out = new ArrayList<>();
         for (ReportRowModel r : rows) if (r.selected) out.add(r.issue);
         return out;
@@ -176,8 +210,6 @@ public class ReportFileCard extends JPanel {
         for (ReportRowModel r : rows) if (!r.selected) { all = false; break; }
         fileCheckbox.setSelected(all);
     }
-
-    public String getFileName() { return fileName; }
 
     public boolean matchesFilter(String text, java.util.Set<String> tags,
                                  java.util.Set<String> excludedTags,
@@ -223,7 +255,7 @@ public class ReportFileCard extends JPanel {
                 if (hasExcluded) continue;
             }
 
-            return true; // хотя бы одна строка прошла
+            return true;
         }
         return false;
     }

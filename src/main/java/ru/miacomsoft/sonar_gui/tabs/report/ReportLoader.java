@@ -7,31 +7,46 @@ import javax.swing.*;
 import java.util.List;
 import java.util.function.Consumer;
 
-/**
- * Загрузчик всех issues для вкладки Report — напрямую через IssueService.
- * Больше не делает HTTP к /api/issues.
- */
-public class ReportLoader extends SwingWorker<List<IssueService.IssueDto>, Void> {
+public class ReportLoader extends SwingWorker<List<IssueService.IssueDto>, Object[]> {
 
     private final IssueService issueService;
     private final GuiContext ctx;
+    private final String customSev;
+    private final String customQual;
+    private final String customStatuses;
+
     private final Consumer<List<IssueService.IssueDto>> onSuccess;
     private final Consumer<Throwable> onError;
+    private final Consumer<Object[]> onProgress; // [current, total, message]
 
-    public ReportLoader(GuiContext ctx,
+    public ReportLoader(GuiContext ctx, String customSev, String customQual, String customStatuses,
                         Consumer<List<IssueService.IssueDto>> onSuccess,
-                        Consumer<Throwable> onError) {
+                        Consumer<Throwable> onError,
+                        Consumer<Object[]> onProgress) {
         this.ctx = ctx;
         this.issueService = new IssueService(ctx);
+        this.customSev = customSev;
+        this.customQual = customQual;
+        this.customStatuses = customStatuses;
         this.onSuccess = onSuccess;
         this.onError = onError;
+        this.onProgress = onProgress;
     }
 
     @Override
     protected List<IssueService.IssueDto> doInBackground() throws Exception {
         return issueService.fetchAllIssues(
-                ctx.getProject(), ctx.getSeverity(), ctx.getQuality(),
-                ctx.isHideProcessed());
+                ctx.getProject(), customSev, customQual,
+                ctx.isHideProcessed(), customStatuses,
+                (current, total, message) -> publish(new Object[]{current, total, message}));
+    }
+
+    @Override
+    protected void process(List<Object[]> chunks) {
+        if (onProgress != null && !chunks.isEmpty()) {
+            // Берем последний чанк для обновления UI
+            onProgress.accept(chunks.get(chunks.size() - 1));
+        }
     }
 
     @Override

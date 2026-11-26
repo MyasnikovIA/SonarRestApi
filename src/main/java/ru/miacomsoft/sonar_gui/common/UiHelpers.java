@@ -2,19 +2,14 @@ package ru.miacomsoft.sonar_gui.common;
 
 import javax.swing.*;
 import javax.swing.border.Border;
+import javax.swing.plaf.basic.BasicComboBoxUI;
 import java.awt.*;
 import java.util.ArrayList;
 import java.util.List;
 
-/**
- * Утилиты для повторяющихся UI-операций: тёмные кнопки, поля, тосты,
- * обрезка строк, HTML-экранирование.
- */
 public final class UiHelpers {
 
     private UiHelpers() {}
-
-    // ============ стилизованные компоненты ============
 
     public static JButton primaryButton(String text) {
         return styleButton(text, GuiStyle.ACCENT2, Color.WHITE);
@@ -60,6 +55,31 @@ public final class UiHelpers {
         cb.setBackground(GuiStyle.BG);
         cb.setForeground(GuiStyle.TEXT);
         cb.setFont(GuiStyle.FONT_BASE);
+
+        // Рендерер для выпадающего списка (обязательно setOpaque(true))
+        cb.setRenderer(new DefaultListCellRenderer() {
+            @Override
+            public Component getListCellRendererComponent(JList<?> list, Object value,
+                                                          int index, boolean isSelected, boolean cellHasFocus) {
+                JLabel lbl = (JLabel) super.getListCellRendererComponent(list, value, index, isSelected, cellHasFocus);
+                lbl.setOpaque(true); // <--- БЕЗ ЭТОГО ФОН БУДЕТ БЕЛЫМ
+                lbl.setBackground(isSelected ? GuiStyle.ACCENT2 : GuiStyle.BG);
+                lbl.setForeground(isSelected ? Color.WHITE : GuiStyle.TEXT);
+                return lbl;
+            }
+        });
+
+        // Базовый UI, чтобы системный LAF не рисовал белый фон на самой кнопке
+        cb.setUI(new BasicComboBoxUI() {
+            @Override
+            protected JButton createArrowButton() {
+                JButton btn = super.createArrowButton();
+                btn.setBackground(GuiStyle.BG3);
+                btn.setForeground(GuiStyle.TEXT);
+                return btn;
+            }
+        });
+
         return cb;
     }
 
@@ -77,12 +97,6 @@ public final class UiHelpers {
         return lbl;
     }
 
-    // ============ тост ============
-
-    /**
-     * Показывает всплывающее уведомление в правом нижнем углу экрана.
-     * Автоматически закрывается через 3.5 секунды.
-     */
     public static void showToast(Component parent, String message, boolean isError) {
         Window owner = (parent == null) ? null : SwingUtilities.getWindowAncestor(parent);
         JWindow window = new JWindow(owner);
@@ -111,8 +125,6 @@ public final class UiHelpers {
         timer.start();
     }
 
-    // ============ утилиты строк ============
-
     public static String shorten(String s, int max) {
         if (s == null) return "";
         return s.length() <= max ? s : s.substring(0, max - 3) + "...";
@@ -127,12 +139,9 @@ public final class UiHelpers {
                 .replace("'", "&#39;");
     }
 
-    /** Возвращает строку, безопасную для HTML-рендеринга в JLabel. */
     public static String wrapHtml(String s) {
         return "<html>" + escHtml(s) + "</html>";
     }
-
-    // ============ модальные диалоги ============
 
     public static void showError(Component parent, String message) {
         JOptionPane.showMessageDialog(parent,
@@ -146,7 +155,6 @@ public final class UiHelpers {
         return r == JOptionPane.YES_OPTION;
     }
 
-    /** Универсальный «изолирующий» контейнер с отступами. */
     public static JPanel paddedPanel(LayoutManager layout, int pad) {
         JPanel p = new JPanel(layout);
         p.setBackground(GuiStyle.BG);

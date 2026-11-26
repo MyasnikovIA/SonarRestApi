@@ -7,21 +7,13 @@ import ru.miacomsoft.sonar_gui.common.Reloadable;
 import ru.miacomsoft.sonar_gui.common.UiHelpers;
 import ru.miacomsoft.sonar_gui.common.services.IssueService;
 import ru.miacomsoft.sonar_gui.common.services.TagsService;
-import ru.miacomsoft.sonar_gui.tabs.report.dialogs.ReportBulkDialog;
-import ru.miacomsoft.sonar_gui.tabs.report.dialogs.ReportExportDialog;
-import ru.miacomsoft.sonar_gui.tabs.report.dialogs.ReportIssueDialog;
-import ru.miacomsoft.sonar_gui.tabs.report.dialogs.ReportPromptDialog;
-import ru.miacomsoft.sonar_gui.tabs.report.dialogs.ReportTagsDialog;
+import ru.miacomsoft.sonar_gui.tabs.report.dialogs.*;
 
 import javax.swing.*;
 import java.awt.*;
 import java.awt.event.MouseEvent;
-import java.util.ArrayList;
-import java.util.LinkedHashSet;
+import java.util.*;
 import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.TreeMap;
 
 public class ReportPanel extends JPanel implements Reloadable {
 
@@ -30,20 +22,23 @@ public class ReportPanel extends JPanel implements Reloadable {
     private final GuiContext ctx;
 
     private final JCheckBox masterCheckbox;
-    private final JComboBox<String> statusCombo;
+    private final MultiSelectDropdown statusDropdown;
+    private final MultiSelectDropdown sevDropdown;
+    private final MultiSelectDropdown qualDropdown;
     private final MultiSelectDropdown tagsDropdown;
     private final MultiSelectDropdown excludedTagsDropdown;
     private final MultiSelectDropdown rulesDropdown;
     private final JTextField textField;
+    private final JButton applyFilterBtn;
     private final JButton exportBtn;
 
+    private final JProgressBar progressBar;
     private final JPanel cardsContainer;
     private final JLabel headerLabel;
 
     private List<IssueService.IssueDto> allIssues = new ArrayList<>();
     private List<ReportFileCard> cards = new ArrayList<>();
     private String filterText = "";
-    private String statusFilter = "ALL";
     private boolean isAllSelected = false;
 
     public ReportPanel(GuiContext ctx) {
@@ -51,14 +46,15 @@ public class ReportPanel extends JPanel implements Reloadable {
         setLayout(new BorderLayout());
         setBackground(GuiStyle.BG);
 
+        // ================= TOP BAR =================
         JPanel top = new JPanel();
         top.setLayout(new BoxLayout(top, BoxLayout.Y_AXIS));
         top.setBackground(GuiStyle.BG2);
         top.setBorder(BorderFactory.createEmptyBorder(10, 12, 10, 12));
 
+        // Row 1: Master + Header + Export
         JPanel row1 = new JPanel(new BorderLayout(8, 0));
         row1.setOpaque(false);
-
         JPanel row1Left = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
         row1Left.setOpaque(false);
 
@@ -67,7 +63,7 @@ public class ReportPanel extends JPanel implements Reloadable {
         masterCheckbox.setToolTipText("Выделить всё");
         masterCheckbox.addActionListener(e -> {
             isAllSelected = masterCheckbox.isSelected();
-            for (ReportFileCard c : cards) c.setAllSelected(isAllSelected);
+            for (ReportFileCard c : cards) c.setGlobalSelectAll(isAllSelected);
             updateExportBtn();
         });
         row1Left.add(masterCheckbox);
@@ -80,42 +76,52 @@ public class ReportPanel extends JPanel implements Reloadable {
 
         JPanel row1Right = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
         row1Right.setOpaque(false);
-
         exportBtn = UiHelpers.primaryButton("Действия (0)");
         exportBtn.setVisible(false);
         exportBtn.addActionListener(e -> openExportMenu());
         row1Right.add(exportBtn);
-
         row1.add(row1Right, BorderLayout.EAST);
         top.add(row1);
 
+        // Row 2: Filters
         JPanel row2 = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 4));
         row2.setOpaque(false);
 
-        row2.add(UiHelpers.dimLabel("Статус:"));
-        statusCombo = UiHelpers.darkCombo(
-                new String[]{"ALL", "UNPROCESSED", "PROCESSED"}, "ALL");
-        statusCombo.setPreferredSize(new Dimension(150, 26));
-        statusCombo.addActionListener(e -> {
-            statusFilter = (String) statusCombo.getSelectedItem();
-            applyFilters();
-        });
-        row2.add(statusCombo);
+        statusDropdown = new MultiSelectDropdown("Статус (Status)", this::noop);
+        statusDropdown.setItems(Arrays.asList(
+                "OPEN", "CONFIRMED", "REOPENED", "ACCEPTED", "FALSE_POSITIVE",
+                "WONTFIX", "FIXED", "CLOSED", "RESOLVED", "ALL"
+        ));
+        statusDropdown.setSelected("ALL");
+        statusDropdown.setPreferredSize(new Dimension(180, 26));
+        row2.add(statusDropdown);
 
-        tagsDropdown = new MultiSelectDropdown("🏷️ Теги", this::applyFilters);
-        tagsDropdown.setPreferredSize(new Dimension(150, 26));
+        sevDropdown = new MultiSelectDropdown("Критичность (SEV)", this::noop);
+        sevDropdown.setItems(Arrays.asList("BLOCKER", "HIGH", "MEDIUM", "LOW", "INFO", "ALL"));
+        sevDropdown.setSelected(ctx.getSeverity() != null ? ctx.getSeverity() : "ALL");
+        sevDropdown.setPreferredSize(new Dimension(180, 26));
+        row2.add(sevDropdown);
+
+        qualDropdown = new MultiSelectDropdown("Качество (QUAL)", this::noop);
+        qualDropdown.setItems(Arrays.asList("SECURITY", "RELIABILITY", "MAINTAINABILITY", "SECURITY_HOTSPOT", "ALL"));
+        qualDropdown.setSelected(ctx.getQuality() != null ? ctx.getQuality() : "ALL");
+        qualDropdown.setPreferredSize(new Dimension(180, 26));
+        row2.add(qualDropdown);
+
+        tagsDropdown = new MultiSelectDropdown("🏷️ Теги (Tags)", this::applyFilters);
+        tagsDropdown.setPreferredSize(new Dimension(160, 26));
         row2.add(tagsDropdown);
 
-        excludedTagsDropdown = new MultiSelectDropdown("🚫 Исключить", this::applyFilters);
-        excludedTagsDropdown.setPreferredSize(new Dimension(170, 26));
+        excludedTagsDropdown = new MultiSelectDropdown("🚫 Исключить (Exclude)", this::applyFilters);
+        excludedTagsDropdown.setPreferredSize(new Dimension(200, 26));
         row2.add(excludedTagsDropdown);
 
-        rulesDropdown = new MultiSelectDropdown("📏 Правила", this::applyFilters);
-        rulesDropdown.setPreferredSize(new Dimension(160, 26));
+        rulesDropdown = new MultiSelectDropdown("📏 Правила (Rules)", this::applyFilters);
+        rulesDropdown.setPreferredSize(new Dimension(180, 26));
         row2.add(rulesDropdown);
 
         textField = UiHelpers.darkField("");
-        textField.setPreferredSize(new Dimension(260, 26));
+        textField.setPreferredSize(new Dimension(200, 26));
         textField.setToolTipText("Фильтр по ключу/файлу/сообщению");
         textField.getDocument().addDocumentListener(new javax.swing.event.DocumentListener() {
             public void insertUpdate(javax.swing.event.DocumentEvent e)  { filterText = textField.getText(); applyFilters(); }
@@ -124,9 +130,23 @@ public class ReportPanel extends JPanel implements Reloadable {
         });
         row2.add(textField);
 
+        applyFilterBtn = UiHelpers.primaryButton("Применить фильтр");
+        applyFilterBtn.addActionListener(e -> reload());
+        row2.add(applyFilterBtn);
+
         top.add(row2);
+
+        // Progress Bar
+        progressBar = new JProgressBar(0, 100);
+        progressBar.setStringPainted(true);
+        progressBar.setVisible(false);
+        progressBar.setBackground(GuiStyle.BG3);
+        progressBar.setForeground(GuiStyle.ACCENT);
+        top.add(progressBar);
+
         add(top, BorderLayout.NORTH);
 
+        // ================= CENTER =================
         cardsContainer = new JPanel();
         cardsContainer.setLayout(new BoxLayout(cardsContainer, BoxLayout.Y_AXIS));
         cardsContainer.setBackground(GuiStyle.BG);
@@ -138,77 +158,13 @@ public class ReportPanel extends JPanel implements Reloadable {
         scroll.getVerticalScrollBar().setUnitIncrement(16);
         add(scroll, BorderLayout.CENTER);
 
-        ctx.onProjectChanged(c -> reload());
-        ctx.onFiltersChanged(c -> reload());
-
-        reload();
+        // Инициализация списка тегов и правил
+        initFiltersAsync();
     }
 
-    @Override
-    public void reload() {
-        if (!ctx.hasProject()) {
-            cardsContainer.removeAll();
-            cardsContainer.add(emptyLabel("Выберите проект в верхней панели"));
-            cardsContainer.revalidate();
-            cardsContainer.repaint();
-            return;
-        }
+    private void noop() {}
 
-        cardsContainer.removeAll();
-        cardsContainer.add(emptyLabel("Загрузка всех issues…"));
-        cardsContainer.revalidate();
-        cardsContainer.repaint();
-
-        new ReportLoader(ctx, this::onLoaded, this::onError).execute();
-    }
-
-    private void onLoaded(List<IssueService.IssueDto> issues) {
-        this.allIssues = new ArrayList<>(issues);
-        rebuildCards();
-        loadFiltersAsync();
-        updateHeader();
-    }
-
-    private void onError(Throwable t) {
-        cardsContainer.removeAll();
-        cardsContainer.add(emptyLabel("Ошибка: " + t.getMessage()));
-        cardsContainer.revalidate();
-        cardsContainer.repaint();
-    }
-
-    private void rebuildCards() {
-        Map<String, List<IssueService.IssueDto>> byFile = new TreeMap<>();
-        for (IssueService.IssueDto it : allIssues) {
-            byFile.computeIfAbsent(it.component(), k -> new ArrayList<>()).add(it);
-        }
-
-        cardsContainer.removeAll();
-        cards.clear();
-
-        for (Map.Entry<String, List<IssueService.IssueDto>> e : byFile.entrySet()) {
-            ReportFileCard card = new ReportFileCard(e.getKey(), e.getValue(),
-                    new ReportFileCard.Delegate() {
-                        @Override public void onSelectionChanged() { updateExportBtn(); }
-                        @Override public void onIssueDoubleClick(IssueService.IssueDto issue) {
-                            new ReportIssueDialog(ctx, issue, ReportPanel.this::reload).setVisible(true);
-                        }
-                        @Override public void onIssueContextMenu(MouseEvent ev,
-                                                                 IssueService.IssueDto issue,
-                                                                 List<IssueService.IssueDto> selected) {
-                            showContextMenu(ev, issue, selected);
-                        }
-                    });
-            cards.add(card);
-            cardsContainer.add(card);
-            cardsContainer.add(Box.createVerticalStrut(10));
-        }
-
-        cardsContainer.revalidate();
-        cardsContainer.repaint();
-        applyFilters();
-    }
-
-    private void loadFiltersAsync() {
+    private void initFiltersAsync() {
         new SwingWorker<List<String>, Void>() {
             @Override protected List<String> doInBackground() throws Exception {
                 return new TagsService(ctx).fetchTags(ctx.getProject());
@@ -223,7 +179,74 @@ public class ReportPanel extends JPanel implements Reloadable {
                 } catch (Exception ignored) {}
             }
         }.execute();
+    }
 
+    @Override
+    public void reload() {
+        if (!ctx.hasProject()) {
+            cardsContainer.removeAll();
+            cardsContainer.add(emptyLabel("Выберите проект в верхней панели"));
+            cardsContainer.revalidate();
+            cardsContainer.repaint();
+            return;
+        }
+
+        cardsContainer.removeAll();
+        cardsContainer.add(emptyLabel("Загрузка данных..."));
+        cardsContainer.revalidate();
+        cardsContainer.repaint();
+
+        progressBar.setVisible(true);
+        progressBar.setIndeterminate(true);
+        applyFilterBtn.setEnabled(false);
+        exportBtn.setEnabled(false);
+
+        String sevCsv = sevDropdown.getSelectedCsv();
+        String qualCsv = qualDropdown.getSelectedCsv();
+        String statCsv = statusDropdown.getSelectedCsv();
+
+        new ReportLoader(ctx, sevCsv, qualCsv, statCsv,
+                this::onLoaded,
+                this::onError,
+                this::onProgress).execute();
+    }
+
+    private void onProgress(Object[] p) {
+        int cur = (int) p[0];
+        int total = (int) p[1];
+        String msg = (String) p[2];
+        progressBar.setIndeterminate(false);
+        if (total > 0) {
+            progressBar.setMaximum(total);
+            progressBar.setValue(cur);
+            progressBar.setString(msg);
+        } else {
+            progressBar.setIndeterminate(true);
+            progressBar.setString(msg);
+        }
+    }
+
+    private void onLoaded(List<IssueService.IssueDto> issues) {
+        this.allIssues = new ArrayList<>(issues);
+        progressBar.setVisible(false);
+        applyFilterBtn.setEnabled(true);
+        exportBtn.setEnabled(true);
+
+        rebuildCards();
+        loadRulesFacet();
+        updateHeader();
+    }
+
+    private void onError(Throwable t) {
+        progressBar.setVisible(false);
+        applyFilterBtn.setEnabled(true);
+        cardsContainer.removeAll();
+        cardsContainer.add(emptyLabel("Ошибка: " + t.getMessage()));
+        cardsContainer.revalidate();
+        cardsContainer.repaint();
+    }
+
+    private void loadRulesFacet() {
         Set<String> rules = new LinkedHashSet<>();
         for (IssueService.IssueDto it : allIssues) {
             if (it.rule() != null && !it.rule().isBlank()) rules.add(it.rule());
@@ -231,10 +254,55 @@ public class ReportPanel extends JPanel implements Reloadable {
         rulesDropdown.setItems(new ArrayList<>(rules));
     }
 
+    private void rebuildCards() {
+        // 1. Сортировка: сначала по правилу, затем по файлу, затем по строке
+        List<IssueService.IssueDto> sorted = new ArrayList<>(allIssues);
+        sorted.sort(Comparator
+                .comparing(IssueService.IssueDto::rule)
+                .thenComparing(IssueService.IssueDto::component)
+                .thenComparingInt(IssueService.IssueDto::line));
+
+        // 2. Группировка: если выбраны правила — группируем по правилам, иначе по файлам
+        Map<String, List<IssueService.IssueDto>> grouped = new TreeMap<>();
+        boolean groupByRule = !rulesDropdown.getSelected().isEmpty();
+
+        for (IssueService.IssueDto it : sorted) {
+            String key = groupByRule ? it.rule() : it.component();
+            grouped.computeIfAbsent(key, k -> new ArrayList<>()).add(it);
+        }
+
+        cardsContainer.removeAll();
+        cards.clear();
+
+        for (Map.Entry<String, List<IssueService.IssueDto>> e : grouped.entrySet()) {
+            // Меняем иконку и текст заголовка в зависимости от режима
+            String title = groupByRule ? "📏 " + e.getKey() : "📁 " + e.getKey();
+
+            ReportFileCard card = new ReportFileCard(title, e.getValue(),
+                    new ReportFileCard.Delegate() {
+                        @Override public void onSelectionChanged() { updateExportBtn(); }
+                        @Override public void onIssueDoubleClick(IssueService.IssueDto issue) {
+                            new ReportIssueDialog(ctx, issue, ReportPanel.this::reload).setVisible(true);
+                        }
+                        @Override public void onIssueContextMenu(MouseEvent ev, IssueService.IssueDto issue, List<IssueService.IssueDto> selected) {
+                            showContextMenu(ev, issue, selected);
+                        }
+                    });
+            cards.add(card);
+            cardsContainer.add(card);
+            cardsContainer.add(Box.createVerticalStrut(10));
+        }
+
+        cardsContainer.revalidate();
+        cardsContainer.repaint();
+        applyFilters();
+    }
+
     private void applyFilters() {
         Set<String> tags = tagsDropdown.getSelected();
         Set<String> excludedTags = excludedTagsDropdown.getSelected();
         Set<String> rules = rulesDropdown.getSelected();
+        String statusFilter = "ALL";
 
         int visible = 0;
         int totalShown = 0;
@@ -250,7 +318,6 @@ public class ReportPanel extends JPanel implements Reloadable {
         cardsContainer.repaint();
 
         headerLabel.setText("Report · " + ctx.getProject()
-                + " · " + ctx.getSeverity() + "/" + ctx.getQuality()
                 + " · файлов: " + visible + " / " + cards.size()
                 + " · issues: " + totalShown + " / " + allIssues.size());
         updateExportBtn();
@@ -258,7 +325,6 @@ public class ReportPanel extends JPanel implements Reloadable {
 
     private void updateHeader() {
         headerLabel.setText("Report · " + ctx.getProject()
-                + " · " + ctx.getSeverity() + "/" + ctx.getQuality()
                 + " · файлов: " + cards.size() + " · issues: " + allIssues.size());
     }
 
@@ -282,41 +348,34 @@ public class ReportPanel extends JPanel implements Reloadable {
         return total;
     }
 
-    private void showContextMenu(MouseEvent e, IssueService.IssueDto issue,
-                                 List<IssueService.IssueDto> selected) {
+    private void showContextMenu(MouseEvent e, IssueService.IssueDto issue, List<IssueService.IssueDto> selected) {
         JPopupMenu menu = new JPopupMenu();
         menu.setBackground(GuiStyle.BG2);
         menu.setBorder(BorderFactory.createLineBorder(GuiStyle.BORDER, 1));
 
-        menu.add(menuItem("📝 Сгенерировать промпт",
-                () -> new ReportPromptDialog(ctx, issue).setVisible(true)));
-        menu.add(menuItem("Посмотреть детали",
-                () -> new ReportIssueDialog(ctx, issue, this::reload).setVisible(true)));
-        menu.add(menuItem("🏷️ Редактировать теги",
-                () -> new ReportTagsDialog(ctx, selected, this::reload).setVisible(true)));
+        menu.add(menuItem("📝 Сгенерировать промпт", () -> new ReportPromptDialog(ctx, issue).setVisible(true)));
+        menu.add(menuItem("Посмотреть детали", () -> new ReportIssueDialog(ctx, issue, this::reload).setVisible(true)));
+        menu.add(menuItem("🏷️ Редактировать теги", () -> new ReportTagsDialog(ctx, selected, this::reload).setVisible(true)));
 
         menu.addSeparator();
-
         menu.add(menuItem("Выделить всё", () -> {
             masterCheckbox.setSelected(true);
             isAllSelected = true;
-            for (ReportFileCard c : cards) c.setAllSelected(true);
+            for (ReportFileCard c : cards) c.setGlobalSelectAll(true);
             updateExportBtn();
         }));
         menu.add(menuItem("Снять выделение", () -> {
             masterCheckbox.setSelected(false);
             isAllSelected = false;
-            for (ReportFileCard c : cards) c.setAllSelected(false);
+            for (ReportFileCard c : cards) c.setGlobalSelectAll(false);
             updateExportBtn();
         }));
 
         boolean hasUnmarked = selected.stream().anyMatch(i -> !i.isProcessed());
         if (hasUnmarked) {
             menu.addSeparator();
-            menu.add(menuItem("Добавить комментарий (" + selected.size() + ")",
-                    () -> new ReportBulkDialog(ctx, selected, this::reload).setVisible(true)));
+            menu.add(menuItem("Добавить комментарий (" + selected.size() + ")", () -> new ReportBulkDialog(ctx, selected, this::reload).setVisible(true)));
         }
-
         menu.show(e.getComponent(), e.getX(), e.getY());
     }
 
@@ -324,11 +383,9 @@ public class ReportPanel extends JPanel implements Reloadable {
         JPopupMenu menu = new JPopupMenu();
         menu.setBackground(GuiStyle.BG2);
         menu.setBorder(BorderFactory.createLineBorder(GuiStyle.BORDER, 1));
-
         for (ReportExportType type : ReportExportType.values()) {
             menu.add(menuItem(type.title, () -> startExport(type)));
         }
-
         menu.show(exportBtn, 0, exportBtn.getHeight());
     }
 
@@ -351,14 +408,14 @@ public class ReportPanel extends JPanel implements Reloadable {
 
         ReportExportService.BaseFilter filter = new ReportExportService.BaseFilter();
         filter.project        = ctx.getProject();
-        filter.severity       = ctx.getSeverity();
-        filter.quality        = ctx.getQuality();
+        filter.severity       = sevDropdown.getSelectedCsv();
+        filter.quality        = qualDropdown.getSelectedCsv();
         filter.hideProcessed  = ctx.isHideProcessed();
         filter.tags           = tagsDropdown.getSelected();
         filter.excludedTags   = excludedTagsDropdown.getSelected();
         filter.rules          = rulesDropdown.getSelected();
         filter.filterText     = filterText;
-        filter.statusFilter   = statusFilter;
+        filter.statusFilter   = statusDropdown.getSelectedCsv();
         filter.expectedTotal  = expectedTotal;
 
         new ReportExportDialog(ctx, type, keysCsv, filter).setVisible(true);

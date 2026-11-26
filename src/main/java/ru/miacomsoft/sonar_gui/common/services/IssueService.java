@@ -11,10 +11,11 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-/**
- * Загрузка issue напрямую через SonarIssuesApi (без /api/perfile и /api/issues).
- */
 public class IssueService {
+
+    public interface FetchProgress {
+        void onProgress(int current, int total, String message);
+    }
 
     public record IssueDto(
             String key,
@@ -77,20 +78,53 @@ public class IssueService {
         return new PerFilePage(total, groups);
     }
 
-    // ============ REPORT (все issues) ============
+    // ============ REPORT (все issues с чанкованием и прогрессом) ============
 
     public List<IssueDto> fetchAllIssues(String project, String sev, String qual,
-                                         boolean hideProcessed) throws Exception {
+                                         boolean hideProcessed, String statusesStr,
+                                         FetchProgress progress) throws Exception {
         if (!ctx.isSessionReady()) throw new IllegalStateException("Сессия не готова");
 
         SonarIssuesApi api = ctx.state().newApi(project);
-        String statuses = hideProcessed
-                ? SonarIssuesApi.ACTIVE_STATUSES
-                : SonarIssuesApi.ALL_STATUSES;
 
-        List<Issue> all = api.fetchAllByStatuses(statuses, sev, qual);
+        // Если выбрано ALL или пусто — используем ACTIVE или ALL_STATUSES
+        String actualStatuses = statusesStr;
+        if (actualStatuses == null || actualStatuses.isEmpty() || "ALL".equalsIgnoreCase(actualStatuses)) {
+            actualStatuses = hideProcessed ? SonarIssuesApi.ACTIVE_STATUSES : SonarIssuesApi.ALL_STATUSES;
+        }
+
+        List<Issue> all = new ArrayList<>();
+        int page = 1;
+        int total = -1;
+        // SonarQube режет ps до 500 (максимум), но мы запрашиваем логические пачки по 3000
+        // через цикл страниц.
+        int pageSize = 500;
+
+        while (total < 0 || all.size() < total) {
+            JSONObject raw = api.fetchPageRaw(actualStatuses, sev, qual, null, page, pageSize);
+            total = raw.optInt("total", 0);
+            JSONArray arr = raw.optJSONArray("issues");
+            if (arr == null || arr.length() == 0) break;
+
+            for (int i = 0; i < arr.length(); i++) {
+                all.add(Issue.from(arr.getJSONObject(i), project));
+            }
+
+            if (progress != null) {
+                progress.onProgress(all.size(), total,
+                        String.format("Загрузка: %d из %d", all.size(), total));
+            }
+
+            page++;
+            if (page > 1000) break; // safety
+        }
+
         List<IssueDto> out = new ArrayList<>(all.size());
         for (Issue it : all) out.add(toDto(it));
+
+        if (progress != null && total > 0) {
+            progress.onProgress(total, total, "Загрузка завершена");
+        }
         return out;
     }
 

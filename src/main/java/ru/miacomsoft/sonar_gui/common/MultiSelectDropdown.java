@@ -7,10 +7,6 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 
-/**
- * Выпадающий список с чекбоксами + поиском — аналог details/summary из web-версии.
- * Показывает "Label (N)", при клике открывает popup с фильтром и чекбоксами.
- */
 public class MultiSelectDropdown extends JPanel {
 
     private final String label;
@@ -75,8 +71,32 @@ public class MultiSelectDropdown extends JPanel {
         refreshButton();
     }
 
+    public void setSelected(String... items) {
+        selected.clear();
+        for (String t : items) {
+            if (allItems.contains(t)) selected.add(t);
+        }
+        rebuildList();
+        refreshButton();
+    }
+
+    public void setSelected(Set<String> items) {
+        selected.clear();
+        for (String t : items) {
+            if (allItems.contains(t)) selected.add(t);
+        }
+        rebuildList();
+        refreshButton();
+    }
+
     public Set<String> getSelected() {
         return new LinkedHashSet<>(selected);
+    }
+
+    /** Возвращает выбранные значения через запятую. Если пусто — "ALL". */
+    public String getSelectedCsv() {
+        if (selected.isEmpty() || selected.contains("ALL")) return "ALL";
+        return String.join(",", selected);
     }
 
     public void clearSelection() {
@@ -85,8 +105,6 @@ public class MultiSelectDropdown extends JPanel {
         refreshButton();
         fireChange();
     }
-
-    // ============ private ============
 
     private void togglePopup() {
         popup.show(button, 0, button.getHeight());
@@ -111,8 +129,7 @@ public class MultiSelectDropdown extends JPanel {
             listPanel.add(cb);
         }
         if (listPanel.getComponentCount() == 0) {
-            JLabel empty = UiHelpers.dimLabel("— нет —");
-            listPanel.add(empty);
+            listPanel.add(UiHelpers.dimLabel("— нет —"));
         }
         listPanel.revalidate();
         listPanel.repaint();

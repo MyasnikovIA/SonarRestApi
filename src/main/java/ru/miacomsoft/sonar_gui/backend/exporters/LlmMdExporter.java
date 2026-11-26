@@ -3,7 +3,6 @@ package ru.miacomsoft.sonar_gui.backend.exporters;
 import ru.miacomsoft.sonar_gui.backend.Issue;
 import ru.miacomsoft.sonar_gui.backend.SonarIssuesApi;
 
-import java.io.OutputStream;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -30,9 +29,7 @@ public class LlmMdExporter {
 
                 String fullSource = "";
                 try { fullSource = api.fetchFullSource(project + ":" + file); }
-                catch (Exception e) {
-                    System.err.println("[LlmMdExporter] не удалось получить код для " + file);
-                }
+                catch (Exception e) { System.err.println("[LlmMdExporter] не удалось получить код для " + file); }
 
                 String mdContent = buildMarkdownPrompt(file, issues, fullSource, project, host);
                 String safeName = makeFileName(file);
@@ -59,9 +56,7 @@ public class LlmMdExporter {
 
             String fullSource = "";
             try { fullSource = api.fetchFullSource(project + ":" + file); }
-            catch (Exception e) {
-                System.err.println("[LlmMdExporter] не удалось получить код для " + file);
-            }
+            catch (Exception e) { System.err.println("[LlmMdExporter] не удалось получить код для " + file); }
 
             String mdContent = buildMarkdownPrompt(file, issues, fullSource, project, host);
             String safeName = makeFileName(file);
@@ -86,18 +81,21 @@ public class LlmMdExporter {
         sb.append("## Найденные ошибки:\n\n");
         for (Issue it : issues) {
             String lineStr = it.line > 0 ? " (Строка: " + it.line + ")" : "";
+            String sourceLink = "https://" + host + "/code?id=" + project + "&selected=" + project + ":" + it.component;
+            String tagsStr = (it.tags == null || it.tags.isEmpty()) ? "нет" : String.join(", ", it.tags);
+            String lastComment = getLastComment(it);
+
             sb.append("### Ошибка: ").append(it.key).append(lineStr).append("\n\n");
-            String link = "https://" + host + "/project/issues?id=" + urlEnc(project)
-                    + "&open=" + urlEnc(it.key);
-            sb.append("Ссылка: ").append(link).append("\n\n");
+            String link = "https://" + host + "/project/issues?id=" + urlEnc(project) + "&open=" + urlEnc(it.key);
+            sb.append("Ссылка на ошибку: ").append(link).append("\n\n");
+            sb.append("Ссылка на исходник: ").append(sourceLink).append("\n\n");
             sb.append("Правило: ").append(it.rule);
             if (it.ruleName != null && !it.ruleName.isEmpty())
                 sb.append(" — ").append(it.ruleName);
             sb.append("\n\n");
-            String tagsStr = (it.tags == null || it.tags.isEmpty())
-                    ? "нет" : String.join(", ", it.tags);
             sb.append("Теги: ").append(tagsStr).append("\n\n");
             sb.append("Сообщение: ").append(it.message).append("\n\n");
+            sb.append("Последний комментарий: ").append(lastComment).append("\n\n");
         }
         if (fullSource != null && !fullSource.isEmpty()) {
             sb.append("## Полный исходный код файла\n\n```\n")
@@ -107,6 +105,19 @@ public class LlmMdExporter {
         sb.append("Перепиши файл целиком, исправив перечисленные ошибки. "
                 + "Верни ТОЛЬКО исходный код файла без markdown-обёрток.\n");
         return sb.toString();
+    }
+
+    private static String getLastComment(Issue issue) {
+        if (issue.comments == null || issue.comments.isEmpty()) return "нет";
+        Issue.Comment latest = null;
+        for (Issue.Comment c : issue.comments) {
+            if (latest == null || String.valueOf(c.createdAt).compareTo(String.valueOf(latest.createdAt)) > 0) {
+                latest = c;
+            }
+        }
+        if (latest == null) return "нет";
+        if (latest.markdown != null && !latest.markdown.isEmpty()) return latest.markdown;
+        return latest.htmlText != null ? latest.htmlText : "нет";
     }
 
     private static String makeFileName(String path) {

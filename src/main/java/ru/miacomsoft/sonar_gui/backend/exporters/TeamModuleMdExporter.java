@@ -101,6 +101,10 @@ public class TeamModuleMdExporter {
         sb.append("Всего issues: ").append(issues.size()).append("\n\n");
 
         for (Issue it : issues) {
+            String sourceLink = "https://" + host + "/code?id=" + project + "&selected=" + project + ":" + it.component;
+            String tagsStr = (it.tags == null || it.tags.isEmpty()) ? "нет" : String.join(", ", it.tags);
+            String lastComment = getLastComment(it);
+
             sb.append("## ").append(it.key);
             if (it.line > 0) sb.append(" · L").append(it.line);
             sb.append("\n\n");
@@ -112,13 +116,29 @@ public class TeamModuleMdExporter {
                     it.impactSeverity != null && !it.impactSeverity.isEmpty()
                             ? it.impactSeverity : it.severity).append("\n");
             sb.append("- **Status:** ").append(it.status).append("\n");
-            sb.append("- **Сообщение:** ").append(it.message).append("\n\n");
+            sb.append("- **Ссылка на исходник:** ").append(sourceLink).append("\n");
+            sb.append("- **Теги:** ").append(tagsStr).append("\n");
+            sb.append("- **Сообщение:** ").append(it.message).append("\n");
+            sb.append("- **Последний комментарий:** ").append(lastComment).append("\n\n");
         }
 
         if (fullSource != null && !fullSource.isEmpty()) {
             sb.append("## Полный листинг\n\n```\n").append(fullSource).append("\n```\n");
         }
         return sb.toString();
+    }
+
+    private static String getLastComment(Issue issue) {
+        if (issue.comments == null || issue.comments.isEmpty()) return "нет";
+        Issue.Comment latest = null;
+        for (Issue.Comment c : issue.comments) {
+            if (latest == null || String.valueOf(c.createdAt).compareTo(String.valueOf(latest.createdAt)) > 0) {
+                latest = c;
+            }
+        }
+        if (latest == null) return "нет";
+        if (latest.markdown != null && !latest.markdown.isEmpty()) return latest.markdown;
+        return latest.htmlText != null ? latest.htmlText : "нет";
     }
 
     private static String makeFileName(String path) {

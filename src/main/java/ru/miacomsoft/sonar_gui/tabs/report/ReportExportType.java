@@ -6,10 +6,10 @@ public enum ReportExportType {
     MARKDOWN          ("md",                "Markdown",           "md"),
     TXT               ("txt",               "TXT",                "txt"),
     CONFLUENCE        ("confluence",        "Confluence (HTML)",  "html"),
-    HTML_FILES        ("html-files",        "HTML по файлам (ZIP)", "zip"),
-    HTML_FILES_TEAMS  ("html-files-teams",  "HTML + команды (ZIP)", "zip"),
-    LLM_MD_ZIP        ("llm-md-zip",        "LLM MD (ZIP)",        "zip"),
-    TEAM_MODULE_ZIP   ("team-module-zip",   "Отчёт по командам (ZIP)", "zip");
+    HTML_FILES        ("html-files",        "HTML по файлам (Папка)", "zip"),
+    HTML_FILES_TEAMS  ("html-files-teams",  "HTML + команды (Папка)", "zip"),
+    LLM_MD_ZIP        ("llm-md-zip",        "LLM MD (Папка)",     "zip"),
+    TEAM_MODULE_ZIP   ("team-module-zip",   "Отчёт по командам (Папка)", "zip");
 
     public final String code;
     public final String title;

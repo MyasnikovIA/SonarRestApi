@@ -13,8 +13,12 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.List;
+import java.util.prefs.Preferences;
 
 public class ReportExportDialog extends JDialog {
+
+    private static final Preferences PREFS = Preferences.userNodeForPackage(ReportExportDialog.class);
+    private static final String LAST_DIR_KEY = "last_report_dir";
 
     private final GuiContext ctx;
     private final ReportExportType type;
@@ -30,6 +34,7 @@ public class ReportExportDialog extends JDialog {
     private volatile ReportExportService service;
     private volatile boolean cancelled = false;
     private Path targetDirectory = null;
+    private SwingWorker<Void, Void> worker;
 
     public ReportExportDialog(GuiContext ctx, ReportExportType type,
                               List<String> keysCsv, ReportExportService.BaseFilter filter) {
@@ -78,6 +83,7 @@ public class ReportExportDialog extends JDialog {
             cancelBtn.setEnabled(false);
             cancelBtn.setText("Остановка…");
             if (service != null) service.setCancelled(true);
+            if (worker != null) worker.cancel(true);
         });
         footer.add(cancelBtn);
         root.add(footer, BorderLayout.SOUTH);
@@ -97,33 +103,46 @@ public class ReportExportDialog extends JDialog {
             JFileChooser chooser = new JFileChooser();
             chooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
             chooser.setDialogTitle("Выберите каталог для сохранения отчета");
+
+            String lastDir = PREFS.get(LAST_DIR_KEY, System.getProperty("user.home"));
+            File lastDirFile = new File(lastDir);
+            if (lastDirFile.exists() && lastDirFile.isDirectory()) {
+                chooser.setCurrentDirectory(lastDirFile);
+            }
+
             if (chooser.showSaveDialog(this) != JFileChooser.APPROVE_OPTION) {
                 dispose();
                 return;
             }
             targetDirectory = chooser.getSelectedFile().toPath();
+            PREFS.put(LAST_DIR_KEY, targetDirectory.toAbsolutePath().toString());
+
             statusLbl.setText("Каталог: " + targetDirectory.getFileName());
         }
 
         final Path finalTargetDir = targetDirectory;
 
-        new SwingWorker<Void, Void>() {
+        worker = new SwingWorker<Void, Void>() {
             @Override protected Void doInBackground() {
                 service = new ReportExportService(ctx, new ReportExportService.ProgressListener() {
                     @Override public void onProgress(int current, int total, String stage, String message) {
+                        if (isCancelled()) return;
                         SwingUtilities.invokeLater(() -> updateProgress(current, total, stage, message));
                     }
                     @Override public void onDone(Path file, String suggestedName) {
+                        if (isCancelled()) return;
                         SwingUtilities.invokeLater(() -> onExportComplete(file, suggestedName, finalTargetDir != null));
                     }
                     @Override public void onError(Throwable t) {
+                        if (isCancelled()) return;
                         SwingUtilities.invokeLater(() -> onExportError(t));
                     }
                 });
                 service.export(type, keysCsv, filter, finalTargetDir);
                 return null;
             }
-        }.execute();
+        };
+        worker.execute();
     }
 
     private void updateProgress(int current, int total, String stage, String message) {
@@ -140,11 +159,8 @@ public class ReportExportDialog extends JDialog {
         }
     }
 
-    private void onExportComplete(Path tempFile, String suggestedName, boolean isDir) {
+    private void onExportComplete(Path resultPath, String suggestedName, boolean isDir) {
         if (cancelled) {
-            if (!isDir) {
-                try { Files.deleteIfExists(tempFile); } catch (Exception ignored) {}
-            }
             dispose();
             return;
         }
@@ -153,7 +169,7 @@ public class ReportExportDialog extends JDialog {
 
         if (isDir) {
             statusLbl.setText("Готово. Отчет сохранен в каталог.");
-            UiHelpers.showToast(this, "Сохранено в: " + tempFile.toAbsolutePath(), false);
+            UiHelpers.showToast(this, "Сохранено в: " + resultPath.toAbsolutePath(), false);
             dispose();
             return;
         }
@@ -165,15 +181,15 @@ public class ReportExportDialog extends JDialog {
         chooser.setSelectedFile(new File(suggestedName));
         int r = chooser.showSaveDialog(this);
         if (r != JFileChooser.APPROVE_OPTION) {
-            try { Files.deleteIfExists(tempFile); } catch (Exception ignored) {}
+            try { Files.deleteIfExists(resultPath); } catch (Exception ignored) {}
             dispose();
             return;
         }
         Path target = chooser.getSelectedFile().toPath();
 
         try {
-            Files.copy(tempFile, target, StandardCopyOption.REPLACE_EXISTING);
-            Files.deleteIfExists(tempFile);
+            Files.copy(resultPath, target, StandardCopyOption.REPLACE_EXISTING);
+            Files.deleteIfExists(resultPath);
             UiHelpers.showToast(this, "Сохранено: " + target.toAbsolutePath(), false);
             dispose();
         } catch (Exception e) {

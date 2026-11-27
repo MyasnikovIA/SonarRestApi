@@ -10,14 +10,20 @@ import ru.miacomsoft.sonar_gui.common.services.TagsService;
 import ru.miacomsoft.sonar_gui.tabs.report.dialogs.*;
 
 import javax.swing.*;
+import javax.swing.filechooser.FileNameExtensionFilter;
 import java.awt.*;
 import java.awt.event.MouseEvent;
+import java.io.File;
+import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.List;
+import java.util.prefs.Preferences;
 
 public class ReportPanel extends JPanel implements Reloadable {
 
     private static final String NO_TAGS_KEY = "__NO_TAGS__";
+    private static final Preferences PREFS = Preferences.userNodeForPackage(ReportPanel.class);
+    private static final String LAST_DIR_KEY = "last_report12_dir";
 
     private final GuiContext ctx;
 
@@ -41,7 +47,6 @@ public class ReportPanel extends JPanel implements Reloadable {
     private String filterText = "";
     private boolean isAllSelected = false;
 
-    // Ссылка на текущий активный загрузчик для возможности отмены
     private ReportLoader currentLoader;
 
     public ReportPanel(GuiContext ctx) {
@@ -161,7 +166,6 @@ public class ReportPanel extends JPanel implements Reloadable {
         scroll.getVerticalScrollBar().setUnitIncrement(16);
         add(scroll, BorderLayout.CENTER);
 
-        // Инициализация списка тегов и правил
         initFiltersAsync();
     }
 
@@ -194,9 +198,7 @@ public class ReportPanel extends JPanel implements Reloadable {
             return;
         }
 
-        // Отменяем предыдущую загрузку, если она еще работает
         if (currentLoader != null && !currentLoader.isDone()) {
-            System.out.println("[ReportPanel] Отмена предыдущей загрузки...");
             currentLoader.cancel(true);
         }
 
@@ -240,7 +242,6 @@ public class ReportPanel extends JPanel implements Reloadable {
         progressBar.setVisible(false);
         exportBtn.setEnabled(true);
 
-        // Сбрасываем глобальное выделение при перезагрузке
         isAllSelected = false;
         masterCheckbox.setSelected(false);
 
@@ -347,7 +348,6 @@ public class ReportPanel extends JPanel implements Reloadable {
 
     private void updateExportBtn() {
         int n = isAllSelected ? visibleCount() : collectSelected().size();
-        // Кнопка видна, если что-то выбрано ИЛИ если активен режим "Выбрать всё"
         exportBtn.setVisible(n > 0 || isAllSelected);
         exportBtn.setText(isAllSelected
                 ? "Действия со всеми (" + n + ")"
@@ -402,11 +402,70 @@ public class ReportPanel extends JPanel implements Reloadable {
     }
 
     private void startExport(ReportExportType type) {
+        // НОВОЕ: Обработка 12-го отчета (Сводка по проектам)
+        if (type == ReportExportType.MULTI_PROJECT_SUMMARY) {
+            new MultiProjectSelectDialog(ctx, selectedProjects -> {
+                if (selectedProjects == null || selectedProjects.isEmpty()) {
+                    UiHelpers.showToast(this, "Не выбрано ни одного проекта", true);
+                    return;
+                }
+
+                // --- Выбор файла сохранения с запоминанием последнего каталога ---
+                JFileChooser chooser = new JFileChooser();
+                chooser.setDialogTitle("Куда сохранить сводный отчет?");
+                chooser.setFileFilter(new FileNameExtensionFilter("HTML Report (*.html)", "html"));
+
+                String defaultName = "multi_project_summary_"
+                        + new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date()) + ".html";
+
+                String lastDir = PREFS.get(LAST_DIR_KEY, System.getProperty("user.home"));
+                File lastDirFile = new File(lastDir);
+                if (lastDirFile.exists() && lastDirFile.isDirectory()) {
+                    chooser.setCurrentDirectory(lastDirFile);
+                }
+
+                chooser.setSelectedFile(new File(chooser.getCurrentDirectory(), defaultName));
+
+                if (chooser.showSaveDialog(this) != JFileChooser.APPROVE_OPTION) {
+                    return;
+                }
+
+                File selectedFile = chooser.getSelectedFile();
+
+                if (selectedFile.getParentFile() != null) {
+                    PREFS.put(LAST_DIR_KEY, selectedFile.getParentFile().getAbsolutePath());
+                }
+
+                String outputPath = selectedFile.getAbsolutePath();
+                if (!outputPath.toLowerCase().endsWith(".html")) {
+                    outputPath += ".html";
+                }
+
+                ReportExportService.BaseFilter filter = new ReportExportService.BaseFilter();
+                filter.project        = ctx.getProject();
+                filter.severity       = sevDropdown.getSelectedCsv();
+                filter.quality        = qualDropdown.getSelectedCsv();
+                filter.hideProcessed  = ctx.isHideProcessed();
+                filter.tags           = tagsDropdown.getSelected();
+                filter.excludedTags   = excludedTagsDropdown.getSelected();
+                filter.rules          = rulesDropdown.getSelected();
+                filter.filterText     = filterText;
+                filter.statusFilter   = statusDropdown.getSelectedCsv();
+                filter.expectedTotal  = -1;
+
+                filter.selectedProjects = selectedProjects;
+                filter.outputFilePath = outputPath;
+
+                new ReportExportDialog(ctx, type, null, filter).setVisible(true);
+            }).setVisible(true);
+            return;
+        }
+
+        // Остальные отчеты (старая логика)
         List<String> keysCsv = null;
         int expectedTotal;
 
         if (!isAllSelected) {
-            // Ручной выбор
             List<IssueService.IssueDto> sel = collectSelected();
             if (sel.isEmpty()) {
                 UiHelpers.showToast(this, "Ничего не выбрано", true);
@@ -416,10 +475,7 @@ public class ReportPanel extends JPanel implements Reloadable {
             for (IssueService.IssueDto it : sel) keysCsv.add(it.key());
             expectedTotal = keysCsv.size();
         } else {
-            // Режим "Выбрать всё" (может быть вызван даже при 0 загруженных строк)
             expectedTotal = visibleCount();
-            // ОШИБКА БЫЛА ЗДЕСЬ: мы блокировали экспорт при 0 issues. Теперь мы этого не делаем.
-            // ReportExportService сам подсчитает точное количество и выгрузит данные.
         }
 
         ReportExportService.BaseFilter filter = new ReportExportService.BaseFilter();

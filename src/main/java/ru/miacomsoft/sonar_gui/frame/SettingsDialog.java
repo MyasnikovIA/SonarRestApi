@@ -20,6 +20,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Properties;
 
 /**
  * Единое модальное окно настроек приложения.
@@ -34,7 +35,7 @@ public class SettingsDialog extends JDialog {
     private final JTextField sqUserField = UiHelpers.darkField("");
     private final JComboBox<String> sqAuthCombo = UiHelpers.darkCombo(
             new String[]{"bearer", "basic", "cookie"}, "bearer");
-    private final JPasswordField sqTokenField = new JPasswordField();
+    private final JTextField sqTokenField = UiHelpers.darkField(""); // JTextField вместо JPasswordField для видимости
     private final JTextArea sqCookieArea = new JTextArea(3, 40);
     private final JLabel sqTokenStatusLbl = UiHelpers.dimLabel("");
     private final JLabel sqCookieStatusLbl = UiHelpers.dimLabel("");
@@ -49,15 +50,14 @@ public class SettingsDialog extends JDialog {
     private final JLabel     jiraStatusLbl      = UiHelpers.dimLabel("не загружено");
     private final JLabel     jiraSessionFileLbl = UiHelpers.dimLabel("session.txt");
 
-    // ========== Jira Epics (Динамические поля) ==========
-    // Ключ: "SECURITY.BLOCKER", значение: поле ввода
+    // ========== Jira Epics ==========
     private final Map<String, JTextField> epicFields = new LinkedHashMap<>();
-
     private static final String[] QUALS = {"SECURITY", "RELIABILITY", "MAINTAINABILITY", "SECURITY_HOTSPOT"};
     private static final String[] SEVS  = {"BLOCKER", "HIGH", "MEDIUM", "LOW", "INFO"};
 
-    // ========== Team CSV ==========
-    private final JLabel csvStatusLbl = UiHelpers.dimLabel("Файл не загружен");
+    // ========== CSV (Mapping) ==========
+    private final JLabel teamCsvStatusLbl = UiHelpers.dimLabel("team_mapping.csv не загружен");
+    private final JLabel productCsvStatusLbl = UiHelpers.dimLabel("product_mapping.csv не загружен");
 
     // ========== Ollama ==========
     private final JTextField olUrlField = UiHelpers.darkField("");
@@ -79,7 +79,6 @@ public class SettingsDialog extends JDialog {
         this.onSaved = onSaved;
         this.olTestBtn = UiHelpers.secondaryButton("Проверить");
 
-        // Инициализация полей для эпиков
         for (String q : QUALS) {
             for (String s : SEVS) {
                 epicFields.put(q + "." + s, UiHelpers.darkField(""));
@@ -87,7 +86,7 @@ public class SettingsDialog extends JDialog {
         }
 
         setDefaultCloseOperation(DISPOSE_ON_CLOSE);
-        setSize(1050, 900); // Увеличили размер для всех полей
+        setSize(1050, 920);
         setLocationRelativeTo(getOwner());
 
         JPanel root = new JPanel(new BorderLayout());
@@ -101,7 +100,7 @@ public class SettingsDialog extends JDialog {
 
         tabs.addTab("  SonarQube  ",      buildSonarQubePanel());
         tabs.addTab("  Jira  ",           buildJiraPanel());
-        tabs.addTab("  Команды (CSV)  ",  buildCsvPanel());
+        tabs.addTab("  Привязка (CSV)  ", buildCsvPanel());
         tabs.addTab("  Ollama  ",         buildOllamaPanel());
         tabs.addTab("  Промпты  ",        buildPromptsPanel());
 
@@ -213,7 +212,6 @@ public class SettingsDialog extends JDialog {
         scroll.setPreferredSize(new Dimension(0, 120));
         p.add(scroll, BorderLayout.CENTER);
 
-        // Нижний блок: jira.properties + эпики + кнопки
         JPanel bottom = new JPanel();
         bottom.setLayout(new BoxLayout(bottom, BoxLayout.Y_AXIS));
         bottom.setOpaque(false);
@@ -229,7 +227,6 @@ public class SettingsDialog extends JDialog {
         bottom.add(row("jira.assignee", jiraAssigneeField));
         bottom.add(Box.createVerticalStrut(10));
 
-        // === Эпики (Сетка) ===
         JPanel epicsGrid = new JPanel(new GridLayout(0, 2, 8, 4));
         epicsGrid.setOpaque(false);
         epicsGrid.setBorder(BorderFactory.createTitledBorder(
@@ -328,7 +325,7 @@ public class SettingsDialog extends JDialog {
     }
 
     // ================================================================
-    // 3. CSV (Team Mapping)
+    // 3. CSV (Team & Product Mapping)
     // ================================================================
     private JPanel buildCsvPanel() {
         JPanel p = new JPanel();
@@ -336,20 +333,38 @@ public class SettingsDialog extends JDialog {
         p.setBackground(GuiStyle.BG);
         p.setBorder(BorderFactory.createEmptyBorder(14, 14, 14, 14));
 
-        JLabel desc = new JLabel(UiHelpers.wrapHtml(
-                "<html>Файл <b>team_mapping.csv</b> используется для привязки файлов к командам " +
-                        "и модулям.<br>Загрузите с локального диска — файл будет сохранён в корне программы.</html>"));
-        desc.setForeground(GuiStyle.TEXT);
-        p.add(desc);
-        p.add(Box.createVerticalStrut(16));
+        // --- Team Mapping ---
+        JLabel descTeam = new JLabel(UiHelpers.wrapHtml(
+                "<html><b>team_mapping.csv</b> — используется для привязки файлов к командам и модулям.</html>"));
+        descTeam.setForeground(GuiStyle.TEXT);
+        p.add(descTeam);
+        p.add(Box.createVerticalStrut(8));
 
-        JPanel row = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
-        row.setOpaque(false);
-        JButton loadBtn = UiHelpers.primaryButton("📂 Загрузить team_mapping.csv");
-        loadBtn.addActionListener(e -> loadTeamMappingCsv());
-        row.add(loadBtn);
-        row.add(csvStatusLbl);
-        p.add(row);
+        JPanel rowTeam = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
+        rowTeam.setOpaque(false);
+        JButton loadTeamBtn = UiHelpers.primaryButton("📂 Загрузить team_mapping.csv");
+        loadTeamBtn.addActionListener(e -> loadTeamMappingCsv());
+        rowTeam.add(loadTeamBtn);
+        rowTeam.add(teamCsvStatusLbl);
+        p.add(rowTeam);
+
+        p.add(Box.createVerticalStrut(24));
+
+        // --- Product Mapping ---
+        JLabel descProduct = new JLabel(UiHelpers.wrapHtml(
+                "<html><b>product_mapping.csv</b> — связывает проекты SonarQube (Sonar_ID) с продуктами и командами-владельцами.<br>" +
+                        "Используется для будущих отчетов по продуктам.</html>"));
+        descProduct.setForeground(GuiStyle.TEXT);
+        p.add(descProduct);
+        p.add(Box.createVerticalStrut(8));
+
+        JPanel rowProduct = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
+        rowProduct.setOpaque(false);
+        JButton loadProductBtn = UiHelpers.primaryButton("📂 Загрузить product_mapping.csv");
+        loadProductBtn.addActionListener(e -> loadProductMappingCsv());
+        rowProduct.add(loadProductBtn);
+        rowProduct.add(productCsvStatusLbl);
+        p.add(rowProduct);
 
         return p;
     }
@@ -360,12 +375,26 @@ public class SettingsDialog extends JDialog {
         if (chooser.showOpenDialog(this) == JFileChooser.APPROVE_OPTION) {
             try {
                 Path target = Path.of("team_mapping.csv").toAbsolutePath();
-                Files.copy(chooser.getSelectedFile().toPath(), target,
-                        StandardCopyOption.REPLACE_EXISTING);
-                csvStatusLbl.setText("✓ Загружен");
-                csvStatusLbl.setForeground(GuiStyle.OK);
+                Files.copy(chooser.getSelectedFile().toPath(), target, StandardCopyOption.REPLACE_EXISTING);
+                teamCsvStatusLbl.setText("✓ Загружен");
+                teamCsvStatusLbl.setForeground(GuiStyle.OK);
             } catch (Exception e) {
                 UiHelpers.showError(this, "Ошибка загрузки team_mapping.csv: " + e.getMessage());
+            }
+        }
+    }
+
+    private void loadProductMappingCsv() {
+        JFileChooser chooser = new JFileChooser();
+        chooser.setDialogTitle("Выберите product_mapping.csv");
+        if (chooser.showOpenDialog(this) == JFileChooser.APPROVE_OPTION) {
+            try {
+                Path target = Path.of("product_mapping.csv").toAbsolutePath();
+                Files.copy(chooser.getSelectedFile().toPath(), target, StandardCopyOption.REPLACE_EXISTING);
+                productCsvStatusLbl.setText("✓ Загружен");
+                productCsvStatusLbl.setForeground(GuiStyle.OK);
+            } catch (Exception e) {
+                UiHelpers.showError(this, "Ошибка загрузки product_mapping.csv: " + e.getMessage());
             }
         }
     }
@@ -614,16 +643,22 @@ public class SettingsDialog extends JDialog {
         Path file = ctx.sessionFile();
         if (file != null && Files.exists(file)) {
             try {
-                java.util.Properties p = new java.util.Properties();
+                Properties p = new Properties();
                 try (var in = Files.newInputStream(file)) { p.load(in); }
                 sqUrlField.setText(p.getProperty("sonar.url", ""));
                 sqUserField.setText(p.getProperty("sonar.user", ""));
                 String auth = p.getProperty("sonar.auth", "bearer");
                 sqAuthCombo.setSelectedItem(auth);
-                sqTokenStatusLbl.setText(p.getProperty("sonar.token", "").isBlank()
-                        ? "— не задан" : "✓ установлен");
-                sqCookieStatusLbl.setText(p.getProperty("sonar.cookie", "").isBlank()
-                        ? "— не задан" : "✓ установлен");
+
+                // Читаем токен и куки в поля
+                String token = p.getProperty("sonar.token", "");
+                sqTokenField.setText(token);
+                sqTokenStatusLbl.setText(token.isBlank() ? "— не задан" : "✓ установлен");
+
+                String cookie = p.getProperty("sonar.cookie", "");
+                sqCookieArea.setText(cookie);
+                sqCookieStatusLbl.setText(cookie.isBlank() ? "— не задан" : "✓ установлен");
+
             } catch (Exception ignored) {}
         }
     }
@@ -648,19 +683,20 @@ public class SettingsDialog extends JDialog {
         jiraTeamField.setText(jcfg.team());
         jiraAssigneeField.setText(jcfg.assignee());
 
-        // Загрузка эпиков
         for (Map.Entry<String, JTextField> entry : epicFields.entrySet()) {
             String[] parts = entry.getKey().split("\\.");
-            String qual = parts[0];
-            String sev = parts[1];
-            entry.getValue().setText(jcfg.getEpic(qual, sev));
+            entry.getValue().setText(jcfg.getEpic(parts[0], parts[1]));
         }
     }
 
     private void loadCsvStatus() {
         if (Files.exists(Path.of("team_mapping.csv"))) {
-            csvStatusLbl.setText("✓ Файл найден");
-            csvStatusLbl.setForeground(GuiStyle.OK);
+            teamCsvStatusLbl.setText("✓ Файл найден");
+            teamCsvStatusLbl.setForeground(GuiStyle.OK);
+        }
+        if (Files.exists(Path.of("product_mapping.csv"))) {
+            productCsvStatusLbl.setText("✓ Файл найден");
+            productCsvStatusLbl.setForeground(GuiStyle.OK);
         }
     }
 
@@ -690,7 +726,7 @@ public class SettingsDialog extends JDialog {
         String url = sqUrlField.getText().trim();
         String user = sqUserField.getText().trim();
         String auth = (String) sqAuthCombo.getSelectedItem();
-        String token = new String(sqTokenField.getPassword()).trim();
+        String token = sqTokenField.getText().trim(); // Берем значение из JTextField
         String cookie = sqCookieArea.getText().trim();
 
         if (url.isEmpty()) {
@@ -748,7 +784,6 @@ public class SettingsDialog extends JDialog {
                 Files.createDirectories(file.toAbsolutePath().getParent());
                 Files.writeString(file, sb.toString(), StandardCharsets.UTF_8);
 
-                // Применяем настройки
                 ctx.state().update(sb.toString());
                 ctx.state().reload();
                 ctx.ollamaConfig().reload();

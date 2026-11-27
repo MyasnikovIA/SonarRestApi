@@ -40,13 +40,22 @@ public class ReportExportDialog extends JDialog {
     private long startTimeMs;
     private Timer uiTimer;
 
+    // Существующий конструктор
     public ReportExportDialog(GuiContext ctx, ReportExportType type,
                               List<String> keysCsv, ReportExportService.BaseFilter filter) {
+        this(ctx, type, keysCsv, filter, null);
+    }
+
+    // НОВЫЙ КОНСТРУКТОР с поддержкой targetDir
+    public ReportExportDialog(GuiContext ctx, ReportExportType type,
+                              List<String> keysCsv, ReportExportService.BaseFilter filter,
+                              Path targetDir) {
         super((Frame) null, "Экспорт: " + type.title, true);
         this.ctx = ctx;
         this.type = type;
         this.keysCsv = keysCsv;
         this.filter = filter;
+        this.targetDirectory = targetDir;
 
         setDefaultCloseOperation(DISPOSE_ON_CLOSE);
         setSize(640, 260);
@@ -82,7 +91,6 @@ public class ReportExportDialog extends JDialog {
         metaBottom.add(rightMeta, BorderLayout.EAST);
 
         info.add(metaBottom, BorderLayout.SOUTH);
-
         root.add(info, BorderLayout.CENTER);
 
         JPanel footer = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
@@ -108,11 +116,12 @@ public class ReportExportDialog extends JDialog {
                 type == ReportExportType.TEAM_HTML ||
                 type == ReportExportType.QUAL_TEAM_HTML ||
                 type == ReportExportType.LLM_MD_ZIP ||
-                type == ReportExportType.TEAM_MODULE_ZIP;
+                type == ReportExportType.TEAM_MODULE_ZIP ||
+                type == ReportExportType.QUAL_TEAM_PROJECT_HTML; // <-- Добавлен отчет 13
     }
 
     private void startExport() {
-        if (isMultiFile()) {
+        if (isMultiFile() && targetDirectory == null) {
             JFileChooser chooser = new JFileChooser();
             chooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
             chooser.setDialogTitle("Выберите каталог для сохранения отчета");
@@ -129,13 +138,14 @@ public class ReportExportDialog extends JDialog {
             }
             targetDirectory = chooser.getSelectedFile().toPath();
             PREFS.put(LAST_DIR_KEY, targetDirectory.toAbsolutePath().toString());
+        }
 
+        if (targetDirectory != null) {
             statusLbl.setText("Каталог: " + targetDirectory.getFileName());
         }
 
         final Path finalTargetDir = targetDirectory;
 
-        // Запускаем таймер
         startTimeMs = System.currentTimeMillis();
         uiTimer = new Timer(500, e -> {
             long elapsed = System.currentTimeMillis() - startTimeMs;

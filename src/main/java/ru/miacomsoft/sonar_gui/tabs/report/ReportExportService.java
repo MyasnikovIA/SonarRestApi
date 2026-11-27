@@ -33,7 +33,7 @@ public class ReportExportService {
         public int expectedTotal        = -1;
         public List<String> selectedProjects = new ArrayList<>();
         public String outputFilePath = null;
-        public boolean createJiraTasks = false; // НОВОЕ ПОЛЕ
+        public boolean createJiraTasks = false;
     }
 
     private static final String NO_TAGS_MARKER = "__NO_TAGS__";
@@ -102,7 +102,7 @@ public class ReportExportService {
             if (filter.outputFilePath != null && !filter.outputFilePath.isBlank()) {
                 outputPath = Path.of(filter.outputFilePath);
             }
-            outPath = exportMultiProjectSummary(filter.selectedProjects, outputPath);
+            outPath = exportMultiProjectSummary(filter.selectedProjects, outputPath, filter);
         } else if (type == ReportExportType.QUAL_TEAM_PROJECT_HTML) {
             if (filter == null || filter.selectedProjects == null || filter.selectedProjects.isEmpty()) {
                 throw new IllegalArgumentException("Не выбрано ни одного проекта.");
@@ -160,8 +160,7 @@ public class ReportExportService {
 
     // ============ MULTI-PROJECT SUMMARY (12) ============
 
-    private Path exportMultiProjectSummary(List<String> projectKeys, Path outputFilePath) throws Exception {
-        // ... (остается без изменений, как в предыдущем коде) ...
+    private Path exportMultiProjectSummary(List<String> projectKeys, Path outputFilePath, BaseFilter filter) throws Exception {
         String host = hostOf();
         String[] qualities = {"SECURITY", "RELIABILITY", "MAINTAINABILITY", "SECURITY_HOTSPOT"};
         String[] severities = {"BLOCKER", "HIGH", "MEDIUM", "LOW", "INFO"};
@@ -208,9 +207,10 @@ public class ReportExportService {
 
             log("[ReportExportService] Multi-Summary: загрузка проекта " + project + " (" + processedProjects + "/" + totalProjects + ")");
 
-            List<Issue> issues = new ArrayList<>();
+            List<Issue> rawIssues = new ArrayList<>();
             try {
-                issues = api.fetchAllByParts(SonarIssuesApi.ALL_STATUSES, "ALL", "ALL",
+                String statuses = resolveStatuses(filter);
+                rawIssues = api.fetchAllByParts(statuses, filter.severity, filter.quality,
                         (cur, tot, msg) -> {
                             if (listener != null) {
                                 listener.onProgress(cur, tot, "fetching", project + ": " + msg);
@@ -231,8 +231,10 @@ public class ReportExportService {
             if (cancelled) throw new InterruptedException("cancelled");
 
             Map<String, Issue> uniqueIssues = new LinkedHashMap<>();
-            for (Issue it : issues) {
-                uniqueIssues.put(it.key, it);
+            for (Issue it : rawIssues) {
+                if (passesClientFilters(it, filter)) {
+                    uniqueIssues.put(it.key, it);
+                }
             }
 
             for (Issue it : uniqueIssues.values()) {
@@ -311,10 +313,9 @@ public class ReportExportService {
         return targetDir;
     }
 
-    // ============ ОСТАЛЬНЫЕ МЕТОДЫ (без изменений) ============
+    // ============ ОСТАЛЬНЫЕ МЕТОДЫ ============
 
     private List<Issue> loadByKeys(String project, List<String> keys) throws Exception {
-        // (код из предыдущей версии)
         SonarIssuesApi api = ctx.state().newApi(project);
         List<Issue> out = new ArrayList<>();
         int batchSize = 100;
@@ -348,7 +349,6 @@ public class ReportExportService {
     }
 
     private List<Issue> collectByFilters(BaseFilter f) throws Exception {
-        // (код из предыдущей версии)
         SonarIssuesApi api = ctx.state().newApi(f.project);
 
         String statuses = resolveStatuses(f);
@@ -427,7 +427,7 @@ public class ReportExportService {
         return result;
     }
 
-    private String resolveStatuses(BaseFilter f) {
+    public static String resolveStatuses(BaseFilter f) {
         String s = f.statusFilter;
         if (s == null || s.isEmpty() || "ALL".equalsIgnoreCase(s)) {
             return f.hideProcessed ? SonarIssuesApi.ACTIVE_STATUSES : SonarIssuesApi.ALL_STATUSES;
@@ -435,7 +435,7 @@ public class ReportExportService {
         return s;
     }
 
-    private boolean passesClientFilters(Issue issue, BaseFilter f) {
+    public static boolean passesClientFilters(Issue issue, BaseFilter f) {
         if (!f.tags.isEmpty()) {
             List<String> itTags = issue.tags != null ? issue.tags : List.of();
             boolean hasMatch = false;

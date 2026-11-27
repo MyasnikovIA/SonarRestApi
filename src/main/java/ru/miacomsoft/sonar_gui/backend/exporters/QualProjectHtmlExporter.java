@@ -32,14 +32,21 @@ public class QualProjectHtmlExporter {
             System.out.println("[QualProjectHtmlExporter] Загрузка проекта " + project + " (" + currentProject + "/" + totalProjects + ")");
 
             SonarIssuesApi api = ctx.state().newApi(project);
-            List<Issue> issues = api.fetchAllByParts(SonarIssuesApi.ALL_STATUSES, filter.severity, filter.quality,
+            String statuses = ReportExportService.resolveStatuses(filter);
+
+            // Загружаем ВСЕ issues, соответствующие базовым фильтрам SonarQube (status, sev, qual)
+            List<Issue> rawIssues = api.fetchAllByParts(statuses, filter.severity, filter.quality,
                     (cur, tot, msg) -> {
                         if (listener != null) listener.onProgress(cur, tot, "fetching", project + ": " + msg);
                     });
 
-            // Дедупликация по ключу (на случай мульти-импактов)
+            // Дедупликация и применение КЛИЕНТСКИХ фильтров (теги, правила, текст)
             Map<String, Issue> uniqueIssues = new LinkedHashMap<>();
-            for (Issue it : issues) uniqueIssues.put(it.key, it);
+            for (Issue it : rawIssues) {
+                if (ReportExportService.passesClientFilters(it, filter)) {
+                    uniqueIssues.put(it.key, it);
+                }
+            }
 
             // Группировка: QUAL -> SEV -> Файл -> Issues
             Map<String, Map<String, Map<String, List<Issue>>>> structured = new TreeMap<>();
@@ -51,6 +58,11 @@ public class QualProjectHtmlExporter {
                     for (Issue.Impact im : it.impacts) {
                         String qual = im.softwareQuality != null ? im.softwareQuality.toUpperCase() : "MAINTAINABILITY";
                         String sev = im.severity != null ? im.severity.toUpperCase() : "INFO";
+
+                        // Проверяем, что impact попадает под выбранные фильтры (на случай если у issue несколько impacts)
+                        if (filter.quality != null && !"ALL".equalsIgnoreCase(filter.quality) && !filter.quality.contains(qual)) continue;
+                        if (filter.severity != null && !"ALL".equalsIgnoreCase(filter.severity) && !filter.severity.contains(sev)) continue;
+
                         structured.computeIfAbsent(qual, k -> new TreeMap<>())
                                 .computeIfAbsent(sev, k -> new TreeMap<>())
                                 .computeIfAbsent(it.component, k -> new ArrayList<>()).add(it);
@@ -58,6 +70,10 @@ public class QualProjectHtmlExporter {
                 } else if (it.severity != null) {
                     String qual = "MAINTAINABILITY";
                     String sev = it.severity.toUpperCase();
+
+                    if (filter.quality != null && !"ALL".equalsIgnoreCase(filter.quality) && !filter.quality.contains(qual)) continue;
+                    if (filter.severity != null && !"ALL".equalsIgnoreCase(filter.severity) && !filter.severity.contains(sev)) continue;
+
                     structured.computeIfAbsent(qual, k -> new TreeMap<>())
                             .computeIfAbsent(sev, k -> new TreeMap<>())
                             .computeIfAbsent(it.component, k -> new ArrayList<>()).add(it);
@@ -66,14 +82,15 @@ public class QualProjectHtmlExporter {
 
             String productName = "Без имени продукта";
             String teamOwner = "PFM134"; // По умолчанию из задачи
+
             ProductMapping.ProductInfo info = pm.findInfo(project);
             if (info != null) {
                 if (info.product != null && !info.product.isBlank()) productName = info.product.trim();
                 if (info.teamOwner != null && !info.teamOwner.isBlank()) teamOwner = info.teamOwner.trim();
             }
 
-            Path productDir = rootDir.resolve(productName);
-            Path projectDir = productDir.resolve(project);
+            Path productDir = rootDir.resolve(sanitizePathPart(productName));
+            Path projectDir = productDir.resolve(sanitizePathPart(project));
 
             for (var qualEntry : structured.entrySet()) {
                 String qual = qualEntry.getKey();
@@ -97,7 +114,7 @@ public class QualProjectHtmlExporter {
                         }
                     }
 
-                    // Запись HTML-файлов (используем стандартный экспортер)
+                    // Запись HTML-файлов
                     HtmlPerFileExporter.writeDirectory(
                             targetDir, byFile, snippets, project, host, false, null, null
                     );
@@ -156,22 +173,25 @@ public class QualProjectHtmlExporter {
                 fields.put("assignee", new JSONObject().put("name", me.name()));
             }
 
+            // Определение эпика
             String epicKey = jcfg.getEpic(qual, sev);
             if (epicKey == null || epicKey.isBlank()) {
                 epicKey = jcfg.defaultEpic();
             }
 
-            Map<String, JiraFieldService.FieldMeta> meta = fieldService.getCreatemeta(jcfg.defaultProject(), jcfg.issueType());
-            String epicFieldId = null;
-            for (JiraFieldService.FieldMeta fm : meta.values()) {
-                if ("Epic Link".equalsIgnoreCase(fm.name())) {
-                    epicFieldId = fm.id();
-                    break;
+            if (epicKey != null && !epicKey.isBlank()) {
+                Map<String, JiraFieldService.FieldMeta> meta = fieldService.getCreatemeta(jcfg.defaultProject(), jcfg.issueType());
+                String epicFieldId = null;
+                for (JiraFieldService.FieldMeta fm : meta.values()) {
+                    if ("Epic Link".equalsIgnoreCase(fm.name())) {
+                        epicFieldId = fm.id();
+                        break;
+                    }
                 }
-            }
 
-            if (epicFieldId != null && !epicKey.isBlank()) {
-                fields.put(epicFieldId, epicKey);
+                if (epicFieldId != null) {
+                    fields.put(epicFieldId, epicKey);
+                }
             }
 
             JiraIssueService issueService = new JiraIssueService(jiraClient, session.baseUrl(), fieldService, null);
@@ -192,5 +212,11 @@ public class QualProjectHtmlExporter {
             if (h == null || h.isBlank()) return "sonar";
             return (p > 0 && p != 80 && p != 443) ? h + ":" + p : h;
         } catch (Exception e) { return "sonar"; }
+    }
+
+    private static String sanitizePathPart(String s) {
+        if (s == null || s.trim().isEmpty()) return "Без_названия";
+        // Заменяем недопустимые символы и убираем лишние пробелы
+        return s.trim().replaceAll("[\\\\/:*?\"<>|]", "_").replaceAll("\\s+", "_");
     }
 }

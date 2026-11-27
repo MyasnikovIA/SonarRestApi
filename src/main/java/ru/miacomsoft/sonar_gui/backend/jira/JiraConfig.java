@@ -30,7 +30,7 @@ public final class JiraConfig {
     private String components;
     private String assignee;
 
-    // Новое: словарь эпиков (ключ: "qual.sev" в нижнем регистре)
+    // Словарь эпиков (ключ: "qual.sev" в нижнем регистре)
     private final Map<String, String> epics = new HashMap<>();
 
     private JiraConfig(Path configFile) {
@@ -63,13 +63,30 @@ public final class JiraConfig {
         this.assignee       = "me";
         epics.clear();
 
-        // Значения по умолчанию для эпиков
+        // Значения по умолчанию для эпиков (только заданные пользователем)
         epics.put("security.blocker", "MEDDEV-172524");
         epics.put("security.high", "MEDDEV-172525");
+        epics.put("security.medium", "");
+        epics.put("security.low", "");
+        epics.put("security.info", "");
+
         epics.put("reliability.blocker", "MEDDEV-172527");
         epics.put("reliability.high", "MEDDEV-172526");
+        epics.put("reliability.medium", "");
+        epics.put("reliability.low", "");
+        epics.put("reliability.info", "");
+
         epics.put("maintainability.blocker", "MEDDEV-172528");
         epics.put("maintainability.high", "MEDDEV-172529");
+        epics.put("maintainability.medium", "");
+        epics.put("maintainability.low", "");
+        epics.put("maintainability.info", "");
+
+        epics.put("security_hotspot.blocker", "");
+        epics.put("security_hotspot.high", "");
+        epics.put("security_hotspot.medium", "");
+        epics.put("security_hotspot.low", "");
+        epics.put("security_hotspot.info", "");
 
         if (Files.exists(configFile)) {
             try (Reader reader = Files.newBufferedReader(configFile, StandardCharsets.UTF_8)) {
@@ -84,7 +101,7 @@ public final class JiraConfig {
                 components     = safe(p.getProperty("jira.components"),     components);
                 assignee       = safe(p.getProperty("jira.assignee"),       assignee);
 
-                // Чтение эпиков
+                // Чтение эпиков (все, что есть в файле)
                 for (String key : p.stringPropertyNames()) {
                     if (key.startsWith("jira.epic.")) {
                         String epicKey = key.substring("jira.epic.".length()).toLowerCase();

@@ -2,7 +2,6 @@ package ru.miacomsoft.sonar_gui.backend;
 
 /**
  * Шаблоны файлов, которые приложение создаёт при первом запуске.
- * Существующие файлы никогда не перезаписываются.
  */
 public final class Defaults {
 
@@ -37,12 +36,33 @@ public final class Defaults {
             jira.assignee=me
             
             # --- Jira Epics (QUAL:SEV) ---
+            # Безопасность (SECURITY)
             jira.epic.security.blocker=MEDDEV-172524
             jira.epic.security.high=MEDDEV-172525
+            jira.epic.security.medium=
+            jira.epic.security.low=
+            jira.epic.security.info=
+            
+            # Надежность (RELIABILITY)
             jira.epic.reliability.blocker=MEDDEV-172527
             jira.epic.reliability.high=MEDDEV-172526
+            jira.epic.reliability.medium=
+            jira.epic.reliability.low=
+            jira.epic.reliability.info=
+            
+            # Сопровождаемость (MAINTAINABILITY)
             jira.epic.maintainability.blocker=MEDDEV-172528
             jira.epic.maintainability.high=MEDDEV-172529
+            jira.epic.maintainability.medium=
+            jira.epic.maintainability.low=
+            jira.epic.maintainability.info=
+            
+            # Уязвимости (SECURITY_HOTSPOT)
+            jira.epic.security_hotspot.blocker=
+            jira.epic.security_hotspot.high=
+            jira.epic.security_hotspot.medium=
+            jira.epic.security_hotspot.low=
+            jira.epic.security_hotspot.info=
             """;
 
     // ============================================================

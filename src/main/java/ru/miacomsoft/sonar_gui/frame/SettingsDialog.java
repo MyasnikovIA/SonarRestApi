@@ -18,6 +18,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 /**
  * Единое модальное окно настроек приложения.
@@ -47,13 +49,12 @@ public class SettingsDialog extends JDialog {
     private final JLabel     jiraStatusLbl      = UiHelpers.dimLabel("не загружено");
     private final JLabel     jiraSessionFileLbl = UiHelpers.dimLabel("session.txt");
 
-    // ========== Jira Epics ==========
-    private final JTextField epicSecBlockerField = UiHelpers.darkField("");
-    private final JTextField epicSecHighField    = UiHelpers.darkField("");
-    private final JTextField epicRelBlockerField = UiHelpers.darkField("");
-    private final JTextField epicRelHighField    = UiHelpers.darkField("");
-    private final JTextField epicMaintBlockerField = UiHelpers.darkField("");
-    private final JTextField epicMaintHighField    = UiHelpers.darkField("");
+    // ========== Jira Epics (Динамические поля) ==========
+    // Ключ: "SECURITY.BLOCKER", значение: поле ввода
+    private final Map<String, JTextField> epicFields = new LinkedHashMap<>();
+
+    private static final String[] QUALS = {"SECURITY", "RELIABILITY", "MAINTAINABILITY", "SECURITY_HOTSPOT"};
+    private static final String[] SEVS  = {"BLOCKER", "HIGH", "MEDIUM", "LOW", "INFO"};
 
     // ========== Team CSV ==========
     private final JLabel csvStatusLbl = UiHelpers.dimLabel("Файл не загружен");
@@ -78,8 +79,15 @@ public class SettingsDialog extends JDialog {
         this.onSaved = onSaved;
         this.olTestBtn = UiHelpers.secondaryButton("Проверить");
 
+        // Инициализация полей для эпиков
+        for (String q : QUALS) {
+            for (String s : SEVS) {
+                epicFields.put(q + "." + s, UiHelpers.darkField(""));
+            }
+        }
+
         setDefaultCloseOperation(DISPOSE_ON_CLOSE);
-        setSize(1000, 850); // Чуть увеличили высоту из-за новых полей
+        setSize(1050, 900); // Увеличили размер для всех полей
         setLocationRelativeTo(getOwner());
 
         JPanel root = new JPanel(new BorderLayout());
@@ -182,7 +190,7 @@ public class SettingsDialog extends JDialog {
     }
 
     // ================================================================
-    // 2. Jira
+    // 2. Jira (включая Эпики)
     // ================================================================
     private JPanel buildJiraPanel() {
         JPanel p = new JPanel(new BorderLayout(0, 8));
@@ -202,7 +210,7 @@ public class SettingsDialog extends JDialog {
         jiraSessionArea.setLineWrap(false);
         JScrollPane scroll = new JScrollPane(jiraSessionArea);
         scroll.setBorder(BorderFactory.createLineBorder(GuiStyle.BORDER));
-        scroll.setPreferredSize(new Dimension(0, 150));
+        scroll.setPreferredSize(new Dimension(0, 120));
         p.add(scroll, BorderLayout.CENTER);
 
         // Нижний блок: jira.properties + эпики + кнопки
@@ -221,29 +229,26 @@ public class SettingsDialog extends JDialog {
         bottom.add(row("jira.assignee", jiraAssigneeField));
         bottom.add(Box.createVerticalStrut(10));
 
-        // === Эпики ===
-        JPanel epicPanel = new JPanel(new GridLayout(6, 2, 8, 6));
-        epicPanel.setOpaque(false);
-        epicPanel.setBorder(BorderFactory.createTitledBorder(
+        // === Эпики (Сетка) ===
+        JPanel epicsGrid = new JPanel(new GridLayout(0, 2, 8, 4));
+        epicsGrid.setOpaque(false);
+        epicsGrid.setBorder(BorderFactory.createTitledBorder(
                 BorderFactory.createLineBorder(GuiStyle.BORDER),
                 "Эпики (QUAL:SEV)", 0, 0, GuiStyle.FONT_BOLD, GuiStyle.TEXT_DIM));
 
-        epicPanel.add(UiHelpers.dimLabel("Безопасность, BLOCKER"));
-        epicPanel.add(epicSecBlockerField);
-        epicPanel.add(UiHelpers.dimLabel("Безопасность, HIGH"));
-        epicPanel.add(epicSecHighField);
+        for (String q : QUALS) {
+            for (String s : SEVS) {
+                String key = q + "." + s;
+                epicsGrid.add(UiHelpers.dimLabel(mapQual(q) + ", " + s));
+                epicsGrid.add(epicFields.get(key));
+            }
+        }
 
-        epicPanel.add(UiHelpers.dimLabel("Надежность, BLOCKER"));
-        epicPanel.add(epicRelBlockerField);
-        epicPanel.add(UiHelpers.dimLabel("Надежность, HIGH"));
-        epicPanel.add(epicRelHighField);
-
-        epicPanel.add(UiHelpers.dimLabel("Сопровождаемость, BLOCKER"));
-        epicPanel.add(epicMaintBlockerField);
-        epicPanel.add(UiHelpers.dimLabel("Сопровождаемость, HIGH"));
-        epicPanel.add(epicMaintHighField);
-
-        bottom.add(epicPanel);
+        JScrollPane epicsScroll = new JScrollPane(epicsGrid);
+        epicsScroll.setBorder(BorderFactory.createEmptyBorder());
+        epicsScroll.setPreferredSize(new Dimension(0, 220));
+        epicsScroll.getViewport().setOpaque(false);
+        bottom.add(epicsScroll);
         bottom.add(Box.createVerticalStrut(10));
 
         JPanel btns = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
@@ -267,6 +272,16 @@ public class SettingsDialog extends JDialog {
 
         p.add(bottom, BorderLayout.SOUTH);
         return p;
+    }
+
+    private String mapQual(String q) {
+        return switch (q) {
+            case "SECURITY" -> "Безопасность";
+            case "RELIABILITY" -> "Надежность";
+            case "MAINTAINABILITY" -> "Сопровождаемость";
+            case "SECURITY_HOTSPOT" -> "Уязвимости";
+            default -> q;
+        };
     }
 
     private void loadJiraSessionFromFile() {
@@ -634,12 +649,12 @@ public class SettingsDialog extends JDialog {
         jiraAssigneeField.setText(jcfg.assignee());
 
         // Загрузка эпиков
-        epicSecBlockerField.setText(jcfg.getEpic("SECURITY", "BLOCKER"));
-        epicSecHighField.setText(jcfg.getEpic("SECURITY", "HIGH"));
-        epicRelBlockerField.setText(jcfg.getEpic("RELIABILITY", "BLOCKER"));
-        epicRelHighField.setText(jcfg.getEpic("RELIABILITY", "HIGH"));
-        epicMaintBlockerField.setText(jcfg.getEpic("MAINTAINABILITY", "BLOCKER"));
-        epicMaintHighField.setText(jcfg.getEpic("MAINTAINABILITY", "HIGH"));
+        for (Map.Entry<String, JTextField> entry : epicFields.entrySet()) {
+            String[] parts = entry.getKey().split("\\.");
+            String qual = parts[0];
+            String sev = parts[1];
+            entry.getValue().setText(jcfg.getEpic(qual, sev));
+        }
     }
 
     private void loadCsvStatus() {
@@ -722,12 +737,10 @@ public class SettingsDialog extends JDialog {
 
         // --- Эпики ---
         sb.append("# --- Jira Epics (QUAL:SEV) ---\n");
-        sb.append("jira.epic.security.blocker=").append(epicSecBlockerField.getText().trim()).append('\n');
-        sb.append("jira.epic.security.high=").append(epicSecHighField.getText().trim()).append('\n');
-        sb.append("jira.epic.reliability.blocker=").append(epicRelBlockerField.getText().trim()).append('\n');
-        sb.append("jira.epic.reliability.high=").append(epicRelHighField.getText().trim()).append('\n');
-        sb.append("jira.epic.maintainability.blocker=").append(epicMaintBlockerField.getText().trim()).append('\n');
-        sb.append("jira.epic.maintainability.high=").append(epicMaintHighField.getText().trim()).append('\n');
+        for (Map.Entry<String, JTextField> entry : epicFields.entrySet()) {
+            sb.append("jira.epic.").append(entry.getKey().toLowerCase())
+                    .append("=").append(entry.getValue().getText().trim()).append('\n');
+        }
 
         try {
             Path file = ctx.sessionFile(); // Файл app.properties

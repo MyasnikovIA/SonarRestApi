@@ -6,25 +6,31 @@ import ru.miacomsoft.sonar_gui.common.UiHelpers;
 import ru.miacomsoft.sonar_gui.common.services.ProjectsService;
 
 import javax.swing.*;
+import javax.swing.event.DocumentEvent;
+import javax.swing.event.DocumentListener;
 import java.awt.*;
+import java.awt.event.ActionEvent;
+import java.awt.event.KeyEvent;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.function.Consumer;
-import java.util.stream.Collectors;
 
 public class MultiProjectSelectDialog extends JDialog {
 
     private final GuiContext ctx;
     private final Consumer<List<String>> onSelected;
 
-    private final JTextField searchField = UiHelpers.darkField("");
+    private final JTextArea searchArea = new JTextArea(4, 40);
     private final DefaultListModel<String> listModel = new DefaultListModel<>();
     private final JList<String> projectList = new JList<>(listModel);
     private final Set<String> selectedProjects = new LinkedHashSet<>();
     private final List<String> allProjects = new ArrayList<>();
     private final JButton applyBtn;
+    private final JLabel countLbl = UiHelpers.dimLabel("");
 
     public MultiProjectSelectDialog(GuiContext ctx, Consumer<List<String>> onSelected) {
         super((Frame) null, "Выбор проектов для сводного отчета", true);
@@ -32,7 +38,7 @@ public class MultiProjectSelectDialog extends JDialog {
         this.onSelected = onSelected;
 
         setDefaultCloseOperation(DISPOSE_ON_CLOSE);
-        setSize(600, 600);
+        setSize(760, 780);
         setLocationRelativeTo(getOwner());
 
         JPanel root = new JPanel(new BorderLayout(10, 10));
@@ -48,30 +54,88 @@ public class MultiProjectSelectDialog extends JDialog {
         JPanel center = new JPanel(new BorderLayout(8, 8));
         center.setOpaque(false);
 
-        searchField.setPreferredSize(new Dimension(0, 30));
-        searchField.setToolTipText("Поиск по имени или ключу проекта");
-        searchField.getDocument().addDocumentListener(new javax.swing.event.DocumentListener() {
-            public void insertUpdate(javax.swing.event.DocumentEvent e)  { filterList(); }
-            public void removeUpdate(javax.swing.event.DocumentEvent e)  { filterList(); }
-            public void changedUpdate(javax.swing.event.DocumentEvent e) { filterList(); }
-        });
-        center.add(searchField, BorderLayout.NORTH);
+        // ============ Многострочное поле поиска ============
+        searchArea.setFont(GuiStyle.FONT_MONO);
+        searchArea.setBackground(GuiStyle.BG);
+        searchArea.setForeground(GuiStyle.TEXT);
+        searchArea.setCaretColor(GuiStyle.TEXT);
+        searchArea.setLineWrap(true);
+        searchArea.setWrapStyleWord(false);
+        searchArea.setToolTipText(
+                "Многострочный фильтр.\n" +
+                        "• Каждая строка — отдельный независимый запрос (OR между строками).\n" +
+                        "• Внутри одной строки фрагменты разделяются пробелом или ';'.\n" +
+                        "• Все фрагменты внутри одной строки должны присутствовать в имени проекта (AND).\n" +
+                        "Пример: 'MEDMIS mobile' найдёт проекты, содержащие и MEDMIS, и mobile.\n" +
+                        "Можно вставить список проектов — по одному на строку.");
 
+        searchArea.getDocument().addDocumentListener(new DocumentListener() {
+            public void insertUpdate(DocumentEvent e)  { filterList(); }
+            public void removeUpdate(DocumentEvent e)  { filterList(); }
+            public void changedUpdate(DocumentEvent e) { filterList(); }
+        });
+
+        JScrollPane searchScroll = new JScrollPane(searchArea);
+        searchScroll.setBorder(BorderFactory.createTitledBorder(
+                BorderFactory.createLineBorder(GuiStyle.BORDER),
+                "Фильтр (разделители: новая строка, пробел, ';')",
+                0, 0, GuiStyle.FONT_BOLD, GuiStyle.TEXT_DIM));
+        searchScroll.setPreferredSize(new Dimension(0, 110));
+        searchScroll.getViewport().setBackground(GuiStyle.BG);
+        center.add(searchScroll, BorderLayout.NORTH);
+
+        // ============ Панель массовых действий ============
+        JPanel bulkPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
+        bulkPanel.setOpaque(false);
+
+        JButton selectAllFilteredBtn = UiHelpers.secondaryButton("✔ Выбрать все (отфильтрованные)");
+        selectAllFilteredBtn.addActionListener(e -> {
+            if (listModel.isEmpty()) return;
+            for (int i = 0; i < listModel.size(); i++) {
+                selectedProjects.add(listModel.getElementAt(i));
+            }
+            projectList.repaint();
+            updateUi();
+        });
+        bulkPanel.add(selectAllFilteredBtn);
+
+        JButton clearAllBtn = UiHelpers.dangerButton("✖ Снять все выделение");
+        clearAllBtn.addActionListener(e -> {
+            selectedProjects.clear();
+            projectList.repaint();
+            updateUi();
+        });
+        bulkPanel.add(clearAllBtn);
+
+        center.add(bulkPanel, BorderLayout.SOUTH);
+
+        // ============ Список проектов ============
         projectList.setBackground(GuiStyle.BG2);
         projectList.setForeground(GuiStyle.TEXT);
         projectList.setFont(GuiStyle.FONT_MONO);
+        projectList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
         projectList.setCellRenderer(new CheckboxListCellRenderer());
-        projectList.addMouseListener(new java.awt.event.MouseAdapter() {
-            @Override public void mouseClicked(java.awt.event.MouseEvent e) {
+
+        // Обработка клика мышью
+        projectList.addMouseListener(new MouseAdapter() {
+            @Override public void mouseClicked(MouseEvent e) {
                 int index = projectList.locationToIndex(e.getPoint());
                 if (index >= 0) {
-                    String proj = listModel.getElementAt(index);
-                    if (selectedProjects.contains(proj)) {
-                        selectedProjects.remove(proj);
-                    } else {
-                        selectedProjects.add(proj);
-                    }
-                    projectList.repaint();
+                    toggleIndex(index);
+                }
+            }
+        });
+
+        // Обработка нажатия пробела
+        InputMap im = projectList.getInputMap(JComponent.WHEN_FOCUSED);
+        ActionMap am = projectList.getActionMap();
+        im.put(KeyStroke.getKeyStroke(KeyEvent.VK_SPACE, 0), "toggleSelection");
+        am.put("toggleSelection", new AbstractAction() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                int index = projectList.getSelectedIndex();
+                if (index >= 0) {
+                    toggleIndex(index);
                 }
             }
         });
@@ -83,12 +147,21 @@ public class MultiProjectSelectDialog extends JDialog {
 
         root.add(center, BorderLayout.CENTER);
 
-        JPanel footer = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
+        // ============ Footer ============
+        JPanel footer = new JPanel(new BorderLayout(8, 0));
         footer.setOpaque(false);
+
+        JPanel footerLeft = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
+        footerLeft.setOpaque(false);
+        footerLeft.add(countLbl);
+        footer.add(footerLeft, BorderLayout.WEST);
+
+        JPanel footerRight = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
+        footerRight.setOpaque(false);
 
         JButton cancelBtn = UiHelpers.secondaryButton("Отмена");
         cancelBtn.addActionListener(e -> dispose());
-        footer.add(cancelBtn);
+        footerRight.add(cancelBtn);
 
         applyBtn = UiHelpers.primaryButton("Построить отчет");
         applyBtn.setEnabled(false);
@@ -98,11 +171,24 @@ public class MultiProjectSelectDialog extends JDialog {
                 if (onSelected != null) onSelected.accept(new ArrayList<>(selectedProjects));
             }
         });
-        footer.add(applyBtn);
+        footerRight.add(applyBtn);
+
+        footer.add(footerRight, BorderLayout.EAST);
 
         root.add(footer, BorderLayout.SOUTH);
 
         loadProjects();
+    }
+
+    private void toggleIndex(int index) {
+        String proj = listModel.getElementAt(index);
+        if (selectedProjects.contains(proj)) {
+            selectedProjects.remove(proj);
+        } else {
+            selectedProjects.add(proj);
+        }
+        projectList.repaint();
+        updateUi();
     }
 
     private void loadProjects() {
@@ -119,26 +205,69 @@ public class MultiProjectSelectDialog extends JDialog {
                     }
                     filterList();
                 } catch (Exception e) {
-                    UiHelpers.showError(MultiProjectSelectDialog.this, "Ошибка загрузки проектов: " + e.getMessage());
+                    UiHelpers.showError(MultiProjectSelectDialog.this,
+                            "Ошибка загрузки проектов: " + e.getMessage());
                 }
             }
         }.execute();
     }
 
     private void filterList() {
-        String q = searchField.getText().trim().toLowerCase();
+        String text = searchArea.getText();
+        if (text == null) text = "";
+
         listModel.clear();
-        for (String proj : allProjects) {
-            if (q.isEmpty() || proj.toLowerCase().contains(q)) {
-                listModel.addElement(proj);
+
+        if (text.trim().isEmpty()) {
+            for (String proj : allProjects) listModel.addElement(proj);
+        } else {
+            String[] lines = text.split("\\r?\\n");
+            for (String proj : allProjects) {
+                String projLower = proj.toLowerCase();
+                boolean anyLineMatches = false;
+
+                for (String line : lines) {
+                    String lineTrimmed = line.trim();
+                    if (lineTrimmed.isEmpty()) continue;
+
+                    String[] fragments = lineTrimmed.toLowerCase().split("[\\s;]+");
+                    boolean allFragmentsMatch = true;
+                    int validCount = 0;
+
+                    for (String frag : fragments) {
+                        if (frag.isEmpty()) continue;
+                        validCount++;
+                        if (!projLower.contains(frag)) {
+                            allFragmentsMatch = false;
+                            break;
+                        }
+                    }
+
+                    if (allFragmentsMatch && validCount > 0) {
+                        anyLineMatches = true;
+                        break;
+                    }
+                }
+
+                if (anyLineMatches) {
+                    listModel.addElement(proj);
+                }
             }
         }
+
+        updateUi();
+    }
+
+    private void updateUi() {
         applyBtn.setEnabled(!selectedProjects.isEmpty());
+        countLbl.setText("Показано: " + listModel.size() + " из " + allProjects.size()
+                + " · выбрано: " + selectedProjects.size());
     }
 
     private class CheckboxListCellRenderer extends DefaultListCellRenderer {
         @Override
-        public Component getListCellRendererComponent(JList<?> list, Object value, int index, boolean isSelected, boolean cellHasFocus) {
+        public Component getListCellRendererComponent(JList<?> list, Object value,
+                                                      int index, boolean isSelected, boolean cellHasFocus) {
             JCheckBox cb = new JCheckBox(value.toString());
             cb.setOpaque(true);
             cb.setBackground(isSelected ? GuiStyle.ACCENT2 : GuiStyle.BG2);

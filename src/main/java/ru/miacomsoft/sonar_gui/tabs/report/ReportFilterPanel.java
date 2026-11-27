@@ -10,14 +10,23 @@ import ru.miacomsoft.sonar_gui.tabs.report.dialogs.MultiProjectSelectDialog;
 import ru.miacomsoft.sonar_gui.tabs.report.dialogs.ReportExportDialog;
 
 import javax.swing.*;
+import javax.swing.filechooser.FileNameExtensionFilter;
 import java.awt.*;
+import java.io.File;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Date;
 import java.util.List;
+import java.util.prefs.Preferences;
 
 public class ReportFilterPanel extends JPanel implements Reloadable {
 
     private static final String NO_TAGS_KEY = "__NO_TAGS__";
+
+    // Настройки для запоминания каталога сохранения отчета 12
+    private static final Preferences PREFS = Preferences.userNodeForPackage(ReportFilterPanel.class);
+    private static final String LAST_DIR_KEY = "last_report12_dir";
 
     private final GuiContext ctx;
 
@@ -169,8 +178,43 @@ public class ReportFilterPanel extends JPanel implements Reloadable {
                     return;
                 }
 
+                // --- Выбор файла сохранения с запоминанием последнего каталога ---
+                JFileChooser chooser = new JFileChooser();
+                chooser.setDialogTitle("Куда сохранить сводный отчет?");
+                chooser.setFileFilter(new FileNameExtensionFilter("HTML Report (*.html)", "html"));
+
+                String defaultName = "multi_project_summary_"
+                        + new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date()) + ".html";
+
+                // Восстанавливаем последний выбранный каталог
+                String lastDir = PREFS.get(LAST_DIR_KEY, System.getProperty("user.home"));
+                File lastDirFile = new File(lastDir);
+                if (lastDirFile.exists() && lastDirFile.isDirectory()) {
+                    chooser.setCurrentDirectory(lastDirFile);
+                }
+
+                // Устанавливаем дефолтное имя файла в текущем каталоге
+                chooser.setSelectedFile(new File(chooser.getCurrentDirectory(), defaultName));
+
+                if (chooser.showSaveDialog(this) != JFileChooser.APPROVE_OPTION) {
+                    return; // Пользователь отменил выбор файла
+                }
+
+                File selectedFile = chooser.getSelectedFile();
+
+                // Сохраняем выбранный каталог в настройки
+                if (selectedFile.getParentFile() != null) {
+                    PREFS.put(LAST_DIR_KEY, selectedFile.getParentFile().getAbsolutePath());
+                }
+
+                String outputPath = selectedFile.getAbsolutePath();
+                if (!outputPath.toLowerCase().endsWith(".html")) {
+                    outputPath += ".html";
+                }
+
                 ReportExportService.BaseFilter filter = buildBaseFilter();
                 filter.selectedProjects = selectedProjects;
+                filter.outputFilePath = outputPath;
 
                 new ReportExportDialog(ctx, type, null, filter).setVisible(true);
             }).setVisible(true);

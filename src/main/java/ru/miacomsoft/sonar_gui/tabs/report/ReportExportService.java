@@ -39,7 +39,8 @@ public class ReportExportService {
         public String filterText        = "";
         public String statusFilter      = "ALL";
         public int expectedTotal        = -1;
-        public List<String> selectedProjects = new ArrayList<>(); // Для мульти-проектного отчета
+        public List<String> selectedProjects = new ArrayList<>();
+        public String outputFilePath = null;
     }
 
     private static final String NO_TAGS_MARKER = "__NO_TAGS__";
@@ -104,7 +105,11 @@ public class ReportExportService {
             if (filter == null || filter.selectedProjects == null || filter.selectedProjects.isEmpty()) {
                 throw new IllegalArgumentException("Не выбрано ни одного проекта для сводного отчета.");
             }
-            outPath = exportMultiProjectSummary(filter.selectedProjects, targetDir);
+            Path outputPath = null;
+            if (filter.outputFilePath != null && !filter.outputFilePath.isBlank()) {
+                outputPath = Path.of(filter.outputFilePath);
+            }
+            outPath = exportMultiProjectSummary(filter.selectedProjects, outputPath);
         } else {
             List<Issue> issues;
             if (keysCsv != null && !keysCsv.isEmpty()) {
@@ -152,9 +157,9 @@ public class ReportExportService {
         }
     }
 
-    // ============ MULTI-PROJECT SUMMARY ============
+    // ============ MULTI-PROJECT SUMMARY (С ОБХОДОМ ЛИМИТА 10000) ============
 
-    private Path exportMultiProjectSummary(List<String> projectKeys, Path targetDir) throws Exception {
+    private Path exportMultiProjectSummary(List<String> projectKeys, Path outputFilePath) throws Exception {
         String host = hostOf();
         String[] qualities = {"SECURITY", "RELIABILITY", "MAINTAINABILITY", "SECURITY_HOTSPOT"};
         String[] severities = {"BLOCKER", "HIGH", "MEDIUM", "LOW", "INFO"};
@@ -181,19 +186,13 @@ public class ReportExportService {
         html.append("<p><em>Сгенерировано: ").append(now).append("</em></p>\n<hr/>\n");
 
         int totalProjects = projectKeys.size();
-        int processed = 0;
+        int processedProjects = 0;
 
         for (String project : projectKeys) {
             if (cancelled) throw new InterruptedException("cancelled");
-            processed++;
-            if (listener != null) {
-                listener.onProgress(processed, totalProjects, "fetching", "Обработка проекта: " + project);
-            }
-            log("[ReportExportService] Multi-Summary: обработка проекта " + project + " (" + processed + "/" + totalProjects + ")");
+            processedProjects++;
 
             SonarIssuesApi api = ctx.state().newApi(project);
-
-            // Инициализация структур для подсчета
             Map<String, Map<String, Integer>> issueCounts = new TreeMap<>();
             Map<String, Map<String, Set<String>>> fileCounts = new TreeMap<>();
             for (String q : qualities) {
@@ -205,23 +204,43 @@ public class ReportExportService {
                 }
             }
 
-            // Загрузка issues
+            log("[ReportExportService] Multi-Summary: загрузка проекта " + project + " (" + processedProjects + "/" + totalProjects + ")");
+
             List<Issue> issues = new ArrayList<>();
             try {
+                // Используем fetchAllByParts, который автоматически обходит лимит 10000,
+                // разбивая запрос на подзапросы по severity/quality, а затем по файлам.
                 issues = api.fetchAllByParts(SonarIssuesApi.ALL_STATUSES, "ALL", "ALL",
-                        (cur, tot, msg) -> { if (listener != null) listener.onProgress(cur, tot, "fetching", msg); });
+                        (cur, tot, msg) -> {
+                            if (listener != null) {
+                                listener.onProgress(cur, tot, "fetching", project + ": " + msg);
+                            }
+                            // Логируем прогресс каждые 1000 записей, чтобы не засорять консоль
+                            if (cur % 1000 == 0) {
+                                log("[ReportExportService] " + project + ": " + msg);
+                            }
+                        });
             } catch (Exception e) {
                 logErr("[ReportExportService] Ошибка загрузки проекта " + project + ": " + e.getMessage());
                 html.append("<div class=\"project-block\" style=\"border-color:#f85149;\">\n");
                 html.append("<h2>").append(esc(project)).append("</h2>\n");
-                html.append("<p style=\"color:#f85149;\">Ошибка: ").append(esc(e.getMessage())).append("</p>\n");
+                html.append("<p style=\"color:#f85149;\">Ошибка загрузки данных: ").append(esc(e.getMessage())).append("</p>\n");
                 html.append("</div>\n");
                 continue;
             }
 
-            // Подсчет статистики
+            if (cancelled) throw new InterruptedException("cancelled");
+
+            // Дедупликация issues по ключу (fetchAllByParts может вернуть дубликаты,
+            // если issue имеет несколько impacts в разных категориях)
+            Map<String, Issue> uniqueIssues = new LinkedHashMap<>();
             for (Issue it : issues) {
-                if (cancelled) break;
+                uniqueIssues.put(it.key, it);
+            }
+            log("[ReportExportService] " + project + ": загружено " + issues.size() + " записей, уникальных " + uniqueIssues.size());
+
+            // Подсчет статистики
+            for (Issue it : uniqueIssues.values()) {
                 if (it.tags != null && it.tags.contains("not-require-fix")) continue;
 
                 if (it.impacts != null && !it.impacts.isEmpty()) {
@@ -234,7 +253,6 @@ public class ReportExportService {
                         }
                     }
                 } else if (it.severity != null) {
-                    // Fallback
                     String qual = "MAINTAINABILITY";
                     String sev = it.severity.toUpperCase();
                     if (issueCounts.containsKey(qual) && issueCounts.get(qual).containsKey(sev)) {
@@ -244,14 +262,12 @@ public class ReportExportService {
                 }
             }
 
-            // Генерация HTML для проекта
             String projectUrl = "https://" + host + "/dashboard?id=" + urlEnc(project);
             html.append("<div class=\"project-block\">\n");
             html.append("<h2><a href=\"").append(esc(projectUrl)).append("\" target=\"_blank\">").append(esc(project)).append("</a></h2>\n");
 
             for (String q : qualities) {
                 int totalForQual = issueCounts.get(q).values().stream().mapToInt(Integer::intValue).sum();
-                // Выводим QUAL, если есть ошибки
                 if (totalForQual > 0) {
                     String qualUrl = "https://" + host + "/project/issues?id=" + urlEnc(project) + "&impactSoftwareQualities=" + urlEnc(q);
                     html.append("<div class=\"qual-block\">\n");
@@ -279,12 +295,12 @@ public class ReportExportService {
 
         html.append("</body>\n</html>\n");
 
-        if (targetDir != null) {
-            Files.createDirectories(targetDir);
-            Path outFile = targetDir.resolve("multi_project_summary_" + new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date()) + ".html");
-            Files.writeString(outFile, html.toString(), StandardCharsets.UTF_8);
-            log("[ReportExportService] Multi-Summary: отчет сохранен в " + outFile);
-            return outFile;
+        if (outputFilePath != null) {
+            Path parent = outputFilePath.getParent();
+            if (parent != null) Files.createDirectories(parent);
+            Files.writeString(outputFilePath, html.toString(), StandardCharsets.UTF_8);
+            log("[ReportExportService] Multi-Summary: отчет сохранен в " + outputFilePath);
+            return outputFilePath;
         } else {
             Path out = Files.createTempFile("sonar_multisummary_", ".html");
             Files.writeString(out, html.toString(), StandardCharsets.UTF_8);
@@ -292,7 +308,7 @@ public class ReportExportService {
         }
     }
 
-    // ============ СТАРЫЕ МЕТОДЫ (БЕЗ ИЗМЕНЕНИЙ) ============
+    // ============ СТАРЫЕ МЕТОДЫ (без изменений) ============
 
     private List<Issue> loadByKeys(String project, List<String> keys) throws Exception {
         SonarIssuesApi api = ctx.state().newApi(project);

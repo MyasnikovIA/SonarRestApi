@@ -21,8 +21,10 @@ import java.util.function.Consumer;
 
 public class MultiProjectSelectDialog extends JDialog {
 
+    public record Result(List<String> projects, boolean createJira) {}
+
     private final GuiContext ctx;
-    private final Consumer<List<String>> onSelected;
+    private final Consumer<Result> onSelected;
 
     private final JTextArea searchArea = new JTextArea(4, 40);
     private final DefaultListModel<String> listModel = new DefaultListModel<>();
@@ -31,14 +33,15 @@ public class MultiProjectSelectDialog extends JDialog {
     private final List<String> allProjects = new ArrayList<>();
     private final JButton applyBtn;
     private final JLabel countLbl = UiHelpers.dimLabel("");
+    private final JCheckBox createJiraCheckbox; // НОВОЕ ПОЛЕ
 
-    public MultiProjectSelectDialog(GuiContext ctx, Consumer<List<String>> onSelected) {
+    public MultiProjectSelectDialog(GuiContext ctx, Consumer<Result> onSelected) {
         super((Frame) null, "Выбор проектов для сводного отчета", true);
         this.ctx = ctx;
         this.onSelected = onSelected;
 
         setDefaultCloseOperation(DISPOSE_ON_CLOSE);
-        setSize(760, 780);
+        setSize(760, 800);
         setLocationRelativeTo(getOwner());
 
         JPanel root = new JPanel(new BorderLayout(10, 10));
@@ -54,7 +57,6 @@ public class MultiProjectSelectDialog extends JDialog {
         JPanel center = new JPanel(new BorderLayout(8, 8));
         center.setOpaque(false);
 
-        // ============ Многострочное поле поиска ============
         searchArea.setFont(GuiStyle.FONT_MONO);
         searchArea.setBackground(GuiStyle.BG);
         searchArea.setForeground(GuiStyle.TEXT);
@@ -84,7 +86,6 @@ public class MultiProjectSelectDialog extends JDialog {
         searchScroll.getViewport().setBackground(GuiStyle.BG);
         center.add(searchScroll, BorderLayout.NORTH);
 
-        // ============ Панель массовых действий ============
         JPanel bulkPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
         bulkPanel.setOpaque(false);
 
@@ -109,14 +110,12 @@ public class MultiProjectSelectDialog extends JDialog {
 
         center.add(bulkPanel, BorderLayout.SOUTH);
 
-        // ============ Список проектов ============
         projectList.setBackground(GuiStyle.BG2);
         projectList.setForeground(GuiStyle.TEXT);
         projectList.setFont(GuiStyle.FONT_MONO);
         projectList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
         projectList.setCellRenderer(new CheckboxListCellRenderer());
 
-        // Обработка клика мышью
         projectList.addMouseListener(new MouseAdapter() {
             @Override public void mouseClicked(MouseEvent e) {
                 int index = projectList.locationToIndex(e.getPoint());
@@ -126,7 +125,6 @@ public class MultiProjectSelectDialog extends JDialog {
             }
         });
 
-        // Обработка нажатия пробела
         InputMap im = projectList.getInputMap(JComponent.WHEN_FOCUSED);
         ActionMap am = projectList.getActionMap();
         im.put(KeyStroke.getKeyStroke(KeyEvent.VK_SPACE, 0), "toggleSelection");
@@ -147,7 +145,6 @@ public class MultiProjectSelectDialog extends JDialog {
 
         root.add(center, BorderLayout.CENTER);
 
-        // ============ Footer ============
         JPanel footer = new JPanel(new BorderLayout(8, 0));
         footer.setOpaque(false);
 
@@ -159,6 +156,13 @@ public class MultiProjectSelectDialog extends JDialog {
         JPanel footerRight = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
         footerRight.setOpaque(false);
 
+        // --- ДОБАВЛЕН ЧЕКБОКС JIRA ---
+        createJiraCheckbox = new JCheckBox("Создать задачи в Jira");
+        createJiraCheckbox.setOpaque(false);
+        createJiraCheckbox.setForeground(GuiStyle.TEXT);
+        createJiraCheckbox.setFont(GuiStyle.FONT_BOLD);
+        footerRight.add(createJiraCheckbox);
+
         JButton cancelBtn = UiHelpers.secondaryButton("Отмена");
         cancelBtn.addActionListener(e -> dispose());
         footerRight.add(cancelBtn);
@@ -168,13 +172,14 @@ public class MultiProjectSelectDialog extends JDialog {
         applyBtn.addActionListener(e -> {
             if (!selectedProjects.isEmpty()) {
                 dispose();
-                if (onSelected != null) onSelected.accept(new ArrayList<>(selectedProjects));
+                if (onSelected != null) {
+                    onSelected.accept(new Result(new ArrayList<>(selectedProjects), createJiraCheckbox.isSelected()));
+                }
             }
         });
         footerRight.add(applyBtn);
 
         footer.add(footerRight, BorderLayout.EAST);
-
         root.add(footer, BorderLayout.SOUTH);
 
         loadProjects();
@@ -254,7 +259,6 @@ public class MultiProjectSelectDialog extends JDialog {
                 }
             }
         }
-
         updateUi();
     }
 

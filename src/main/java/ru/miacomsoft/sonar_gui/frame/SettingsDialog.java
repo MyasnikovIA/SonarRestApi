@@ -22,9 +22,6 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Properties;
 
-/**
- * Единое модальное окно настроек приложения.
- */
 public class SettingsDialog extends JDialog {
 
     private final GuiContext ctx;
@@ -35,7 +32,7 @@ public class SettingsDialog extends JDialog {
     private final JTextField sqUserField = UiHelpers.darkField("");
     private final JComboBox<String> sqAuthCombo = UiHelpers.darkCombo(
             new String[]{"bearer", "basic", "cookie"}, "bearer");
-    private final JTextField sqTokenField = UiHelpers.darkField(""); // JTextField вместо JPasswordField для видимости
+    private final JTextField sqTokenField = UiHelpers.darkField("");
     private final JTextArea sqCookieArea = new JTextArea(3, 40);
     private final JLabel sqTokenStatusLbl = UiHelpers.dimLabel("");
     private final JLabel sqCookieStatusLbl = UiHelpers.dimLabel("");
@@ -47,6 +44,7 @@ public class SettingsDialog extends JDialog {
     private final JTextField jiraProjectField   = UiHelpers.darkField("");
     private final JTextField jiraTeamField      = UiHelpers.darkField("");
     private final JTextField jiraAssigneeField  = UiHelpers.darkField("");
+    private final JTextField jiraDefaultEpicField = UiHelpers.darkField(""); // НОВОЕ ПОЛЕ
     private final JLabel     jiraStatusLbl      = UiHelpers.dimLabel("не загружено");
     private final JLabel     jiraSessionFileLbl = UiHelpers.dimLabel("session.txt");
 
@@ -225,6 +223,9 @@ public class SettingsDialog extends JDialog {
         bottom.add(row("jira.team", jiraTeamField));
         bottom.add(Box.createVerticalStrut(6));
         bottom.add(row("jira.assignee", jiraAssigneeField));
+        bottom.add(Box.createVerticalStrut(6));
+        // ДОБАВЛЕНО ПОЛЕ ЭПИКА ПО УМОЛЧАНИЮ
+        bottom.add(row("jira.epic.default (Эпик по умолчанию)", jiraDefaultEpicField));
         bottom.add(Box.createVerticalStrut(10));
 
         JPanel epicsGrid = new JPanel(new GridLayout(0, 2, 8, 4));
@@ -333,7 +334,6 @@ public class SettingsDialog extends JDialog {
         p.setBackground(GuiStyle.BG);
         p.setBorder(BorderFactory.createEmptyBorder(14, 14, 14, 14));
 
-        // --- Team Mapping ---
         JLabel descTeam = new JLabel(UiHelpers.wrapHtml(
                 "<html><b>team_mapping.csv</b> — используется для привязки файлов к командам и модулям.</html>"));
         descTeam.setForeground(GuiStyle.TEXT);
@@ -350,10 +350,9 @@ public class SettingsDialog extends JDialog {
 
         p.add(Box.createVerticalStrut(24));
 
-        // --- Product Mapping ---
         JLabel descProduct = new JLabel(UiHelpers.wrapHtml(
                 "<html><b>product_mapping.csv</b> — связывает проекты SonarQube (Sonar_ID) с продуктами и командами-владельцами.<br>" +
-                        "Используется для будущих отчетов по продуктам.</html>"));
+                        "Используется для отчетов по продуктам.</html>"));
         descProduct.setForeground(GuiStyle.TEXT);
         p.add(descProduct);
         p.add(Box.createVerticalStrut(8));
@@ -627,9 +626,6 @@ public class SettingsDialog extends JDialog {
         return p;
     }
 
-    // ================================================================
-    // Загрузка / сохранение всего
-    // ================================================================
     private void loadAll() {
         loadSonar();
         loadJiraSession();
@@ -650,7 +646,6 @@ public class SettingsDialog extends JDialog {
                 String auth = p.getProperty("sonar.auth", "bearer");
                 sqAuthCombo.setSelectedItem(auth);
 
-                // Читаем токен и куки в поля
                 String token = p.getProperty("sonar.token", "");
                 sqTokenField.setText(token);
                 sqTokenStatusLbl.setText(token.isBlank() ? "— не задан" : "✓ установлен");
@@ -682,6 +677,7 @@ public class SettingsDialog extends JDialog {
         jiraProjectField.setText(jcfg.defaultProject());
         jiraTeamField.setText(jcfg.team());
         jiraAssigneeField.setText(jcfg.assignee());
+        jiraDefaultEpicField.setText(jcfg.defaultEpic()); // Загрузка
 
         for (Map.Entry<String, JTextField> entry : epicFields.entrySet()) {
             String[] parts = entry.getKey().split("\\.");
@@ -726,7 +722,7 @@ public class SettingsDialog extends JDialog {
         String url = sqUrlField.getText().trim();
         String user = sqUserField.getText().trim();
         String auth = (String) sqAuthCombo.getSelectedItem();
-        String token = sqTokenField.getText().trim(); // Берем значение из JTextField
+        String token = sqTokenField.getText().trim();
         String cookie = sqCookieArea.getText().trim();
 
         if (url.isEmpty()) {
@@ -769,6 +765,7 @@ public class SettingsDialog extends JDialog {
         sb.append("jira.defaultProject=").append(jiraProjectField.getText().trim()).append('\n');
         sb.append("jira.team=").append(jiraTeamField.getText().trim()).append('\n');
         sb.append("jira.assignee=").append(jiraAssigneeField.getText().trim()).append('\n');
+        sb.append("jira.epic.default=").append(jiraDefaultEpicField.getText().trim()).append('\n'); // СОХРАНЕНИЕ
         sb.append('\n');
 
         // --- Эпики ---

@@ -8,9 +8,6 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
 
-/**
- * Конфиг Jira из единого app.properties + словарь эпиков.
- */
 public final class JiraConfig {
 
     public static final String DEFAULT_URL        = "https://jira-medmis.bars.group";
@@ -29,8 +26,8 @@ public final class JiraConfig {
     private String labels;
     private String components;
     private String assignee;
+    private String defaultEpic; // НОВОЕ ПОЛЕ
 
-    // Словарь эпиков (ключ: "qual.sev" в нижнем регистре)
     private final Map<String, String> epics = new HashMap<>();
 
     private JiraConfig(Path configFile) {
@@ -61,9 +58,10 @@ public final class JiraConfig {
         this.labels         = "";
         this.components     = "";
         this.assignee       = "me";
+        this.defaultEpic    = ""; // Сброс по умолчанию
         epics.clear();
 
-        // Значения по умолчанию для эпиков (только заданные пользователем)
+        // Дефолтные эпики...
         epics.put("security.blocker", "MEDDEV-172524");
         epics.put("security.high", "MEDDEV-172525");
         epics.put("security.medium", "");
@@ -100,10 +98,10 @@ public final class JiraConfig {
                 labels         = safe(p.getProperty("jira.labels"),         labels);
                 components     = safe(p.getProperty("jira.components"),     components);
                 assignee       = safe(p.getProperty("jira.assignee"),       assignee);
+                defaultEpic    = safe(p.getProperty("jira.epic.default"),   defaultEpic); // Чтение
 
-                // Чтение эпиков (все, что есть в файле)
                 for (String key : p.stringPropertyNames()) {
-                    if (key.startsWith("jira.epic.")) {
+                    if (key.startsWith("jira.epic.") && !key.equals("jira.epic.default")) {
                         String epicKey = key.substring("jira.epic.".length()).toLowerCase();
                         epics.put(epicKey, safe(p.getProperty(key), ""));
                     }
@@ -126,12 +124,9 @@ public final class JiraConfig {
     public String labels()         { return labels; }
     public String components()     { return components; }
     public String assignee()       { return assignee; }
+    public String defaultEpic()    { return defaultEpic; } // Геттер
     public Path   configFile()     { return configFile; }
 
-    /**
-     * Возвращает ID эпика по категории и уровню.
-     * Например: getEpic("SECURITY", "BLOCKER") -> "MEDDEV-172524"
-     */
     public String getEpic(String qual, String sev) {
         if (qual == null || sev == null) return "";
         String key = (qual + "." + sev).toLowerCase();

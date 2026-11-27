@@ -1,1 +1,0 @@
-export { snippet } from './snippet/index.js';

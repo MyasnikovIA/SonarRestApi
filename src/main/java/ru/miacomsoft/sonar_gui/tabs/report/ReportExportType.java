@@ -12,7 +12,8 @@ public enum ReportExportType {
     QUAL_SUMMARY      ("qual-summary",      "8) Сводка по Quality/Severity", "txt"),
     LLM_MD_ZIP        ("llm-md-zip",        "9) LLM MD (Папка)",     "zip"),
     TEAM_MODULE_ZIP   ("team-module-zip",   "10) Отчёт по командам (Папка)", "zip"),
-    QUAL_TEAM_HTML    ("qual-team-html",    "11) Отчет по командам HTML (Папка)", "html");
+    QUAL_TEAM_HTML    ("qual-team-html",    "11) Отчет по командам HTML (Папка)", "html"),
+    MULTI_PROJECT_SUMMARY ("multi-project-summary", "12) Сводка по проектам (HTML)", "html");
 
     public final String code;
     public final String title;

@@ -6,15 +6,14 @@ import ru.miacomsoft.sonar_gui.common.MultiSelectDropdown;
 import ru.miacomsoft.sonar_gui.common.Reloadable;
 import ru.miacomsoft.sonar_gui.common.UiHelpers;
 import ru.miacomsoft.sonar_gui.common.services.TagsService;
+import ru.miacomsoft.sonar_gui.tabs.report.dialogs.MultiProjectSelectDialog;
 import ru.miacomsoft.sonar_gui.tabs.report.dialogs.ReportExportDialog;
 
 import javax.swing.*;
 import java.awt.*;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Set;
 
 public class ReportFilterPanel extends JPanel implements Reloadable {
 
@@ -120,7 +119,7 @@ public class ReportFilterPanel extends JPanel implements Reloadable {
 
         add(center, BorderLayout.CENTER);
 
-        // Инициализация списка тегов (без запроса issues)
+        // Инициализация списка тегов
         initFiltersAsync();
     }
 
@@ -145,8 +144,6 @@ public class ReportFilterPanel extends JPanel implements Reloadable {
 
     @Override
     public void reload() {
-        // При переключении вкладки ничего не делаем — фильтры остаются как есть.
-        // При необходимости можно обновить список тегов под текущий проект.
         if (ctx.hasProject()) {
             initFiltersAsync();
         }
@@ -158,18 +155,39 @@ public class ReportFilterPanel extends JPanel implements Reloadable {
         menu.setBorder(BorderFactory.createLineBorder(GuiStyle.BORDER, 1));
 
         for (ReportExportType type : ReportExportType.values()) {
-            // Можно добавить фильтр по типам, если нужно исключить какие-то форматы
             menu.add(menuItem(type.title, () -> startExport(type)));
         }
         menu.show(exportBtn, 0, exportBtn.getHeight());
     }
 
     private void startExport(ReportExportType type) {
+        // Для мульти-проектного отчета логика отличается
+        if (type == ReportExportType.MULTI_PROJECT_SUMMARY) {
+            new MultiProjectSelectDialog(ctx, selectedProjects -> {
+                if (selectedProjects == null || selectedProjects.isEmpty()) {
+                    UiHelpers.showToast(this, "Не выбрано ни одного проекта", true);
+                    return;
+                }
+
+                ReportExportService.BaseFilter filter = buildBaseFilter();
+                filter.selectedProjects = selectedProjects;
+
+                new ReportExportDialog(ctx, type, null, filter).setVisible(true);
+            }).setVisible(true);
+            return;
+        }
+
+        // Для остальных отчетов проверяем, выбран ли проект в верхней панели
         if (!ctx.hasProject()) {
             UiHelpers.showToast(this, "Выберите проект в верхней панели", true);
             return;
         }
 
+        ReportExportService.BaseFilter filter = buildBaseFilter();
+        new ReportExportDialog(ctx, type, null, filter).setVisible(true);
+    }
+
+    private ReportExportService.BaseFilter buildBaseFilter() {
         ReportExportService.BaseFilter filter = new ReportExportService.BaseFilter();
         filter.project        = ctx.getProject();
         filter.severity       = sevDropdown.getSelectedCsv();
@@ -180,12 +198,8 @@ public class ReportFilterPanel extends JPanel implements Reloadable {
         filter.rules          = rulesDropdown.getSelected();
         filter.filterText     = textField.getText().trim();
         filter.statusFilter   = statusDropdown.getSelectedCsv();
-        filter.expectedTotal  = -1; // Не важно для этого режима
-
-        System.out.println("[ReportFilterPanel] Экспорт " + type
-                + " · режим=ALL (только фильтры)");
-
-        new ReportExportDialog(ctx, type, null, filter).setVisible(true);
+        filter.expectedTotal  = -1;
+        return filter;
     }
 
     private JMenuItem menuItem(String text, Runnable action) {

@@ -29,12 +29,16 @@ public class ReportExportDialog extends JDialog {
     private final JLabel statusLbl = UiHelpers.dimLabel("Инициализация…");
     private final JLabel counterLbl = UiHelpers.dimLabel("0 / 0");
     private final JLabel stageLbl = UiHelpers.dimLabel("—");
+    private final JLabel timeLbl = UiHelpers.dimLabel("Время: 00:00");
     private final JButton cancelBtn;
 
     private volatile ReportExportService service;
     private volatile boolean cancelled = false;
     private Path targetDirectory = null;
     private SwingWorker<Void, Void> worker;
+
+    private long startTimeMs;
+    private Timer uiTimer;
 
     public ReportExportDialog(GuiContext ctx, ReportExportType type,
                               List<String> keysCsv, ReportExportService.BaseFilter filter) {
@@ -45,7 +49,7 @@ public class ReportExportDialog extends JDialog {
         this.filter = filter;
 
         setDefaultCloseOperation(DISPOSE_ON_CLOSE);
-        setSize(620, 240);
+        setSize(640, 260);
         setLocationRelativeTo(getOwner());
 
         JPanel root = new JPanel(new BorderLayout(10, 10));
@@ -70,7 +74,13 @@ public class ReportExportDialog extends JDialog {
         JPanel metaBottom = new JPanel(new BorderLayout());
         metaBottom.setOpaque(false);
         metaBottom.add(counterLbl, BorderLayout.WEST);
-        metaBottom.add(UiHelpers.dimLabel("формат: " + type.title), BorderLayout.EAST);
+
+        JPanel rightMeta = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
+        rightMeta.setOpaque(false);
+        rightMeta.add(timeLbl);
+        rightMeta.add(UiHelpers.dimLabel("формат: " + type.title));
+        metaBottom.add(rightMeta, BorderLayout.EAST);
+
         info.add(metaBottom, BorderLayout.SOUTH);
 
         root.add(info, BorderLayout.CENTER);
@@ -84,6 +94,7 @@ public class ReportExportDialog extends JDialog {
             cancelBtn.setText("Остановка…");
             if (service != null) service.setCancelled(true);
             if (worker != null) worker.cancel(true);
+            if (uiTimer != null) uiTimer.stop();
         });
         footer.add(cancelBtn);
         root.add(footer, BorderLayout.SOUTH);
@@ -124,6 +135,14 @@ public class ReportExportDialog extends JDialog {
 
         final Path finalTargetDir = targetDirectory;
 
+        // Запускаем таймер
+        startTimeMs = System.currentTimeMillis();
+        uiTimer = new Timer(500, e -> {
+            long elapsed = System.currentTimeMillis() - startTimeMs;
+            timeLbl.setText("Время: " + formatElapsed(elapsed));
+        });
+        uiTimer.start();
+
         worker = new SwingWorker<Void, Void>() {
             @Override protected Void doInBackground() {
                 service = new ReportExportService(ctx, new ReportExportService.ProgressListener() {
@@ -162,16 +181,20 @@ public class ReportExportDialog extends JDialog {
     }
 
     private void onExportComplete(Path resultPath, String suggestedName, boolean isDir) {
+        if (uiTimer != null) uiTimer.stop();
         if (cancelled) {
             dispose();
             return;
         }
+
+        long elapsed = System.currentTimeMillis() - startTimeMs;
+        timeLbl.setText("Время: " + formatElapsed(elapsed));
         progressBar.setIndeterminate(false);
         progressBar.setValue(100);
 
         if (isDir) {
             statusLbl.setText("Готово. Отчет сохранен в каталог.");
-            UiHelpers.showToast(this, "Сохранено в: " + resultPath.toAbsolutePath(), false);
+            UiHelpers.showToast(this, "Сохранено в: " + resultPath.toAbsolutePath() + " (за " + formatElapsed(elapsed) + ")", false);
             dispose();
             return;
         }
@@ -192,7 +215,7 @@ public class ReportExportDialog extends JDialog {
         try {
             Files.copy(resultPath, target, StandardCopyOption.REPLACE_EXISTING);
             Files.deleteIfExists(resultPath);
-            UiHelpers.showToast(this, "Сохранено: " + target.toAbsolutePath(), false);
+            UiHelpers.showToast(this, "Сохранено: " + target.toAbsolutePath() + " (за " + formatElapsed(elapsed) + ")", false);
             dispose();
         } catch (Exception e) {
             UiHelpers.showError(this, "Ошибка сохранения: " + e.getMessage());
@@ -200,10 +223,23 @@ public class ReportExportDialog extends JDialog {
     }
 
     private void onExportError(Throwable t) {
+        if (uiTimer != null) uiTimer.stop();
         if (cancelled) { dispose(); return; }
         progressBar.setIndeterminate(false);
         statusLbl.setText("Ошибка: " + t.getMessage());
         statusLbl.setForeground(GuiStyle.ERR);
         UiHelpers.showError(this, "Ошибка экспорта: " + t.getMessage());
+    }
+
+    private String formatElapsed(long ms) {
+        long seconds = ms / 1000;
+        long h = seconds / 3600;
+        long m = (seconds % 3600) / 60;
+        long s = seconds % 60;
+        if (h > 0) {
+            return String.format("%02d:%02d:%02d", h, m, s);
+        } else {
+            return String.format("%02d:%02d", m, s);
+        }
     }
 }

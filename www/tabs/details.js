@@ -1,1 +1,0 @@
-export { details } from './details/index.js';

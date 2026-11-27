@@ -6,124 +6,47 @@ import java.nio.file.Path;
 
 /**
  * Создание конфигурационных файлов при первом запуске.
- *
- * Создаются (если отсутствуют):
- *   - session.properties  (SonarQube)
- *   - ollama.properties   (LLM)
- *   - jira.properties     (Jira)
- *   - session.txt         (Cookies Jira)
- *   - team_mapping.csv    (Команды/Модули)
- *   - prompts/*.txt       (4 шаблона промптов)
- *
- * Существующие файлы никогда не перезаписываются.
  */
 public final class BootstrapFiles {
 
     private BootstrapFiles() {}
 
-    // ============================================================
-    // Публичное API
-    // ============================================================
-
-    /**
-     * Полный bootstrap. Вызывается из Main один раз при старте.
-     *
-     * @param sessionFile абсолютный путь к session.properties (SonarQube)
-     * @param ollamaFile  абсолютный путь к ollama.properties
-     * @param promptsDir  каталог prompts/
-     */
-    public static void ensureAll(Path sessionFile, Path ollamaFile, Path promptsDir) {
-        ensureSession(sessionFile);
-        ensureOllama(ollamaFile);
-        ensureJira();
+    public static void ensureAll(Path settingsFile, Path promptsDir) {
+        ensureAppProperties(settingsFile);
         ensureTeamMapping();
         ensureSessionTxt();
         ensurePrompts(promptsDir);
     }
 
-    /** Обратная совместимость: старый вызов без ollamaFile. */
-    public static void ensureAll(Path sessionFile, Path promptsDir) {
-        ensureAll(sessionFile, Path.of("ollama.properties"), promptsDir);
-    }
-
-    // ============================================================
-    // SonarQube
-    // ============================================================
-
-    public static void ensureSession(Path sessionFile) {
-        if (sessionFile == null) return;
+    public static void ensureAppProperties(Path settingsFile) {
+        if (settingsFile == null) return;
         try {
-            if (Files.exists(sessionFile)) return;
-            Path parent = sessionFile.toAbsolutePath().getParent();
+            if (Files.exists(settingsFile)) return;
+            Path parent = settingsFile.toAbsolutePath().getParent();
             if (parent != null) Files.createDirectories(parent);
-            Files.writeString(sessionFile, Defaults.SESSION_PROPERTIES_TEMPLATE,
-                    StandardCharsets.UTF_8);
-            System.out.println("[Bootstrap] Создан " + sessionFile.toAbsolutePath()
-                    + " — заполните sonar.url/sonar.token через меню «Файл → Настройки…».");
+            Files.writeString(settingsFile, Defaults.APP_PROPERTIES_TEMPLATE, StandardCharsets.UTF_8);
+            System.out.println("[Bootstrap] Создан " + settingsFile.toAbsolutePath());
         } catch (Exception e) {
-            System.err.println("[Bootstrap] не удалось создать " + sessionFile
-                    + ": " + e.getMessage());
+            System.err.println("[Bootstrap] Не удалось создать " + settingsFile + ": " + e.getMessage());
         }
-    }
-
-    // ============================================================
-    // Ollama
-    // ============================================================
-
-    public static void ensureOllama(Path ollamaFile) {
-        if (ollamaFile == null) return;
-        try {
-            if (Files.exists(ollamaFile)) return;
-            Path parent = ollamaFile.toAbsolutePath().getParent();
-            if (parent != null) Files.createDirectories(parent);
-            Files.writeString(ollamaFile, Defaults.OLLAMA_PROPERTIES_TEMPLATE,
-                    StandardCharsets.UTF_8);
-            System.out.println("[Bootstrap] Создан " + ollamaFile.toAbsolutePath()
-                    + " — укажите url/model через меню «Файл → Настройки…».");
-        } catch (Exception e) {
-            System.err.println("[Bootstrap] не удалось создать " + ollamaFile
-                    + ": " + e.getMessage());
-        }
-    }
-
-    // ============================================================
-    // Jira
-    // ============================================================
-
-    public static void ensureJira() {
-        createIfMissing(Path.of("jira.properties"),
-                Defaults.JIRA_PROPERTIES_TEMPLATE,
-                "jira.properties");
     }
 
     public static void ensureSessionTxt() {
-        createIfMissing(Path.of("session.txt"),
-                Defaults.SESSION_TXT_TEMPLATE,
-                "session.txt");
+        createIfMissing(Path.of("session.txt"), Defaults.SESSION_TXT_TEMPLATE, "session.txt");
     }
-
-    // ============================================================
-    // Команды (CSV)
-    // ============================================================
 
     public static void ensureTeamMapping() {
-        createIfMissing(Path.of("team_mapping.csv"),
-                Defaults.TEAM_MAPPING_CSV_TEMPLATE,
-                "team_mapping.csv");
+        createIfMissing(Path.of("team_mapping.csv"), Defaults.TEAM_MAPPING_CSV_TEMPLATE, "team_mapping.csv");
     }
-
-    // ============================================================
-    // Prompts
-    // ============================================================
 
     public static void ensurePrompts(Path promptsDir) {
         if (promptsDir == null) return;
         try { Files.createDirectories(promptsDir); }
         catch (Exception e) { return; }
-        ensurePrompt(promptsDir, "auto-resolve",        Defaults.PROMPT_AUTO_RESOLVE);
-        ensurePrompt(promptsDir, "status-comment",      Defaults.PROMPT_STATUS_COMMENT);
+        ensurePrompt(promptsDir, "auto-resolve", Defaults.PROMPT_AUTO_RESOLVE);
+        ensurePrompt(promptsDir, "status-comment", Defaults.PROMPT_STATUS_COMMENT);
         ensurePrompt(promptsDir, "bulk-status-comment", Defaults.PROMPT_BULK_STATUS_COMMENT);
-        ensurePrompt(promptsDir, "analyze-issue",       Defaults.PROMPT_ANALYZE_ISSUE);
+        ensurePrompt(promptsDir, "analyze-issue", Defaults.PROMPT_ANALYZE_ISSUE);
     }
 
     private static void ensurePrompt(Path dir, String name, String content) {
@@ -131,15 +54,10 @@ public final class BootstrapFiles {
             Path file = dir.resolve(name + ".txt");
             if (Files.exists(file)) return;
             Files.writeString(file, content, StandardCharsets.UTF_8);
-            System.out.println("[Bootstrap] created " + file.toAbsolutePath());
         } catch (Exception e) {
             System.err.println("[Bootstrap] " + name + ".txt: " + e.getMessage());
         }
     }
-
-    // ============================================================
-    // Утилиты
-    // ============================================================
 
     private static void createIfMissing(Path file, String template, String label) {
         try {
@@ -148,10 +66,8 @@ public final class BootstrapFiles {
             Path parent = abs.getParent();
             if (parent != null) Files.createDirectories(parent);
             Files.writeString(abs, template, StandardCharsets.UTF_8);
-            System.out.println("[Bootstrap] создан " + label + " → " + abs);
         } catch (Exception e) {
-            System.err.println("[Bootstrap] не удалось создать " + label + ": "
-                    + e.getMessage());
+            System.err.println("[Bootstrap] Не удалось создать " + label + ": " + e.getMessage());
         }
     }
 

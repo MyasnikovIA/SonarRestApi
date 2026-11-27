@@ -9,12 +9,9 @@ import java.nio.file.Path;
 import java.util.Properties;
 
 /**
- * Чтение session.properties: url, user, token, cookie, auth.
- * Копия ru.miacomsoft.sonar.server.SessionManager.
+ * Чтение параметров подключения SonarQube из единого app.properties.
  */
 public class SessionManager {
-
-    public static final String DEFAULT_FILE = "session.properties";
 
     private final Path configFile;
 
@@ -48,7 +45,7 @@ public class SessionManager {
 
     private void loadFromString(String raw) throws IOException {
         if (raw == null || raw.isBlank()) {
-            throw new IllegalArgumentException("Пустое содержимое session.properties");
+            throw new IllegalArgumentException("Пустое содержимое конфигурации");
         }
         Properties props = new Properties();
         try (StringReader sr = new StringReader(raw)) {
@@ -65,28 +62,17 @@ public class SessionManager {
         this.authType = trim(props.getProperty("sonar.auth", "bearer")).toLowerCase();
 
         if (url.isEmpty()) {
-            throw new IllegalArgumentException("В session.properties не задан sonar.url");
+            throw new IllegalArgumentException("В конфигурации не задан sonar.url");
         }
         if ("cookie".equals(authType)) {
             if (cookie.isEmpty()) {
-                throw new IllegalArgumentException(
-                        "sonar.auth=cookie, но sonar.cookie пуст.");
+                throw new IllegalArgumentException("sonar.auth=cookie, но sonar.cookie пуст.");
             }
         } else if ("basic".equals(authType)) {
-            if (token.isEmpty()) {
-                throw new IllegalArgumentException(
-                        "sonar.auth=basic, но sonar.token пуст.");
-            }
-            if (user.isEmpty()) {
-                throw new IllegalArgumentException(
-                        "sonar.auth=basic, но sonar.user пуст.");
-            }
+            if (token.isEmpty()) throw new IllegalArgumentException("sonar.auth=basic, но sonar.token пуст.");
+            if (user.isEmpty()) throw new IllegalArgumentException("sonar.auth=basic, но sonar.user пуст.");
         } else {
-            if (token.isEmpty()) {
-                throw new IllegalArgumentException(
-                        "sonar.auth=bearer, но sonar.token пуст. "
-                                + "Сгенерируйте токен: https://<sonar>/account/security");
-            }
+            if (token.isEmpty()) throw new IllegalArgumentException("sonar.auth=bearer, но sonar.token пуст.");
         }
     }
 

@@ -8,13 +8,7 @@ import java.nio.file.Path;
 import java.util.Properties;
 
 /**
- * Персистентная конфигурация Ollama (файл ollama.properties).
- *
- * Поддерживает:
- *   - загрузку из файла при старте (конструктор);
- *   - reload() — перечитывание файла без пересоздания объекта
- *     (используется в MainFrame при смене настроек);
- *   - save() — запись в файл (вызывается из SettingsDialog).
+ * Конфигурация Ollama из единого app.properties.
  */
 public class OllamaConfig {
 
@@ -34,11 +28,6 @@ public class OllamaConfig {
         load();
     }
 
-    /**
-     * Перечитывает файл ollama.properties. Вызывается из меню
-     * «Файл → Перезагрузить сессию», чтобы применить ручные правки
-     * файла без перезапуска приложения.
-     */
     public synchronized void reload() {
         load();
     }
@@ -52,24 +41,40 @@ public class OllamaConfig {
                 System.err.println("[OllamaConfig] load failed: " + e.getMessage());
             }
         }
-        this.url            = p.getProperty("url",   DEFAULT_URL);
-        this.model          = p.getProperty("model", DEFAULT_MODEL);
-        this.timeoutSeconds = parseInt(p.getProperty("timeout"), DEFAULT_TIMEOUT_SEC);
-        this.temperature    = parseDouble(p.getProperty("temperature"), DEFAULT_TEMPERATURE);
+        this.url            = p.getProperty("ollama.url",   DEFAULT_URL);
+        this.model          = p.getProperty("ollama.model", DEFAULT_MODEL);
+        this.timeoutSeconds = parseInt(p.getProperty("ollama.timeout"), DEFAULT_TIMEOUT_SEC);
+        this.temperature    = parseDouble(p.getProperty("ollama.temperature"), DEFAULT_TEMPERATURE);
     }
 
+    /**
+     * Сохраняет текущие настройки Ollama в единый файл app.properties.
+     * Читает существующие свойства, чтобы не затереть SonarQube и Jira.
+     */
     public void save() {
         Properties p = new Properties();
-        p.setProperty("url",         url == null ? "" : url);
-        p.setProperty("model",       model == null ? "" : model);
-        p.setProperty("timeout",     String.valueOf(timeoutSeconds));
-        p.setProperty("temperature", String.valueOf(temperature));
+        // 1. Загружаем существующие настройки, чтобы сохранить чужие ключи
+        if (configFile != null && Files.exists(configFile)) {
+            try (InputStream in = Files.newInputStream(configFile)) {
+                p.load(in);
+            } catch (IOException e) {
+                System.err.println("[OllamaConfig] load before save failed: " + e.getMessage());
+            }
+        }
+
+        // 2. Обновляем только свои ключи (с префиксом ollama.)
+        p.setProperty("ollama.url",         url == null ? "" : url);
+        p.setProperty("ollama.model",       model == null ? "" : model);
+        p.setProperty("ollama.timeout",     String.valueOf(timeoutSeconds));
+        p.setProperty("ollama.temperature", String.valueOf(temperature));
+
+        // 3. Записываем обратно
         try {
             if (configFile == null) return;
             Path parent = configFile.toAbsolutePath().getParent();
             if (parent != null) Files.createDirectories(parent);
             try (OutputStream out = Files.newOutputStream(configFile)) {
-                p.store(out, "Ollama configuration");
+                p.store(out, "app.properties — unified settings");
             }
         } catch (IOException e) {
             System.err.println("[OllamaConfig] save failed: " + e.getMessage());

@@ -9,112 +9,49 @@ public final class Defaults {
     private Defaults() {}
 
     // ============================================================
-    // session.properties — рабочий скелет.
-    // Создаётся автоматически, если файла нет.
-    // Пользователь заполняет sonar.url + sonar.token и перезапускает
-    // (или сохраняет через меню «Файл → Настройки…»).
+    // app.properties — ЕДИНЫЙ ФАЙЛ НАСТРОЕК
     // ============================================================
-    public static final String SESSION_PROPERTIES_TEMPLATE = """
+    public static final String APP_PROPERTIES_TEMPLATE = """
             # ========================================================
-            # session.properties — параметры подключения к SonarQube
+            # app.properties — единый файл настроек приложения
             # ========================================================
-            #
-            # 1. Сгенерируйте Personal Access Token:
-            #    https://<sonar>/account/security
-            # 2. Заполните поля sonar.url и sonar.token ниже.
-            # 3. Перезапустите приложение (или сохраните в диалоге Настроек).
-            #
-            # sonar.auth:
-            #   bearer — SonarQube 9.x / 10.x / 2025.x (рекомендуется)
-            #   basic  — старые версии (Authorization: Basic user:token)
-            #   cookie — legacy: сырой Cookie из браузера
-            # ========================================================
-
+            
+            # --- SonarQube ---
             sonar.url=
             sonar.user=
-
             sonar.auth=bearer
             sonar.token=
-
-            # --- Альтернатива: cookie-аутентификация (legacy) ---
-            #sonar.auth=cookie
-            #sonar.cookie=OAUTHSTATE=...; XSRF-TOKEN=...; JWT-SESSION=...
-            """;
-
-    // ============================================================
-    // ollama.properties — параметры подключения к LLM.
-    // ============================================================
-    public static final String OLLAMA_PROPERTIES_TEMPLATE = """
-            # Ollama configuration
-            # url — адрес Ollama-сервера (по умолчанию локальный)
-            # model — имя модели (например llama3, mistral, qwen2.5-coder)
-            # timeout — таймаут запроса в секундах
-            # temperature — температура генерации (0.0–2.0)
-            url=http://localhost:11434
-            model=llama3
-            timeout=300
-            temperature=0.2
-            """;
-
-    // ============================================================
-    // jira.properties — параметры подключения к Jira.
-    // ============================================================
-    public static final String JIRA_PROPERTIES_TEMPLATE = """
-            # ========================================================
-            # jira.properties — параметры подключения к Jira
-            # ========================================================
-            #
-            # jira.url             — базовый URL Jira
-            # jira.session         — путь к файлу сессии (текст запроса из браузера)
-            # jira.issueType       — ID типа задачи для создания
-            # jira.defaultProject  — ключ проекта по умолчанию
-            # jira.team            — идентификатор команды Tempo
-            # jira.assignee        — исполнитель (me / login)
-            # ========================================================
-
+            
+            # --- Ollama (LLM) ---
+            ollama.url=http://localhost:11434
+            ollama.model=llama3
+            ollama.timeout=300
+            ollama.temperature=0.2
+            
+            # --- Jira ---
             jira.url=https://jira-medmis.bars.group
             jira.session=session.txt
             jira.issueType=10206
             jira.defaultProject=MEDDEV
-
-            # Опционально:
-            #jira.epic=
-            #jira.priority=
-            #jira.security=
             jira.team=HM12
-            jira.labels=
-            jira.components=
             jira.assignee=me
+            
+            # --- Jira Epics (QUAL:SEV) ---
+            jira.epic.security.blocker=MEDDEV-172524
+            jira.epic.security.high=MEDDEV-172525
+            jira.epic.reliability.blocker=MEDDEV-172527
+            jira.epic.reliability.high=MEDDEV-172526
+            jira.epic.maintainability.blocker=MEDDEV-172528
+            jira.epic.maintainability.high=MEDDEV-172529
             """;
 
     // ============================================================
-    // session.txt — файл сессии Jira.
-    // Пользователь должен вставить сюда текст запроса из браузера
-    // (DevTools → Network → правый клик на запросе → Copy → Copy as cURL,
-    //  либо скопировать все заголовки вручную).
+    // session.txt — файл сессии Jira
     // ============================================================
     public static final String SESSION_TXT_TEMPLATE = """
             # ========================================================
             # session.txt — сессия Jira (скопируйте запрос из браузера)
             # ========================================================
-            #
-            # КАК ЗАПОЛНИТЬ:
-            #   1. Откройте Jira в браузере и войдите в систему.
-            #   2. Нажмите F12 → вкладка Network.
-            #   3. Обновите страницу (F5), кликните на любой запрос к Jira.
-            #   4. Правый клик → Copy → Copy request headers
-            #      (или Copy as cURL, вставив сюда целиком).
-            #   5. Вставьте содержимое ниже, заполнив Cookie, X-AUSERNAME
-            #      и Request URL.
-            #   6. Сохраните файл и в меню «Файл → Настройки…» откройте
-            #      вкладку «Jira» → «Перезагрузить».
-            #
-            # Парсер ищет строки:
-            #   - "Cookie: ..."          — заголовок Cookie
-            #   - "X-AUSERNAME: ..."     — ваш login
-            #   - "Request URL"          — следующая строка содержит базовый URL
-            # ========================================================
-
             Cookie:
             X-AUSERNAME:
 
@@ -123,8 +60,7 @@ public final class Defaults {
             """;
 
     // ============================================================
-    // team_mapping.csv — карта «форма → команда/модуль».
-    // Первая строка — заголовок. Пользователь дополняет по мере надобности.
+    // team_mapping.csv
     // ============================================================
     public static final String TEAM_MAPPING_CSV_TEMPLATE = """
             Форма,Компонент,Владелец тМИС,Переопределяется формами
@@ -144,28 +80,6 @@ public final class Defaults {
             - confirm: реальная и срочная.
             - resolve: уже исправлено.
             - wontfix: не будем исправлять.
-
-            === ПРИОРИТЕТ ПРАВИЛ (сверху вниз) ===
-            1) РЕАЛЬНАЯ ЛОГИЧЕСКАЯ ОШИБКА — приоритет выше, чем "код сгенерирован".
-               Признаки: count($x) < 0, strlen() < 0, size() < 0, index < 0 для
-               неотрицательного индекса, недостижимые throw/return/break (dead-code),
-               разыменование null без проверки, потеря данных, неверный знак сравнения
-               в валидации, off-by-one в срезах, неверный контракт относительно OpenAPI.
-               Для таких дефектов: статус = accept или confirm, фикс-тег = "require-fix".
-
-            2) СТИЛИСТИКА / СТРУКТУРА — статус = accept или wontfix,
-               фикс-тег = "not-require-fix". Дублирование, отсутствие default в switch,
-               длина методов, naming, неиспользуемые импорты, магические числа.
-
-            === НЕ ЯВЛЯЕТСЯ ОШИБКОЙ (типичные false positive) ===
-            - ИСПОЛЬЗОВАНИЕ СТРОК ВМЕСТО КОНСТАНТ ("magic strings", "string literals").
-            - Дублирование одинаковых строковых литералов в разных местах.
-            - Отсутствие default в switch (если switch покрывает enum полностью).
-            - Магические числа в тестах и фикстурах.
-            - Naming (camelCase/snake_case), отступы, порядок импортов.
-            - Отсутствие Javadoc / PHPDoc в сгенерированном коде.
-            - Длина метода, вложенность, число параметров в сгенерированном коде.
-            - "Unused import" в сгенерированном коде.
 
             === РЕШЕНИЕ О НЕОБХОДИМОСТИ ИСПРАВЛЕНИЯ ===
             Верни РОВНО ОДИН из двух тегов в поле "Теги:"
@@ -262,8 +176,5 @@ public final class Defaults {
             4. Строки 4+: 1–3 предложения.
             """;
 
-    // ============================================================
-    // prompts/analyze-issue.txt
-    // ============================================================
     public static final String PROMPT_ANALYZE_ISSUE = PROMPT_AUTO_RESOLVE;
 }

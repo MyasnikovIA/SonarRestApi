@@ -18,17 +18,13 @@ import java.util.function.Consumer;
  *   - OllamaConfig — настройки LLM;
  *   - PromptTemplate — каталог prompts/*.txt;
  *   - project / sev / qual / hideProcessed — состояние верхней панели.
- *
- * Не содержит HTTP-клиента к промежуточному серверу (6060) — все запросы
- * к SonarQube идут напрямую. Метод {@link #api()} сохранён временно
- * для совместимости с ReportExportService/Dialog (переделываются в части 9).
  */
 public class GuiContext {
 
     private final ServerState state;
     private final OllamaConfig ollamaConfig;
     private final PromptTemplate template;
-    private final Path sessionFile;
+    private final Path settingsFile;
     private final Path promptsDir;
 
     private String project        = "";
@@ -45,11 +41,11 @@ public class GuiContext {
 
     public GuiContext(ServerState state, OllamaConfig ollamaConfig,
                       PromptTemplate template,
-                      Path sessionFile, Path promptsDir) {
+                      Path settingsFile, Path promptsDir) {
         this.state = state;
         this.ollamaConfig = ollamaConfig;
         this.template = template;
-        this.sessionFile = sessionFile;
+        this.settingsFile = settingsFile;
         this.promptsDir = promptsDir;
     }
 
@@ -58,7 +54,12 @@ public class GuiContext {
     public ServerState    state()        { return state; }
     public OllamaConfig   ollamaConfig() { return ollamaConfig; }
     public PromptTemplate template()     { return template; }
-    public Path           sessionFile()  { return sessionFile; }
+
+    /**
+     * Возвращает путь к единому файлу настроек (app.properties).
+     * Оставлено имя sessionFile() для обратной совместимости.
+     */
+    public Path           sessionFile()  { return settingsFile; }
     public Path           promptsDir()   { return promptsDir; }
 
     public boolean isSessionReady() {

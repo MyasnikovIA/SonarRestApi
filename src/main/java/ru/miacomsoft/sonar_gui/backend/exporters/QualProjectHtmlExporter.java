@@ -15,7 +15,7 @@ import java.util.*;
 public class QualProjectHtmlExporter {
 
     public static void writeDirectory(Path rootDir, List<String> projects, GuiContext ctx,
-                                      ReportExportService.BaseFilter filter,
+                                      ReportExportService.BaseFilter filter, List<String> failedProjects,
                                       ReportExportService.ProgressListener listener) throws Exception {
         Files.createDirectories(rootDir);
         String host = getHost(ctx);
@@ -31,35 +31,45 @@ public class QualProjectHtmlExporter {
             }
             System.out.println("[QualProjectHtmlExporter] Загрузка проекта " + project + " (" + currentProject + "/" + totalProjects + ")");
 
-            SonarIssuesApi api = ctx.state().newApi(project);
-            String statuses = ReportExportService.resolveStatuses(filter);
+            try {
+                SonarIssuesApi api = ctx.state().newApi(project);
+                String statuses = ReportExportService.resolveStatuses(filter);
 
-            // Загружаем ВСЕ issues, соответствующие базовым фильтрам SonarQube (status, sev, qual)
-            List<Issue> rawIssues = api.fetchAllByParts(statuses, filter.severity, filter.quality,
-                    (cur, tot, msg) -> {
-                        if (listener != null) listener.onProgress(cur, tot, "fetching", project + ": " + msg);
-                    });
+                // Загружаем ВСЕ issues, соответствующие базовым фильтрам SonarQube (status, sev, qual)
+                List<Issue> rawIssues = api.fetchAllByParts(statuses, filter.severity, filter.quality,
+                        (cur, tot, msg) -> {
+                            if (listener != null) listener.onProgress(cur, tot, "fetching", project + ": " + msg);
+                        });
 
-            // Дедупликация и применение КЛИЕНТСКИХ фильтров (теги, правила, текст)
-            Map<String, Issue> uniqueIssues = new LinkedHashMap<>();
-            for (Issue it : rawIssues) {
-                if (ReportExportService.passesClientFilters(it, filter)) {
-                    uniqueIssues.put(it.key, it);
+                // Дедупликация и применение КЛИЕНТСКИХ фильтров (теги, правила, текст)
+                Map<String, Issue> uniqueIssues = new LinkedHashMap<>();
+                for (Issue it : rawIssues) {
+                    if (ReportExportService.passesClientFilters(it, filter)) {
+                        uniqueIssues.put(it.key, it);
+                    }
                 }
-            }
 
-            // Группировка: QUAL -> SEV -> Файл -> Issues
-            Map<String, Map<String, Map<String, List<Issue>>>> structured = new TreeMap<>();
+                // Группировка: QUAL -> SEV -> Файл -> Issues
+                Map<String, Map<String, Map<String, List<Issue>>>> structured = new TreeMap<>();
 
-            for (Issue it : uniqueIssues.values()) {
-                // УДАЛЕНА ЖЕСТКАЯ ПРОВЕРКА not-require-fix
+                for (Issue it : uniqueIssues.values()) {
+                    if (it.impacts != null && !it.impacts.isEmpty()) {
+                        for (Issue.Impact im : it.impacts) {
+                            String qual = im.softwareQuality != null ? im.softwareQuality.toUpperCase() : "MAINTAINABILITY";
+                            String sev = im.severity != null ? im.severity.toUpperCase() : "INFO";
 
-                if (it.impacts != null && !it.impacts.isEmpty()) {
-                    for (Issue.Impact im : it.impacts) {
-                        String qual = im.softwareQuality != null ? im.softwareQuality.toUpperCase() : "MAINTAINABILITY";
-                        String sev = im.severity != null ? im.severity.toUpperCase() : "INFO";
+                            // Проверяем, что impact попадает под выбранные фильтры
+                            if (filter.quality != null && !"ALL".equalsIgnoreCase(filter.quality) && !filter.quality.contains(qual)) continue;
+                            if (filter.severity != null && !"ALL".equalsIgnoreCase(filter.severity) && !filter.severity.contains(sev)) continue;
 
-                        // Проверяем, что impact попадает под выбранные фильтры (на случай если у issue несколько impacts)
+                            structured.computeIfAbsent(qual, k -> new TreeMap<>())
+                                    .computeIfAbsent(sev, k -> new TreeMap<>())
+                                    .computeIfAbsent(it.component, k -> new ArrayList<>()).add(it);
+                        }
+                    } else if (it.severity != null) {
+                        String qual = "MAINTAINABILITY";
+                        String sev = it.severity.toUpperCase();
+
                         if (filter.quality != null && !"ALL".equalsIgnoreCase(filter.quality) && !filter.quality.contains(qual)) continue;
                         if (filter.severity != null && !"ALL".equalsIgnoreCase(filter.severity) && !filter.severity.contains(sev)) continue;
 
@@ -67,64 +77,79 @@ public class QualProjectHtmlExporter {
                                 .computeIfAbsent(sev, k -> new TreeMap<>())
                                 .computeIfAbsent(it.component, k -> new ArrayList<>()).add(it);
                     }
-                } else if (it.severity != null) {
-                    String qual = "MAINTAINABILITY";
-                    String sev = it.severity.toUpperCase();
-
-                    if (filter.quality != null && !"ALL".equalsIgnoreCase(filter.quality) && !filter.quality.contains(qual)) continue;
-                    if (filter.severity != null && !"ALL".equalsIgnoreCase(filter.severity) && !filter.severity.contains(sev)) continue;
-
-                    structured.computeIfAbsent(qual, k -> new TreeMap<>())
-                            .computeIfAbsent(sev, k -> new TreeMap<>())
-                            .computeIfAbsent(it.component, k -> new ArrayList<>()).add(it);
                 }
-            }
 
-            String productName = "Без имени продукта";
-            String teamOwner = "PFM134"; // По умолчанию из задачи
+                String productName = "Без имени продукта";
+                String teamOwner = "PFM134"; // По умолчанию из задачи
 
-            ProductMapping.ProductInfo info = pm.findInfo(project);
-            if (info != null) {
-                if (info.product != null && !info.product.isBlank()) productName = info.product.trim();
-                if (info.teamOwner != null && !info.teamOwner.isBlank()) teamOwner = info.teamOwner.trim();
-            }
+                ProductMapping.ProductInfo info = pm.findInfo(project);
+                if (info != null) {
+                    if (info.product != null && !info.product.isBlank()) productName = info.product.trim();
+                    if (info.teamOwner != null && !info.teamOwner.isBlank()) teamOwner = info.teamOwner.trim();
+                }
 
-            Path productDir = rootDir.resolve(sanitizePathPart(productName));
-            Path projectDir = productDir.resolve(sanitizePathPart(project));
+                Path productDir = rootDir.resolve(sanitizePathPart(productName));
+                Path projectDir = productDir.resolve(sanitizePathPart(project));
 
-            for (var qualEntry : structured.entrySet()) {
-                String qual = qualEntry.getKey();
-                String qualDirName = mapQualityToDir(qual);
+                for (var qualEntry : structured.entrySet()) {
+                    String qual = qualEntry.getKey();
+                    String qualDirName = mapQualityToDir(qual);
 
-                for (var sevEntry : qualEntry.getValue().entrySet()) {
-                    String sev = sevEntry.getKey();
-                    Map<String, List<Issue>> byFile = sevEntry.getValue();
+                    for (var sevEntry : qualEntry.getValue().entrySet()) {
+                        String sev = sevEntry.getKey();
+                        Map<String, List<Issue>> byFile = sevEntry.getValue();
 
-                    Path targetDir = projectDir.resolve(qualDirName).resolve(sev);
-                    Files.createDirectories(targetDir);
+                        Path targetDir = projectDir.resolve(qualDirName).resolve(sev);
+                        Files.createDirectories(targetDir);
 
-                    // Загрузка сниппетов
-                    Map<String, List<String>> snippets = new HashMap<>();
-                    for (List<Issue> lst : byFile.values()) {
-                        for (Issue it : lst) {
-                            try {
-                                List<String> s = api.fetchSnippet(it.key);
-                                if (s != null && !s.isEmpty()) snippets.put(it.key, s);
-                            } catch (Exception ignored) {}
+                        // Загрузка сниппетов
+                        Map<String, List<String>> snippets = new HashMap<>();
+                        for (List<Issue> lst : byFile.values()) {
+                            for (Issue it : lst) {
+                                try {
+                                    List<String> s = api.fetchSnippet(it.key);
+                                    if (s != null && !s.isEmpty()) snippets.put(it.key, s);
+                                } catch (Exception ignored) {}
+                            }
+                        }
+
+                        // Запись HTML-файлов
+                        HtmlPerFileExporter.writeDirectory(
+                                targetDir, byFile, snippets, project, host, false, null, null
+                        );
+
+                        // Создание задачи в Jira, если нужно
+                        if (filter.createJiraTasks) {
+                            int issueCount = byFile.values().stream().mapToInt(List::size).sum();
+                            createJiraTask(project, qual, sev, issueCount, teamOwner);
                         }
                     }
+                }
+            } catch (InterruptedException e) {
+                // Пробрасываем отмену наверх
+                throw e;
+            } catch (Exception e) {
+                String msg = e.getMessage();
+                String errorMsg = "Неизвестная ошибка";
 
-                    // Запись HTML-файлов
-                    HtmlPerFileExporter.writeDirectory(
-                            targetDir, byFile, snippets, project, host, false, null, null
-                    );
-
-                    // Создание задачи в Jira, если нужно
-                    if (filter.createJiraTasks) {
-                        int issueCount = byFile.values().stream().mapToInt(List::size).sum();
-                        createJiraTask(project, qual, sev, issueCount, teamOwner);
+                if (msg != null) {
+                    if (msg.contains("HTTP 403") || msg.contains("HTTP 401") || msg.contains("Forbidden")) {
+                        errorMsg = "Доступ запрещен (HTTP 403/401)";
+                    } else if (msg.contains("HTTP 404") || msg.contains("not found")) {
+                        errorMsg = "Проект не найден (HTTP 404)";
+                    } else if (msg.contains("HTTP 414") || msg.contains("Request-URI Too Large")) {
+                        errorMsg = "Слишком длинный URL (HTTP 414)";
+                    } else {
+                        errorMsg = msg;
                     }
                 }
+
+                System.err.println("[QualProjectHtmlExporter] Ошибка загрузки проекта " + project + ": " + errorMsg);
+                if (failedProjects != null) {
+                    failedProjects.add(project + " — " + errorMsg);
+                }
+                // Переходим к следующему проекту, не прерывая весь экспорт
+                continue;
             }
         }
 
@@ -216,7 +241,6 @@ public class QualProjectHtmlExporter {
 
     private static String sanitizePathPart(String s) {
         if (s == null || s.trim().isEmpty()) return "Без_названия";
-        // Заменяем недопустимые символы и убираем лишние пробелы
         return s.trim().replaceAll("[\\\\/:*?\"<>|]", "_").replaceAll("\\s+", "_");
     }
 }

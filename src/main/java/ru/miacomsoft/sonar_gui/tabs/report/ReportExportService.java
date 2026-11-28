@@ -93,6 +93,8 @@ public class ReportExportService {
             throw new IllegalStateException("Сессия SonarQube не готова");
         }
 
+        List<String> failedProjects = new ArrayList<>();
+
         Path outPath;
         if (type == ReportExportType.MULTI_PROJECT_SUMMARY) {
             if (filter == null || filter.selectedProjects == null || filter.selectedProjects.isEmpty()) {
@@ -102,7 +104,7 @@ public class ReportExportService {
             if (filter.outputFilePath != null && !filter.outputFilePath.isBlank()) {
                 outputPath = Path.of(filter.outputFilePath);
             }
-            outPath = exportMultiProjectSummary(filter.selectedProjects, outputPath, filter);
+            outPath = exportMultiProjectSummary(filter.selectedProjects, outputPath, filter, failedProjects);
         } else if (type == ReportExportType.QUAL_TEAM_PROJECT_HTML) {
             if (filter == null || filter.selectedProjects == null || filter.selectedProjects.isEmpty()) {
                 throw new IllegalArgumentException("Не выбрано ни одного проекта.");
@@ -110,7 +112,7 @@ public class ReportExportService {
             if (targetDir == null) {
                 throw new IllegalArgumentException("Не указан каталог сохранения.");
             }
-            outPath = exportQualProjectHtml(filter.selectedProjects, targetDir, filter);
+            outPath = exportQualProjectHtml(filter.selectedProjects, targetDir, filter, failedProjects);
         } else {
             List<Issue> issues;
             if (keysCsv != null && !keysCsv.isEmpty()) {
@@ -160,7 +162,7 @@ public class ReportExportService {
 
     // ============ MULTI-PROJECT SUMMARY (12) ============
 
-    private Path exportMultiProjectSummary(List<String> projectKeys, Path outputFilePath, BaseFilter filter) throws Exception {
+    private Path exportMultiProjectSummary(List<String> projectKeys, Path outputFilePath, BaseFilter filter, List<String> failedProjects) throws Exception {
         String host = hostOf();
         String[] qualities = {"SECURITY", "RELIABILITY", "MAINTAINABILITY", "SECURITY_HOTSPOT"};
         String[] severities = {"BLOCKER", "HIGH", "MEDIUM", "LOW", "INFO"};
@@ -179,6 +181,8 @@ public class ReportExportService {
         html.append(".sev-name{font-weight:600;color:#172b4d;width:120px;}\n");
         html.append(".sev-stats{color:#6b778c;}\n");
         html.append(".count{font-weight:700;color:#0052cc;margin-right:15px;}\n");
+        html.append(".error-block{background:#ffebe6;border:1px solid #ff8f73;border-radius:8px;padding:20px;margin-top:30px;}\n");
+        html.append(".error-block h2{color:#de350b;}\n");
         html.append("a{color:#0052cc;text-decoration:none;}\n");
         html.append("a:hover{text-decoration:underline;}\n");
         html.append("</style>\n</head>\n<body>\n");
@@ -221,10 +225,7 @@ public class ReportExportService {
                         });
             } catch (Exception e) {
                 logErr("[ReportExportService] Ошибка загрузки проекта " + project + ": " + e.getMessage());
-                html.append("<div class=\"project-block\" style=\"border-color:#f85149;\">\n");
-                html.append("<h2>").append(esc(project)).append("</h2>\n");
-                html.append("<p style=\"color:#f85149;\">Ошибка загрузки данных: ").append(esc(e.getMessage())).append("</p>\n");
-                html.append("</div>\n");
+                failedProjects.add(project + " — " + e.getMessage());
                 continue;
             }
 
@@ -238,8 +239,6 @@ public class ReportExportService {
             }
 
             for (Issue it : uniqueIssues.values()) {
-                if (it.tags != null && it.tags.contains("not-require-fix")) continue;
-
                 if (it.impacts != null && !it.impacts.isEmpty()) {
                     for (Issue.Impact im : it.impacts) {
                         String qual = im.softwareQuality != null ? im.softwareQuality.toUpperCase() : null;
@@ -290,6 +289,17 @@ public class ReportExportService {
             html.append("</div>\n");
         }
 
+        // Добавляем блок с ошибками, если есть недоступные проекты
+        if (!failedProjects.isEmpty()) {
+            html.append("<div class=\"error-block\">\n");
+            html.append("<h2>⚠ Ошибки доступа к проектам</h2>\n");
+            html.append("<p>Следующие проекты не удалось загрузить:</p>\n<ul>\n");
+            for (String err : failedProjects) {
+                html.append("<li>").append(esc(err)).append("</li>\n");
+            }
+            html.append("</ul>\n</div>\n");
+        }
+
         html.append("</body>\n</html>\n");
 
         if (outputFilePath != null) {
@@ -307,13 +317,27 @@ public class ReportExportService {
 
     // ============ QUAL TEAM PROJECT HTML (13) ============
 
-    private Path exportQualProjectHtml(List<String> projects, Path targetDir, BaseFilter filter) throws Exception {
+    private Path exportQualProjectHtml(List<String> projects, Path targetDir, BaseFilter filter, List<String> failedProjects) throws Exception {
         log("[ReportExportService] Отчет 13: запуск глубокой выгрузки по проектам...");
-        QualProjectHtmlExporter.writeDirectory(targetDir, projects, ctx, filter, listener);
+        QualProjectHtmlExporter.writeDirectory(targetDir, projects, ctx, filter, failedProjects, listener);
+
+        // Если есть ошибки, прикрепляем лог в корень отчета
+        if (!failedProjects.isEmpty()) {
+            Path errorLog = targetDir.resolve("_errors.log");
+            StringBuilder sb = new StringBuilder();
+            sb.append("СПИСОК ПРОЕКТОВ, К КОТОРЫМ НЕТ ДОСТУПА:\n");
+            sb.append("=========================================\n");
+            for (String err : failedProjects) {
+                sb.append(err).append("\n");
+            }
+            Files.writeString(errorLog, sb.toString(), StandardCharsets.UTF_8);
+            log("[ReportExportService] Отчет 13: создан файл с ошибками " + errorLog);
+        }
+
         return targetDir;
     }
 
-    // ============ ОСТАЛЬНЫЕ МЕТОДЫ ============
+    // ============ ОСТАЛЬНЫЕ МЕТОДЫ (без изменений) ============
 
     private List<Issue> loadByKeys(String project, List<String> keys) throws Exception {
         SonarIssuesApi api = ctx.state().newApi(project);

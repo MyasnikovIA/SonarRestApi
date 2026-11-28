@@ -84,7 +84,6 @@ public class SonarIssuesApi {
         public BatchLimitExceededException(String msg) { super(msg); }
     }
 
-    // ИСПРАВЛЕННЫЙ МЕТОД emitBatch
     private static void emitBatch(FetchProgressListener listener,
                                   int current, int total, String context) {
         if (listener == null) return;
@@ -100,6 +99,11 @@ public class SonarIssuesApi {
             System.out.println("[SonarIssuesApi] " + msg);
             listener.onProgress(current, 0, msg);
         }
+    }
+
+    private static boolean isUrlTooLongError(String msg) {
+        if (msg == null) return false;
+        return msg.contains("HTTP 414") || msg.contains("Request-URI Too Large");
     }
 
     private static String normalizeJsonQuotes(String msg) {
@@ -384,42 +388,71 @@ public class SonarIssuesApi {
         return out;
     }
 
-    // ИСПРАВЛЕННЫЙ МЕТОД fetchAllByFiles
     private List<Issue> fetchAllByFiles(String statuses, String impactSeverity, String quality,
                                         int grandFetched, int grandTotal,
                                         FetchProgressListener listener) throws Exception {
         List<String> files = fetchProjectFilesList();
         System.out.println("[SonarIssuesApi] Загрузка разбита на файлы. Всего файлов: " + files.size());
         List<Issue> out = new ArrayList<>();
-        int batchSize = 20;
+
+        List<String> batch = new ArrayList<>();
+        int currentLen = 0;
+        // Безопасный лимит длины для параметра components (чтобы Nginx не выдал 414)
+        int maxUrlLen = 1500;
+
         int totalFiles = files.size();
+        for (int i = 0; i < totalFiles; i++) {
+            String file = files.get(i);
+            int len = enc(file).length() + 1; // +1 за запятую
 
-        for (int i = 0; i < totalFiles; i += batchSize) {
-            int batchIdx = i / batchSize + 1;
-            int totalBatches = (totalFiles + batchSize - 1) / batchSize;
-            List<String> batch = files.subList(i, Math.min(i + batchSize, totalFiles));
-            String components = String.join(",", batch);
+            if (currentLen + len > maxUrlLen && !batch.isEmpty()) {
+                // Отправляем текущий пакет
+                out.addAll(processFileBatch(statuses, impactSeverity, quality, batch, grandFetched + out.size(), grandTotal, listener));
+                batch.clear();
+                currentLen = 0;
+            }
+            batch.add(file);
+            currentLen += len;
 
-            // Отправляем прогресс по количеству обработанных файлов
-            emitBatch(listener, i + batch.size(), totalFiles,
-                    String.format("Файлы %d/%d (пакет %d/%d)",
-                            Math.min(i + batch.size(), totalFiles),
-                            totalFiles, batchIdx, totalBatches));
-
-            try {
-                // Передаем null, чтобы не перебивать общий прогресс файлов
-                out.addAll(fetchAllByComponents(statuses, impactSeverity, quality, components,
-                        grandFetched + out.size(), grandTotal, null));
-            } catch (BatchLimitExceededException e) {
-                System.out.println("[SonarIssuesApi] Лимит для пакета файлов. Разбиваем на отдельные файлы...");
-                for (String singleFile : batch) {
-                    // И здесь тоже null
-                    out.addAll(fetchAllByComponents(statuses, impactSeverity, quality, singleFile,
-                            grandFetched + out.size(), grandTotal, null));
-                }
+            // Обновляем прогресс
+            if (i % 20 == 0 || i == totalFiles - 1) {
+                emitBatch(listener, i + 1, totalFiles,
+                        String.format("Файлы %d/%d", i + 1, totalFiles));
             }
         }
+
+        if (!batch.isEmpty()) {
+            out.addAll(processFileBatch(statuses, impactSeverity, quality, batch, grandFetched + out.size(), grandTotal, listener));
+        }
+
         return out;
+    }
+
+    private List<Issue> processFileBatch(String statuses, String impactSeverity, String quality,
+                                         List<String> batch, int grandFetched, int grandTotal,
+                                         FetchProgressListener listener) {
+        String components = String.join(",", batch);
+        try {
+            return fetchAllByComponents(statuses, impactSeverity, quality, components,
+                    grandFetched, grandTotal, null);
+        } catch (Exception e) {
+            String msg = e.getMessage();
+            if (isUrlTooLongError(msg)) {
+                if (batch.size() == 1) {
+                    System.err.println("[SonarIssuesApi] 414 (URL слишком длинный) для файла: " + batch.get(0) + ". Пропускаем.");
+                    return new ArrayList<>();
+                }
+                // Рекурсивно делим пакет пополам
+                int mid = batch.size() / 2;
+                List<Issue> res = new ArrayList<>();
+                res.addAll(processFileBatch(statuses, impactSeverity, quality, batch.subList(0, mid), grandFetched, grandTotal, listener));
+                res.addAll(processFileBatch(statuses, impactSeverity, quality, batch.subList(mid, batch.size()), grandFetched, grandTotal, listener));
+                return res;
+            }
+
+            System.err.println("[SonarIssuesApi] Ошибка в пакете файлов: " + msg);
+            return new ArrayList<>(); // Пропускаем пакет при других ошибках (например, 403)
+        }
     }
 
     private List<Issue> fetchAllByComponents(String statuses, String impactSeverity,

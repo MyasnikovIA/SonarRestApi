@@ -40,6 +40,7 @@ public class ReportPanel extends JPanel implements Reloadable {
     private final MultiSelectDropdown excludedTagsDropdown;
     private final MultiSelectDropdown rulesDropdown;
     private final JTextField textField;
+    private final JCheckBox hideProcessedCheckbox; // НОВОЕ ПОЛЕ
     private final JButton applyFilterBtn;
     private final JButton exportBtn;
 
@@ -140,6 +141,15 @@ public class ReportPanel extends JPanel implements Reloadable {
         });
         row2.add(textField);
 
+        // ДОБАВЛЕН ЧЕКБОКС "СКРЫТЬ ОБРАБОТАННЫЕ"
+        hideProcessedCheckbox = new JCheckBox("Скрыть обработанные");
+        hideProcessedCheckbox.setOpaque(false);
+        hideProcessedCheckbox.setForeground(GuiStyle.TEXT);
+        hideProcessedCheckbox.setFont(GuiStyle.FONT_BASE);
+        hideProcessedCheckbox.setSelected(ctx.isHideProcessed());
+        hideProcessedCheckbox.addActionListener(e -> reload());
+        row2.add(hideProcessedCheckbox);
+
         applyFilterBtn = UiHelpers.primaryButton("Применить фильтр");
         applyFilterBtn.addActionListener(e -> reload());
         row2.add(applyFilterBtn);
@@ -214,8 +224,9 @@ public class ReportPanel extends JPanel implements Reloadable {
         String sevCsv = sevDropdown.getSelectedCsv();
         String qualCsv = qualDropdown.getSelectedCsv();
         String statCsv = statusDropdown.getSelectedCsv();
+        boolean hideProc = hideProcessedCheckbox.isSelected(); // БЕРЕМ ИЗ ЧЕКБОКСА
 
-        currentLoader = new ReportLoader(ctx, sevCsv, qualCsv, statCsv,
+        currentLoader = new ReportLoader(ctx, sevCsv, qualCsv, statCsv, hideProc,
                 this::onLoaded,
                 this::onError,
                 this::onProgress);
@@ -438,7 +449,7 @@ public class ReportPanel extends JPanel implements Reloadable {
         filter.project        = ctx.getProject();
         filter.severity       = sevDropdown.getSelectedCsv();
         filter.quality        = qualDropdown.getSelectedCsv();
-        filter.hideProcessed  = ctx.isHideProcessed();
+        filter.hideProcessed  = hideProcessedCheckbox.isSelected(); // БЕРЕМ ИЗ ЧЕКБОКСА
         filter.tags           = tagsDropdown.getSelected();
         filter.excludedTags   = excludedTagsDropdown.getSelected();
         filter.rules          = rulesDropdown.getSelected();
@@ -458,7 +469,7 @@ public class ReportPanel extends JPanel implements Reloadable {
         filter.project        = ctx.getProject();
         filter.severity       = sevDropdown.getSelectedCsv();
         filter.quality        = qualDropdown.getSelectedCsv();
-        filter.hideProcessed  = ctx.isHideProcessed();
+        filter.hideProcessed  = hideProcessedCheckbox.isSelected(); // БЕРЕМ ИЗ ЧЕКБОКСА
         filter.tags           = tagsDropdown.getSelected();
         filter.excludedTags   = excludedTagsDropdown.getSelected();
         filter.rules          = rulesDropdown.getSelected();

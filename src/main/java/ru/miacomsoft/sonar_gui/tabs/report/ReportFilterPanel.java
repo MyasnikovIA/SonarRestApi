@@ -42,6 +42,7 @@ public class ReportFilterPanel extends JPanel implements Reloadable {
     private final MultiSelectDropdown excludedTagsDropdown;
     private final MultiSelectDropdown rulesDropdown;
     private final JTextField textField;
+    private final JCheckBox hideProcessedCheckbox; // НОВОЕ ПОЛЕ
     private final JButton exportBtn;
     private final JLabel headerLabel;
 
@@ -111,6 +112,14 @@ public class ReportFilterPanel extends JPanel implements Reloadable {
         textField.setPreferredSize(new Dimension(200, 26));
         textField.setToolTipText("Фильтр по ключу/файлу/сообщению");
         row2.add(textField);
+
+        // ДОБАВЛЕН ЧЕКБОКС "СКРЫТЬ ОБРАБОТАННЫЕ"
+        hideProcessedCheckbox = new JCheckBox("Скрыть обработанные");
+        hideProcessedCheckbox.setOpaque(false);
+        hideProcessedCheckbox.setForeground(GuiStyle.TEXT);
+        hideProcessedCheckbox.setFont(GuiStyle.FONT_BASE);
+        hideProcessedCheckbox.setSelected(ctx.isHideProcessed());
+        row2.add(hideProcessedCheckbox);
 
         top.add(row2);
         add(top, BorderLayout.NORTH);
@@ -338,7 +347,7 @@ public class ReportFilterPanel extends JPanel implements Reloadable {
         filter.project        = ctx.getProject();
         filter.severity       = sevDropdown.getSelectedCsv();
         filter.quality        = qualDropdown.getSelectedCsv();
-        filter.hideProcessed  = ctx.isHideProcessed();
+        filter.hideProcessed  = hideProcessedCheckbox.isSelected(); // БЕРЕМ ИЗ ЧЕКБОКСА
         filter.tags           = tagsDropdown.getSelected();
         filter.excludedTags   = excludedTagsDropdown.getSelected();
         filter.rules          = rulesDropdown.getSelected();

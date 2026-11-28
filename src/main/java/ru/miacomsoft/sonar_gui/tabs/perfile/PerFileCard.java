@@ -53,7 +53,7 @@ public class PerFileCard extends JPanel {
         fileCheckbox = new JCheckBox();
         fileCheckbox.setOpaque(false);
         fileCheckbox.addActionListener(e -> {
-            if (globalAll) return; // В глобальном режиме файловый чекбокс скрыт
+            if (globalAll) return;
             setAllSelected(fileCheckbox.isSelected());
             if (delegate != null) delegate.onSelectionChanged();
         });
@@ -137,9 +137,7 @@ public class PerFileCard extends JPanel {
                 String msg = v == null ? "" : v.toString();
                 IssueService.IssueDto dto = rows.get(row).issue;
                 String prefix = "";
-                if (dto.status() != null && !dto.status().isEmpty()
-                        && !dto.status().equals("OPEN")
-                        && !dto.status().equals("REOPENED")) {
+                if (dto.isProcessed()) {
                     prefix = "<span style='color:#3fb950;font-weight:bold;'>["
                             + UiHelpers.escHtml(dto.status()) + "]</span> ";
                 }
@@ -179,7 +177,6 @@ public class PerFileCard extends JPanel {
         scroll.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
         scroll.getVerticalScrollBar().setUnitIncrement(16);
 
-        // Задача 2: карточка по размеру содержимого
         int tableHeaderH = table.getTableHeader().getPreferredSize().height;
         if (tableHeaderH <= 0) tableHeaderH = 25;
         int contentH = rows.size() * ROW_HEIGHT + 2;
@@ -196,17 +193,9 @@ public class PerFileCard extends JPanel {
         setMaximumSize(new Dimension(Integer.MAX_VALUE, cardH));
     }
 
-    /**
-     * Задача 1: глобальный режим "Выбрать всё".
-     * При включении: скрываем файловый чекбокс и колонку чекбоксов,
-     * снимаем старые пометки. getSelectedIssues() начинает возвращать
-     * ВСЕ issues карточки (полный список будет дополнительно отфильтрован
-     * по видимости карточки на уровне панели).
-     */
     public void setGlobalSelectAll(boolean global) {
         this.globalAll = global;
 
-        // Снимаем старые отметки
         for (PerFileRowModel r : rows) r.selected = false;
         fileCheckbox.setSelected(false);
         fileCheckbox.setVisible(!global);
@@ -238,8 +227,6 @@ public class PerFileCard extends JPanel {
 
     public List<IssueService.IssueDto> getSelectedIssues() {
         if (globalAll) {
-            // В глобальном режиме карточка отдаёт все свои issues;
-            // видимость карточки проверяется на уровне PerFilePanel.
             return getAllIssues();
         }
         List<IssueService.IssueDto> out = new ArrayList<>();

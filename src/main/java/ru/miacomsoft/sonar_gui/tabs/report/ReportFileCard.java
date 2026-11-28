@@ -119,9 +119,7 @@ public class ReportFileCard extends JPanel {
                 String msg = v == null ? "" : v.toString();
                 IssueService.IssueDto dto = rows.get(row).issue;
                 String prefix = "";
-                if (dto.status() != null && !dto.status().isEmpty()
-                        && !dto.status().equals("OPEN")
-                        && !dto.status().equals("REOPENED")) {
+                if (dto.isProcessed()) {
                     prefix = "<span style='color:#3fb950;font-weight:bold;'>["
                             + UiHelpers.escHtml(dto.status()) + "]</span> ";
                 }

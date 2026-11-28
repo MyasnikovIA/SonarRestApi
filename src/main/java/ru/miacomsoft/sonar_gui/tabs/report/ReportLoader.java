@@ -14,12 +14,14 @@ public class ReportLoader extends SwingWorker<List<IssueService.IssueDto>, Objec
     private final String customSev;
     private final String customQual;
     private final String customStatuses;
+    private final boolean hideProcessed; // НОВОЕ ПОЛЕ
 
     private final Consumer<List<IssueService.IssueDto>> onSuccess;
     private final Consumer<Throwable> onError;
     private final Consumer<Object[]> onProgress;
 
-    public ReportLoader(GuiContext ctx, String customSev, String customQual, String customStatuses,
+    // ОБНОВЛЕННЫЙ КОНСТРУКТОР
+    public ReportLoader(GuiContext ctx, String customSev, String customQual, String customStatuses, boolean hideProcessed,
                         Consumer<List<IssueService.IssueDto>> onSuccess,
                         Consumer<Throwable> onError,
                         Consumer<Object[]> onProgress) {
@@ -28,6 +30,7 @@ public class ReportLoader extends SwingWorker<List<IssueService.IssueDto>, Objec
         this.customSev = customSev;
         this.customQual = customQual;
         this.customStatuses = customStatuses;
+        this.hideProcessed = hideProcessed;
         this.onSuccess = onSuccess;
         this.onError = onError;
         this.onProgress = onProgress;
@@ -39,10 +42,9 @@ public class ReportLoader extends SwingWorker<List<IssueService.IssueDto>, Objec
         try {
             return issueService.fetchAllIssues(
                     ctx.getProject(), customSev, customQual,
-                    ctx.isHideProcessed(), customStatuses,
+                    hideProcessed, customStatuses, // ИСПОЛЬЗУЕМ ЛОКАЛЬНЫЙ ПАРАМЕТР
                     (current, total, message) -> {
                         if (isCancelled()) {
-                            // Если загрузчик отменён, прерываем выполнение (по возможности)
                             throw new RuntimeException("Отменено пользователем");
                         }
                         publish(new Object[]{current, total, message});

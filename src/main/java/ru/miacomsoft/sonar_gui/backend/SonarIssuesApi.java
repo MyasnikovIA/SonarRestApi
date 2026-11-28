@@ -20,7 +20,7 @@ import java.util.regex.Pattern;
 
 public class SonarIssuesApi {
 
-    public static final String ACTIVE_STATUSES = "OPEN,CONFIRMED,REOPENED";
+    public static final String ACTIVE_STATUSES = "OPEN,CONFIRMED,REOPENED,ACCEPTED";
     public static final int    FETCH_PAGE_SIZE = 3000;
     public static final String ALL_STATUSES = "";
 
@@ -29,8 +29,6 @@ public class SonarIssuesApi {
     private static final int SNIPPET_CONTEXT = 10;
     private static final int SAFETY_MAX_PAGES = 10_000;
     private static final int HARD_LIMIT_10000 = 10_000;
-    private static final int STATS_CHUNK_SIZE = 3_000;
-    private static final double FACET_COVERAGE_THRESHOLD = 0.9;
 
     private static final Set<String> DEFAULT_MQR_STATUSES = Set.of(
             "OPEN", "CONFIRMED", "FALSE_POSITIVE", "ACCEPTED", "FIXED"
@@ -86,16 +84,22 @@ public class SonarIssuesApi {
         public BatchLimitExceededException(String msg) { super(msg); }
     }
 
+    // ИСПРАВЛЕННЫЙ МЕТОД emitBatch
     private static void emitBatch(FetchProgressListener listener,
                                   int current, int total, String context) {
         if (listener == null) return;
-        int safeTotal  = Math.max(1, total);
-        int batchNum   = Math.max(1, (current + BATCH_SIZE - 1) / BATCH_SIZE);
-        int batchTotal = Math.max(1, (safeTotal + BATCH_SIZE - 1) / BATCH_SIZE);
-        String msg = String.format("%s — пакет %d/%d, загружено %d/%d",
-                context, batchNum, batchTotal, current, safeTotal);
-        System.out.println("[SonarIssuesApi] " + msg);
-        listener.onProgress(current, safeTotal, msg);
+        if (total > 0) {
+            int batchNum   = Math.max(1, (current + BATCH_SIZE - 1) / BATCH_SIZE);
+            int batchTotal = Math.max(1, (total + BATCH_SIZE - 1) / BATCH_SIZE);
+            String msg = String.format("%s — пакет %d/%d, загружено %d/%d",
+                    context, batchNum, batchTotal, current, total);
+            System.out.println("[SonarIssuesApi] " + msg);
+            listener.onProgress(current, total, msg);
+        } else {
+            String msg = String.format("%s — загружено %d (всего неизвестно)", context, current);
+            System.out.println("[SonarIssuesApi] " + msg);
+            listener.onProgress(current, 0, msg);
+        }
     }
 
     private static String normalizeJsonQuotes(String msg) {
@@ -316,7 +320,6 @@ public class SonarIssuesApi {
         int page = 1;
         int total = -1;
         while (total < 0 || out.size() < total) {
-            // СТРОГАЯ ЗАЩИТА: Если следующая страница превысит 10000, принудительно вызываем исключение ДО запроса
             if (out.size() >= HARD_LIMIT_10000 || (page - 1) * effectivePsLimit >= HARD_LIMIT_10000) {
                 throw new BatchLimitExceededException("Can return only the first 10000 results.");
             }
@@ -381,6 +384,7 @@ public class SonarIssuesApi {
         return out;
     }
 
+    // ИСПРАВЛЕННЫЙ МЕТОД fetchAllByFiles
     private List<Issue> fetchAllByFiles(String statuses, String impactSeverity, String quality,
                                         int grandFetched, int grandTotal,
                                         FetchProgressListener listener) throws Exception {
@@ -388,26 +392,30 @@ public class SonarIssuesApi {
         System.out.println("[SonarIssuesApi] Загрузка разбита на файлы. Всего файлов: " + files.size());
         List<Issue> out = new ArrayList<>();
         int batchSize = 20;
-        int totalBatches = (files.size() + batchSize - 1) / batchSize;
-        for (int i = 0; i < files.size(); i += batchSize) {
+        int totalFiles = files.size();
+
+        for (int i = 0; i < totalFiles; i += batchSize) {
             int batchIdx = i / batchSize + 1;
-            List<String> batch = files.subList(i, Math.min(i + batchSize, files.size()));
+            int totalBatches = (totalFiles + batchSize - 1) / batchSize;
+            List<String> batch = files.subList(i, Math.min(i + batchSize, totalFiles));
             String components = String.join(",", batch);
 
-            emitBatch(listener, grandFetched + out.size(),
-                    grandTotal > 0 ? grandTotal : -1,
+            // Отправляем прогресс по количеству обработанных файлов
+            emitBatch(listener, i + batch.size(), totalFiles,
                     String.format("Файлы %d/%d (пакет %d/%d)",
-                            Math.min(i + batch.size(), files.size()),
-                            files.size(), batchIdx, totalBatches));
+                            Math.min(i + batch.size(), totalFiles),
+                            totalFiles, batchIdx, totalBatches));
 
             try {
+                // Передаем null, чтобы не перебивать общий прогресс файлов
                 out.addAll(fetchAllByComponents(statuses, impactSeverity, quality, components,
-                        grandFetched + out.size(), grandTotal, listener));
+                        grandFetched + out.size(), grandTotal, null));
             } catch (BatchLimitExceededException e) {
                 System.out.println("[SonarIssuesApi] Лимит для пакета файлов. Разбиваем на отдельные файлы...");
                 for (String singleFile : batch) {
+                    // И здесь тоже null
                     out.addAll(fetchAllByComponents(statuses, impactSeverity, quality, singleFile,
-                            grandFetched + out.size(), grandTotal, listener));
+                            grandFetched + out.size(), grandTotal, null));
                 }
             }
         }
@@ -444,7 +452,6 @@ public class SonarIssuesApi {
                 ? components.substring(0, 40) + "…" : components);
 
         while (total < 0 || out.size() < total) {
-            // СТРОГАЯ ЗАЩИТА: Если следующая страница превысит 10000, принудительно вызываем исключение ДО запроса
             if (out.size() >= HARD_LIMIT_10000 || (page - 1) * effectivePsLimit >= HARD_LIMIT_10000) {
                 throw new BatchLimitExceededException("Can return only the first 10000 results.");
             }
@@ -472,8 +479,12 @@ public class SonarIssuesApi {
                 for (int j = 0; j < arr.length(); j++) {
                     out.add(Issue.from(arr.getJSONObject(j), projectKey));
                 }
-                emitBatch(listener, grandFetched + out.size(),
-                        grandTotal > 0 ? grandTotal : total, context);
+
+                if (listener != null) {
+                    emitBatch(listener, grandFetched + out.size(),
+                            grandTotal > 0 ? grandTotal : total, context);
+                }
+
                 page++;
                 if (page > SAFETY_MAX_PAGES) break;
             } catch (BatchLimitExceededException e) {

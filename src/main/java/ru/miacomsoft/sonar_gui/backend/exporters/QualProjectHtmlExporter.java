@@ -52,7 +52,7 @@ public class QualProjectHtmlExporter {
             Map<String, Map<String, Map<String, List<Issue>>>> structured = new TreeMap<>();
 
             for (Issue it : uniqueIssues.values()) {
-                if (it.tags != null && it.tags.contains("not-require-fix")) continue;
+                // УДАЛЕНА ЖЕСТКАЯ ПРОВЕРКА not-require-fix
 
                 if (it.impacts != null && !it.impacts.isEmpty()) {
                     for (Issue.Impact im : it.impacts) {

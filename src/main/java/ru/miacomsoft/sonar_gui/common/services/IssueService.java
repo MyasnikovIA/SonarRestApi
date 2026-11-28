@@ -32,7 +32,9 @@ public class IssueService {
         public boolean isProcessed() {
             return status != null
                     && !status.equalsIgnoreCase("OPEN")
-                    && !status.equalsIgnoreCase("REOPENED");
+                    && !status.equalsIgnoreCase("CONFIRMED")
+                    && !status.equalsIgnoreCase("REOPENED")
+                    && !status.equalsIgnoreCase("ACCEPTED");
         }
     }
 
@@ -44,8 +46,6 @@ public class IssueService {
     public IssueService(GuiContext ctx) {
         this.ctx = ctx;
     }
-
-    // ============ PER-FILE ============
 
     public PerFilePage fetchPerFilePage(String project, String sev, String qual,
                                         boolean hideProcessed,
@@ -83,8 +83,6 @@ public class IssueService {
         return new PerFilePage(total, groups);
     }
 
-    // ============ REPORT (все issues с чанкованием и прогрессом) ============
-
     public List<IssueDto> fetchAllIssues(String project, String sev, String qual,
                                          boolean hideProcessed, String statusesStr,
                                          FetchProgress progress) throws Exception {
@@ -117,8 +115,6 @@ public class IssueService {
             throw e;
         }
     }
-
-    // ============ INTERNAL ============
 
     private IssueDto toDto(Issue issue) {
         String sev = (issue.impactSeverity != null && !issue.impactSeverity.isEmpty())
